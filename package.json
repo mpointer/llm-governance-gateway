@@ -1,0 +1,51 @@
+{
+  "name": "llm-governance-gateway",
+  "version": "0.1.0",
+  "description": "Governed structured-output LLM pipeline: rate limit → spend caps (per-user + global circuit breaker) → cache → provider-chain failover → Zod validation → usage logging → LLM-judge, with a deterministic mock provider for CI.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "llm",
+    "ai-gateway",
+    "spend-cap",
+    "rate-limit",
+    "structured-output",
+    "zod",
+    "vercel-ai-sdk",
+    "llm-judge",
+    "cost-governance"
+  ],
+  "dependencies": {
+    "@ai-sdk/anthropic": "^2.0.81",
+    "@ai-sdk/google": "^2.0.74",
+    "@ai-sdk/openai": "^2.0.106",
+    "ai": "^5.0.199",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
