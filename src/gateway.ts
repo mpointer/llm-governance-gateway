@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
-import { generateObject } from "ai";
+import { generateObject, generateText } from "ai";
 import type { LanguageModel } from "ai";
 import type { z } from "zod";
 import { backoffMs, isRetryable } from "./backoff.js";
 import { RateLimitError, SpendCapError } from "./errors.js";
-import { ProviderRegistry, type ChainLink } from "./providers.js";
+import { ProviderRegistry, parseModelId, type ChainLink } from "./providers.js";
+import { TaskRouter } from "./tasks.js";
 import { missingPlaceholders, renderTemplate } from "./template.js";
 import type {
   GatewayConfig,
@@ -94,6 +95,12 @@ export interface RunStructuredOptions<I, O> {
    * most capable. Omit to use each chain link's configured model as-is.
    */
   tier?: "fast" | "power";
+  /**
+   * Named task from GatewayConfig.tasks — routes to the task's model
+   * (admin-store override → code default). Precedence when set:
+   * modelConfig.getOverride() > task > chain > static default.
+   */
+  task?: string;
   userId?: string;
   anonKey?: string;
   route?: string;
@@ -124,7 +131,8 @@ export class Gateway {
   private readonly prompts;
   private readonly promptDefaults: PromptDefault[];
   private readonly modelConfig;
-  private readonly registry: ProviderRegistry;
+  readonly tasks?: TaskRouter;
+  readonly registry: ProviderRegistry;
   private readonly caps;
   private readonly mock: boolean;
   private readonly appId: string | null;
@@ -139,6 +147,7 @@ export class Gateway {
     this.promptDefaults = cfg.promptDefaults ?? [];
     this.prompts = cfg.prompts ?? new MemoryPromptStore();
     this.modelConfig = cfg.modelConfig;
+    this.tasks = cfg.tasks ? new TaskRouter(cfg.tasks) : undefined;
     this.registry = new ProviderRegistry(cfg.providers);
     this.caps = cfg.caps ?? {};
     this.mock = cfg.mock ?? false;
@@ -373,11 +382,33 @@ export class Gateway {
     } else {
       // Resolution order:
       //   a. modelConfig.getOverride() — admin hard-pin, no failover
-      //   b. modelConfig.getChain()    — primary → fallback → ...
-      //   c. Static/env default        — no dynamic config present
+      //   b. task routing              — per-task override/default
+      //   c. modelConfig.getChain()    — primary → fallback → ...
+      //   d. Static/env default        — no dynamic config present
       const adminOverride = (await this.modelConfig?.getOverride()) ?? null;
 
-      if (adminOverride) {
+      if (!adminOverride && opts.task) {
+        if (!this.tasks) {
+          throw new Error(
+            `runStructured received task "${opts.task}" but GatewayConfig.tasks is not configured.`,
+          );
+        }
+        const resolved = await this.tasks.modelForTask(opts.task);
+        const lm = this.registry.buildLanguageModel(resolved.provider, resolved.model);
+        if (!lm) {
+          throw new Error(
+            `Task "${opts.task}" routes to "${resolved.provider}/${resolved.model}" but that provider has no API key.`,
+          );
+        }
+        const start = Date.now();
+        const result = await attemptGenerate(lm, opts.schema, prompt, promptConfig.temperature);
+        object = result.object;
+        inputTokens = result.usage.inputTokens;
+        outputTokens = result.usage.outputTokens;
+        provider = resolved.provider;
+        model = resolved.model;
+        durationMs = Date.now() - start;
+      } else if (adminOverride) {
         const resolved = this.registry.resolveDefault({
           provider: adminOverride.provider,
           model: promptConfig.modelHint ?? adminOverride.model,
@@ -484,4 +515,129 @@ export class Gateway {
 
     return { object, traceId, cacheHit: false, usageLogId };
   }
+
+  /**
+   * Admin prompt-library "test run": renders the template with sample
+   * variables, executes ONE plain-text generation against the resolved model,
+   * and logs the spend (route "admin:prompt-test") so test traffic shows up
+   * in the cost dashboard instead of hiding from it. Deliberately bypasses
+   * the response cache (a test must hit the model) but not usage logging.
+   * Bypasses rate limit and spend caps too — it's an admin tool.
+   */
+  async runPromptTest(opts: PromptTestOptions): Promise<PromptTestResult> {
+    const traceId = randomUUID();
+    const prompt = renderTemplate(opts.body, opts.variables);
+
+    let text: string;
+    let provider: string;
+    let model: string;
+    let inputTokens: number;
+    let outputTokens: number;
+    let durationMs: number;
+
+    if (this.mock) {
+      text = `[mock] ${prompt.slice(0, 200)}`;
+      provider = "mock";
+      model = "mock";
+      inputTokens = Math.ceil(prompt.length / 4);
+      outputTokens = Math.ceil(text.length / 4);
+      durationMs = 0;
+    } else {
+      // Routing: explicit model id > task > static/env default.
+      let resolvedProvider;
+      let resolvedModel: string;
+      let lm: LanguageModel | undefined;
+      if (opts.model) {
+        const parsed = parseModelId(opts.model);
+        resolvedProvider = parsed.provider;
+        resolvedModel = parsed.model;
+        lm = this.registry.buildLanguageModel(parsed.provider, parsed.model) ?? undefined;
+      } else if (opts.task && this.tasks) {
+        const t = await this.tasks.modelForTask(opts.task);
+        resolvedProvider = t.provider;
+        resolvedModel = t.model;
+        lm = this.registry.buildLanguageModel(t.provider, t.model) ?? undefined;
+      } else {
+        const r = this.registry.resolveDefault();
+        resolvedProvider = r.provider;
+        resolvedModel = r.model;
+        lm = r.languageModel;
+      }
+      if (!lm) {
+        throw new Error(
+          `Prompt test: no API key for provider "${resolvedProvider}".`,
+        );
+      }
+      const start = Date.now();
+      const res = await generateText({
+        model: lm,
+        prompt,
+        ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+        abortSignal: AbortSignal.timeout(60_000),
+      });
+      text = res.text;
+      inputTokens = res.usage.inputTokens ?? 0;
+      outputTokens = res.usage.outputTokens ?? 0;
+      provider = resolvedProvider;
+      model = resolvedModel;
+      durationMs = Date.now() - start;
+    }
+
+    const costCents = this.registry.estimateCostCents(model, inputTokens, outputTokens);
+    const usageLogId = await this.logUsage({
+      userId: opts.userId ?? null,
+      route: "admin:prompt-test",
+      promptSlug: opts.slug ?? null,
+      provider,
+      model,
+      inputTokens,
+      outputTokens,
+      estimatedCostCents: costCents,
+      cacheHit: false,
+      traceId,
+      durationMs,
+      inputText: prompt,
+      outputText: text,
+    });
+
+    return {
+      text,
+      prompt,
+      provider,
+      model,
+      inputTokens,
+      outputTokens,
+      costCents,
+      durationMs,
+      usageLogId,
+    };
+  }
+}
+
+export interface PromptTestOptions {
+  /** Library slug being tested (usage-log attribution only). */
+  slug?: string;
+  /** Template body to test — may include unsaved editor changes. */
+  body: string;
+  /** {{placeholder}} sample values supplied by the admin. */
+  variables: Record<string, string>;
+  /** Explicit (possibly prefixed) model id; beats task and default. */
+  model?: string;
+  /** Route via task registry when no explicit model is given. */
+  task?: string;
+  temperature?: number;
+  /** Admin running the test — attributed in the usage log. */
+  userId?: string;
+}
+
+export interface PromptTestResult {
+  text: string;
+  prompt: string;
+  provider: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  costCents: number;
+  durationMs: number;
+  usageLogId: string | number;
 }

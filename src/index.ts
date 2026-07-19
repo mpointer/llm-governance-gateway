@@ -3,9 +3,24 @@ export {
   cacheKey,
   type RunStructuredOptions,
   type RunStructuredResult,
+  type PromptTestOptions,
+  type PromptTestResult,
 } from "./gateway.js";
 export { RateLimitError, SpendCapError } from "./errors.js";
-export { ProviderRegistry, type ResolvedModel, type ChainLink } from "./providers.js";
+export {
+  ProviderRegistry,
+  parseModelId,
+  PROVIDER_IDS,
+  type ResolvedModel,
+  type ChainLink,
+} from "./providers.js";
+export { TaskRouter, type ResolvedTaskModel } from "./tasks.js";
+export {
+  listProviderModels,
+  listAllProviderModels,
+  __resetModelsListCache,
+  type ProviderModels,
+} from "./discovery.js";
 export { renderTemplate, missingPlaceholders } from "./template.js";
 export {
   isRetryable,
@@ -44,6 +59,8 @@ export type {
   RateLimiter,
   RateLimitResult,
   ModelConfigStore,
+  TaskRoutingConfig,
+  TaskOverrideStore,
   ChainLinkConfig,
   ProviderId,
   ProviderConfig,

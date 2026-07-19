@@ -7,7 +7,7 @@ rate limit → spend caps (per-user + global circuit breaker) → cache
 → provider-chain failover → Zod-validated generateObject → usage log → LLM-judge
 ```
 
-Built on the [Vercel AI SDK](https://sdk.vercel.ai) (Anthropic, Google, OpenAI). Storage is pluggable — memory adapters work out of the box; bring your own database and Redis for production.
+Built on the [Vercel AI SDK](https://sdk.vercel.ai) (Anthropic, Google, OpenAI, OpenRouter, Venice). Storage is pluggable — memory adapters work out of the box; bring your own database and Redis for production.
 
 ## Why
 
@@ -16,6 +16,9 @@ Built on the [Vercel AI SDK](https://sdk.vercel.ai) (Anthropic, Google, OpenAI).
 - **Deterministic CI.** Mock mode replaces providers with registered responders — your AI-dependent test suite runs offline with zero keys.
 - **Prompt library pattern.** Store-as-override, code-as-fallback: admins can edit prompts at runtime; a broken edit (missing `{{placeholder}}`) falls back to the code default instead of silently sending a malformed prompt.
 - **Judge + telemetry.** Optional per-call rubric scoring and full usage accounting (tokens, cost, latency, trace IDs), with an optional at-rest encryption hook for logged prompt/output snapshots.
+- **Task-based routing.** Name your call sites (`"enrich"`, `"dedup_judge"`, `"editorial"`), assign each a default model in code, and let an admin store override models per task at runtime — with TTL caching and graceful degradation to code defaults when the store is down.
+- **Live model discovery.** `listAllProviderModels()` queries each vendor's models API for every provider with an API key configured; keyless or erroring providers fall back to static lists so admin UIs stay usable offline.
+- **Prompt test runs.** `runPromptTest()` executes an edited (even unsaved) prompt body with sample variables against any model, bypassing the cache but *not* usage logging — test spend shows up in the cost dashboard under `admin:prompt-test`.
 
 ## Quickstart
 
@@ -89,6 +92,51 @@ const gw = new Gateway({
 
 // tier: "fast" re-routes every chain link to its provider's cheapest model
 await gw.runStructured({ ...opts, tier: "fast" });
+```
+
+### Task-based routing
+
+Model ids use a scheme prefix; bare ids are Anthropic: `"claude-opus-4-8"`, `"openai:gpt-4.1"`, `"google:gemini-2.5-pro"`, `"openrouter:meta-llama/llama-3.3-70b"`, `"venice:mistral-31-24b"`.
+
+```ts
+const gw = new Gateway({
+  usage,
+  tasks: {
+    defaults: {
+      enrich: "claude-haiku-4-5-20251001",   // high volume, low reasoning
+      editorial: "claude-opus-4-8",           // long-form quality
+      translate: "google:gemini-2.0-flash",
+    },
+    store: myAdminOverrideStore, // optional: { getOverrides(): Promise<Record<string,string>> }
+  },
+});
+
+await gw.runStructured({ ...opts, task: "enrich" });
+```
+
+Precedence: `modelConfig.getOverride()` → `task` → chain → static default.
+
+### Model discovery
+
+```ts
+import { listAllProviderModels } from "llm-governance-gateway";
+
+// Every provider with a key: live model list from the vendor's models API.
+const models = await listAllProviderModels(gw.registry);
+// [{ provider: "anthropic", models: [...], source: "api", configured: true }, ...]
+```
+
+### Prompt test runs
+
+```ts
+const res = await gw.runPromptTest({
+  slug: "summarize",
+  body: "Summarize as haiku:\n\n{{text}}",   // unsaved editor draft
+  variables: { text: "sample input" },
+  model: "openai:gpt-4.1-mini",              // or task: "enrich", or omit for default
+  userId: "admin-id",
+});
+// res.text, res.costCents, res.durationMs — spend logged as route "admin:prompt-test"
 ```
 
 ## Design notes

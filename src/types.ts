@@ -95,7 +95,7 @@ export interface RateLimiter {
   limit(identifier: string): Promise<RateLimitResult>;
 }
 
-export type ProviderId = "anthropic" | "google" | "openai";
+export type ProviderId = "anthropic" | "google" | "openai" | "openrouter" | "venice";
 
 export interface ChainLinkConfig {
   provider: ProviderId;
@@ -143,6 +143,29 @@ export interface SpendCapConfig {
   globalDailyCents?: number;
 }
 
+/**
+ * Optional dynamic per-task model overrides (e.g. an admin "AI & Cost" table).
+ */
+export interface TaskOverrideStore {
+  /** task name → model id ("claude-sonnet-4-6", "openai:gpt-4.1", ...). */
+  getOverrides(): Promise<Record<string, string>>;
+}
+
+/**
+ * Task-based routing: name the call sites ("enrich", "summarize", "judge"),
+ * assign each a default model in code, and optionally let an admin store
+ * override models per task at runtime.
+ */
+export interface TaskRoutingConfig {
+  /** task name → default model id. Bare ids are Anthropic; prefix others ("openai:", "google:", "openrouter:", "venice:"). */
+  defaults: Record<string, string>;
+  /** Human labels for admin UIs. */
+  labels?: Record<string, string>;
+  store?: TaskOverrideStore;
+  /** Override cache TTL ms (default 30s). */
+  overrideTtlMs?: number;
+}
+
 export interface GatewayConfig {
   usage: UsageStore;
   cache?: CacheStore;
@@ -150,6 +173,7 @@ export interface GatewayConfig {
   prompts?: PromptStore;
   promptDefaults?: PromptDefault[];
   modelConfig?: ModelConfigStore;
+  tasks?: TaskRoutingConfig;
   providers?: ProviderConfig;
   caps?: SpendCapConfig;
   /** Deterministic mock mode: no provider calls; responders supply outputs. */

@@ -22,9 +22,46 @@ export interface ChainLink {
   languageModel: LanguageModel;
 }
 
+export const PROVIDER_IDS: ProviderId[] = [
+  "anthropic",
+  "google",
+  "openai",
+  "openrouter",
+  "venice",
+];
+
+// OpenAI-compatible endpoints for aggregator providers.
+const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
+const VENICE_BASE = "https://api.venice.ai/api/v1";
+
+const ENV_KEYS: Record<ProviderId, string> = {
+  anthropic: "ANTHROPIC_API_KEY",
+  google: "GOOGLE_API_KEY",
+  openai: "OPENAI_API_KEY",
+  openrouter: "OPENROUTER_API_KEY",
+  venice: "VENICE_API_KEY",
+};
+
+/**
+ * Model-id scheme (LocalNewsBuddy convention): a bare id is Anthropic;
+ * other providers use a scheme prefix — "openai:gpt-4.1",
+ * "google:gemini-2.5-pro", "openrouter:meta-llama/llama-3.3-70b",
+ * "venice:mistral-31-24b".
+ */
+export function parseModelId(id: string): { provider: ProviderId; model: string } {
+  const idx = id.indexOf(":");
+  if (idx > 0) {
+    const prefix = id.slice(0, idx);
+    if ((PROVIDER_IDS as string[]).includes(prefix)) {
+      return { provider: prefix as ProviderId, model: id.slice(idx + 1) };
+    }
+  }
+  return { provider: "anthropic", model: id };
+}
+
 // fast = cheapest/quickest tier, power = most capable. Override via
-// ProviderConfig.tiers as models evolve.
-const BUILTIN_TIERS: Record<ProviderId, { fast: string; power: string }> = {
+// ProviderConfig.tiers as models evolve. Aggregators have no built-in tiers.
+const BUILTIN_TIERS: Partial<Record<ProviderId, { fast: string; power: string }>> = {
   anthropic: { fast: "claude-haiku-4-5-20251001", power: "claude-sonnet-4-6" },
   google: { fast: "gemini-2.0-flash", power: "gemini-2.5-pro" },
   openai: { fast: "gpt-4.1-mini", power: "gpt-4.1" },
@@ -55,16 +92,30 @@ export class ProviderRegistry {
   }
 
   apiKey(provider: ProviderId): string | undefined {
-    const fromCfg = this.cfg.apiKeys?.[provider];
-    if (fromCfg) return fromCfg;
-    switch (provider) {
-      case "anthropic":
-        return process.env.ANTHROPIC_API_KEY;
-      case "google":
-        return process.env.GOOGLE_API_KEY;
-      case "openai":
-        return process.env.OPENAI_API_KEY;
-    }
+    return this.cfg.apiKeys?.[provider] ?? process.env[ENV_KEYS[provider]] ?? undefined;
+  }
+
+  /** Providers that currently have an API key resolvable (config or env). */
+  configuredProviders(): ProviderId[] {
+    return PROVIDER_IDS.filter((p) => !!this.apiKey(p));
+  }
+
+  /**
+   * Known model ids per provider from the static maps (tier routing +
+   * pricing). Fallback when a provider's models API is unreachable.
+   */
+  knownModels(provider: ProviderId): string[] {
+    const prefixes: Partial<Record<ProviderId, string>> = {
+      anthropic: "claude",
+      google: "gemini",
+      openai: "gpt",
+    };
+    const prefix = prefixes[provider];
+    const fromTiers = Object.values(BUILTIN_TIERS[provider] ?? {});
+    const fromPricing = prefix
+      ? Object.keys(this.pricing).filter((m) => m.startsWith(prefix))
+      : [];
+    return Array.from(new Set([...fromTiers, ...fromPricing]));
   }
 
   tierModel(provider: ProviderId, tier: "fast" | "power"): string | undefined {
@@ -85,9 +136,20 @@ export class ProviderRegistry {
         return createGoogleGenerativeAI({ apiKey: key })(model);
       case "openai":
         return createOpenAI({ apiKey: key })(model);
+      case "openrouter":
+        return createOpenAI({ apiKey: key, baseURL: OPENROUTER_BASE }).chat(model);
+      case "venice":
+        return createOpenAI({ apiKey: key, baseURL: VENICE_BASE }).chat(model);
       default:
         return null;
     }
+  }
+
+  /** Resolve a (possibly prefixed) model id to a ready LanguageModel. */
+  resolveModelId(id: string): ResolvedModel {
+    const { provider, model } = parseModelId(id);
+    const lm = this.buildLanguageModel(provider, model);
+    return { provider, model, languageModel: lm ?? undefined };
   }
 
   resolveDefault(override?: { provider?: ProviderId; model?: string }): ResolvedModel {
