@@ -10,6 +10,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./drizzle-sqlite": {
+      "types": "./dist/adapters/drizzle-sqlite.d.ts",
+      "import": "./dist/adapters/drizzle-sqlite.js"
+    },
+    "./drizzle-pg": {
+      "types": "./dist/adapters/drizzle-pg.d.ts",
+      "import": "./dist/adapters/drizzle-pg.js"
     }
   },
   "files": [
@@ -40,8 +48,19 @@
     "ai": "^5.0.199",
     "zod": "^4.4.3"
   },
+  "peerDependencies": {
+    "drizzle-orm": ">=0.40.0"
+  },
+  "peerDependenciesMeta": {
+    "drizzle-orm": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@types/node": "^26.1.1",
+    "@types/sql.js": "^1.4.9",
+    "drizzle-orm": "^0.45.2",
+    "sql.js": "^1.13.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
   },

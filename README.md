@@ -58,7 +58,21 @@ gw.registerMockResponder("summarize", () => ({ summary: "stub" }));
 
 ### Production storage
 
-Implement `UsageStore` over your database (one table for usage, one for cap events, one for judge scores — see `src/types.ts`), and pass Redis-backed cache/rate limiting:
+Reference `UsageStore` implementations ship for Drizzle ORM (optional peer dependency):
+
+```ts
+// SQLite / libSQL / Turso (also better-sqlite3, D1, sql.js)
+import { DrizzleSqliteUsageStore, ensureTables } from "llm-governance-gateway/drizzle-sqlite";
+const store = new DrizzleSqliteUsageStore(db);
+await ensureTables(db); // dev quick-start; use drizzle-kit migrations in prod
+
+// PostgreSQL (node-postgres, postgres.js, neon, vercel)
+import { DrizzlePgUsageStore } from "llm-governance-gateway/drizzle-pg";
+```
+
+Both export their table definitions (`aiUsageLog`, `spendCapEvents`, `aiJudgeScores`) — re-export them from your schema file so `drizzle-kit generate` produces migrations. Or implement `UsageStore` yourself over any database (four methods — see `src/types.ts`).
+
+Pass Redis-backed cache/rate limiting for multi-instance deployments:
 
 ```ts
 import { Redis } from "@upstash/redis";
