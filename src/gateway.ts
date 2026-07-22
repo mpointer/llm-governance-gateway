@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { generateObject, generateText } from "ai";
-import type { LanguageModel } from "ai";
+import type { LanguageModel, Schema } from "ai";
 import type { z } from "zod";
 import { backoffMs, isRetryable } from "./backoff.js";
 import { RateLimitError, SpendCapError } from "./errors.js";
@@ -37,10 +37,18 @@ interface AttemptResult<O> {
   usage: { inputTokens: number; outputTokens: number };
 }
 
+/** Zod schema or a raw JSON Schema wrapped with ai's jsonSchema() — the
+ *  latter is what remote HTTP callers send (they keep Zod client-side). */
+export type OutputSchema<O> = z.ZodType<O> | Schema<O>;
+
+function isZodSchema<O>(s: OutputSchema<O>): s is z.ZodType<O> {
+  return typeof (s as z.ZodType<O>).parse === "function";
+}
+
 // Single-link generate with 60s timeout and up to 2 retries on the same model.
 async function attemptGenerate<O>(
   model: LanguageModel,
-  zodSchema: z.ZodType<O>,
+  zodSchema: OutputSchema<O>,
   prompt: string,
   temperature?: number,
 ): Promise<AttemptResult<O>> {
@@ -76,8 +84,18 @@ interface PromptConfig {
 
 export interface RunStructuredOptions<I, O> {
   slug: string;
-  schema: z.ZodType<O>;
+  schema: OutputSchema<O>;
   input: I;
+  /**
+   * Inline prompt body — skips the prompt store/defaults lookup entirely
+   * (still {{variable}}-rendered). Used by HTTP callers that render or manage
+   * prompts client-side; `slug` then only attributes the usage log.
+   */
+  promptBody?: string;
+  /** Overrides the stored/default prompt's temperature when set. */
+  temperature?: number;
+  /** Per-call app tag for the usage log; defaults to GatewayConfig.appId. */
+  app?: string;
   /**
    * Values substituted into the prompt body's {{placeholders}} at call time.
    * Conditional blocks are passed as pre-rendered "section" variables (""
@@ -271,7 +289,7 @@ export class Gateway {
   // only after all links are exhausted.
   private async callWithChain<O>(
     chain: ChainLink[],
-    zodSchema: z.ZodType<O>,
+    zodSchema: OutputSchema<O>,
     prompt: string,
     temperature?: number,
   ) {
@@ -299,12 +317,12 @@ export class Gateway {
     throw lastErr ?? new Error("AI chain exhausted with no result");
   }
 
-  private async logUsage(f: Omit<UsageEntry, "app" | "createdAt">): Promise<string | number> {
+  private async logUsage(f: Omit<UsageEntry, "createdAt">): Promise<string | number> {
     const enc = (t: string | null) =>
       t != null && this.encrypt ? this.encrypt(t) : t;
     return this.usage.logUsage({
       ...f,
-      app: this.appId,
+      app: f.app ?? this.appId,
       // Prompts and outputs can carry user PII. When an encrypt hook is
       // configured, the encrypted-at-rest guarantee holds for telemetry too.
       inputText: enc(truncate(f.inputText)),
@@ -339,6 +357,7 @@ export class Gateway {
       const cached = await this.cache.get<O>(key);
       if (cached !== undefined) {
         const usageLogId = await this.logUsage({
+          app: opts.app,
           userId: opts.userId ?? null,
           route: opts.route ?? null,
           promptSlug: opts.slug,
@@ -354,9 +373,12 @@ export class Gateway {
       }
     }
 
-    // 4. Load prompt
-    const promptConfig = await this.loadPrompt(opts.slug);
+    // 4. Load prompt (inline promptBody skips the store/defaults lookup)
+    const promptConfig: PromptConfig = opts.promptBody
+      ? { body: opts.promptBody }
+      : await this.loadPrompt(opts.slug);
     const prompt = renderTemplate(promptConfig.body, opts.variables(opts.input));
+    const temperature = opts.temperature ?? promptConfig.temperature;
 
     // 5. Generate
     let object: O;
@@ -373,7 +395,7 @@ export class Gateway {
           `Mock mode is on but no responder registered for "${opts.slug}".`,
         );
       }
-      object = opts.schema.parse(responder(opts.input));
+      { const raw = responder(opts.input); object = isZodSchema(opts.schema) ? opts.schema.parse(raw) : (raw as O); }
       inputTokens = Math.ceil(prompt.length / 4);
       outputTokens = Math.ceil(JSON.stringify(object).length / 4);
       provider = "mock";
@@ -401,7 +423,7 @@ export class Gateway {
           );
         }
         const start = Date.now();
-        const result = await attemptGenerate(lm, opts.schema, prompt, promptConfig.temperature);
+        const result = await attemptGenerate(lm, opts.schema, prompt, temperature);
         object = result.object;
         inputTokens = result.usage.inputTokens;
         outputTokens = result.usage.outputTokens;
@@ -421,7 +443,7 @@ export class Gateway {
           resolved.languageModel,
           opts.schema,
           prompt,
-          promptConfig.temperature,
+          temperature,
         );
         object = result.object;
         inputTokens = result.usage.inputTokens;
@@ -454,7 +476,7 @@ export class Gateway {
             resolved.languageModel,
             opts.schema,
             prompt,
-            promptConfig.temperature,
+            temperature,
           );
           object = result.object;
           inputTokens = result.usage.inputTokens ?? 0;
@@ -467,7 +489,7 @@ export class Gateway {
             chain,
             opts.schema,
             prompt,
-            promptConfig.temperature,
+            temperature,
           );
           object = gen.object;
           inputTokens = gen.inputTokens;
@@ -484,6 +506,7 @@ export class Gateway {
 
     // 7. Usage log
     const usageLogId = await this.logUsage({
+      app: opts.app,
       userId: opts.userId ?? null,
       route: opts.route ?? null,
       promptSlug: opts.slug,

@@ -153,6 +153,27 @@ const res = await gw.runPromptTest({
 // res.text, res.costCents, res.durationMs — spend logged as route "admin:prompt-test"
 ```
 
+### HTTP service (multi-app deployments)
+
+Mount the pipeline as a service so apps in any language share one enforcement point. Hono (optional peer dep) runs on Cloudflare Workers, Node, Bun, and Deno:
+
+```ts
+import { createGatewayApp } from "llm-governance-gateway/http";
+
+const app = createGatewayApp({
+  gateway: gw,
+  auth: { [env.APP_A_TOKEN]: "app-a", [env.APP_B_TOKEN]: "app-b" }, // token → appId tag
+  adminTokens: [env.ADMIN_TOKEN], // gates POST /prompt-test
+});
+
+export default app; // Cloudflare Workers
+// Node: import { serve } from "@hono/node-server"; serve(app);
+```
+
+Endpoints: `POST /run` (structured generation — send your Zod schema as JSON Schema via `z.toJSONSchema()`), `GET /models`, `GET /tasks`, `POST /prompt-test`, `GET /health`. Errors map to `429` (rate limit), `402` (spend cap — global-breaker responses say "at capacity", not "over your limit"), `400` (caller errors), `401`/`403`.
+
+`POST /run` supports both prompt modes: `variables` renders the server-side prompt library entry for `slug`; `promptBody` sends a client-rendered template instead.
+
 ## Design notes
 
 - **Fail-open rate limiting, fail-closed spend caps.** A Redis blip should not 500 every AI call — the limiter fails open with an alert, while the store-backed spend cap (independent of Redis) still bounds cost.

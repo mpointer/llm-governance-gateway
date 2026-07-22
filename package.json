@@ -18,6 +18,10 @@
     "./drizzle-pg": {
       "types": "./dist/adapters/drizzle-pg.d.ts",
       "import": "./dist/adapters/drizzle-pg.js"
+    },
+    "./http": {
+      "types": "./dist/http/app.d.ts",
+      "import": "./dist/http/app.js"
     }
   },
   "files": [
@@ -49,10 +53,14 @@
     "zod": "^4.4.3"
   },
   "peerDependencies": {
-    "drizzle-orm": ">=0.40.0"
+    "drizzle-orm": ">=0.40.0",
+    "hono": ">=4.0.0"
   },
   "peerDependenciesMeta": {
     "drizzle-orm": {
+      "optional": true
+    },
+    "hono": {
       "optional": true
     }
   },
@@ -60,6 +68,7 @@
     "@types/node": "^26.1.1",
     "@types/sql.js": "^1.4.9",
     "drizzle-orm": "^0.45.2",
+    "hono": "^4.6.0",
     "sql.js": "^1.13.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
