@@ -1,15 +1,21 @@
 # llm-governance-gateway
 
-A governed structured-output pipeline for LLM calls. Every call runs through:
+**The governance layer LLM proxies promised — as a TypeScript library you can read.**
+
+Every call runs through one governed pipeline:
 
 ```
 rate limit → spend caps (per-user + global circuit breaker) → cache
-→ provider-chain failover → Zod-validated generateObject → usage log → LLM-judge
+→ schema-validated provider failover → usage log → LLM-judge
 ```
 
-Built on the [Vercel AI SDK](https://sdk.vercel.ai) (Anthropic, Google, OpenAI, OpenRouter, Venice). Storage is pluggable — memory adapters work out of the box; bring your own database and Redis for production.
+No sidecar proxy to deploy. No hosted control plane. No sprawling dependency tree — five runtime deps (the [Vercel AI SDK](https://sdk.vercel.ai), three provider adapters, Zod), everything else optional peers. It runs *in your process*, enforces caps against *your* database, and the whole pipeline — caps, cache, failover, judge — runs deterministically in CI with zero API keys.
+
+Providers: Anthropic, Google, OpenAI, OpenRouter, Venice — plus bring-your-own AI SDK model (Azure, Bedrock, custom endpoints) in any failover chain.
 
 ## Why
+
+Spend controls in this space are usually observed (dashboards that tell you *after* the money is gone) or enforced by infrastructure you must operate and trust (proxies, gateways, hosted control planes). This library takes the third path: governance as code in your own runtime, checked before every call, type-safe from Zod schema to spend cap.
 
 - **Spend caps that actually hold.** Per-user daily caps plus an app-wide daily circuit breaker, checked against your usage store before every call. Unset ≠ uncapped: defaults are conservative, and only an explicit `0` opts out.
 - **Schema-validation-aware failover.** primary → fallback → backup providers, with 429/5xx-aware retries, `Retry-After` honoring, and equal-jitter backoff. When a model returns schema-invalid output, the validation error is fed back for one repair attempt, then the chain falls to the next provider — a different model often satisfies the schema where the first couldn't ([vercel/ai#9950](https://github.com/vercel/ai/issues/9950), [#9002](https://github.com/vercel/ai/issues/9002)). Chain links accept bring-your-own AI SDK models (Azure, Bedrock, custom base URLs).
