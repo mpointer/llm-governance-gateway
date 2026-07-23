@@ -14,6 +14,28 @@ export function isRetryable(err: unknown): boolean {
   return false;
 }
 
+/**
+ * Schema-validation failures from generateObject (model returned output that
+ * doesn't satisfy the schema, or unparseable JSON). These are NOT transient
+ * network errors — but they ARE model-specific: a different provider/model in
+ * the chain may well produce valid output. Detected by AI SDK error name so
+ * we don't couple to error-class identity across SDK versions; walks the
+ * cause chain because NoObjectGeneratedError wraps the underlying failure.
+ */
+export function isSchemaValidationError(err: unknown): boolean {
+  let cur: unknown = err;
+  for (let depth = 0; cur != null && depth < 5; depth++) {
+    if (
+      cur instanceof Error &&
+      /^AI_(NoObjectGenerated|TypeValidation|JSONParse)Error$/.test(cur.name)
+    ) {
+      return true;
+    }
+    cur = cur instanceof Error ? cur.cause : null;
+  }
+  return false;
+}
+
 // Honor a provider Retry-After header (seconds or HTTP-date) when present,
 // clamped to [0, MAX_DELAY_MS]. Returns null when no usable header is found.
 export function retryAfterMs(err: unknown): number | null {

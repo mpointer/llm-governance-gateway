@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { generateObject, generateText } from "ai";
 import type { LanguageModel, Schema } from "ai";
 import type { z } from "zod";
-import { backoffMs, isRetryable } from "./backoff.js";
+import { backoffMs, isRetryable, isSchemaValidationError } from "./backoff.js";
 import { RateLimitError, SpendCapError } from "./errors.js";
 import { ProviderRegistry, parseModelId, type ChainLink } from "./providers.js";
 import { TaskRouter } from "./tasks.js";
@@ -45,19 +45,25 @@ function isZodSchema<O>(s: OutputSchema<O>): s is z.ZodType<O> {
   return typeof (s as z.ZodType<O>).parse === "function";
 }
 
-// Single-link generate with 60s timeout and up to 2 retries on the same model.
+// Single-link generate with 60s timeout, up to 2 retries on transient errors
+// (429/5xx), and ONE schema-repair retry: when the model returns output that
+// fails schema validation, the validation error is fed back into the prompt
+// so the model can correct itself before we give up on this link.
 async function attemptGenerate<O>(
   model: LanguageModel,
   zodSchema: OutputSchema<O>,
   prompt: string,
   temperature?: number,
 ): Promise<AttemptResult<O>> {
-  for (let retry = 0; ; retry++) {
+  let currentPrompt = prompt;
+  let repaired = false;
+  let transientRetries = 0;
+  for (;;) {
     try {
       const res = await generateObject({
         model,
         schema: zodSchema,
-        prompt,
+        prompt: currentPrompt,
         ...(temperature !== undefined ? { temperature } : {}),
         abortSignal: AbortSignal.timeout(60_000),
       });
@@ -69,8 +75,20 @@ async function attemptGenerate<O>(
         },
       };
     } catch (err) {
-      if (!isRetryable(err) || retry >= 2) throw err;
-      await new Promise<void>((r) => setTimeout(r, backoffMs(retry, err)));
+      if (isSchemaValidationError(err) && !repaired) {
+        repaired = true;
+        const detail =
+          err instanceof Error ? err.message.slice(0, 500) : String(err).slice(0, 500);
+        currentPrompt =
+          prompt +
+          "\n\nIMPORTANT: Your previous response failed schema validation with this error:\n" +
+          detail +
+          "\nRespond again with ONLY JSON that satisfies the schema exactly.";
+        continue;
+      }
+      if (!isRetryable(err) || transientRetries >= 2) throw err;
+      await new Promise<void>((r) => setTimeout(r, backoffMs(transientRetries, err)));
+      transientRetries++;
     }
   }
 }
@@ -308,9 +326,13 @@ export class Gateway {
         };
       } catch (err) {
         lastErr = err;
-        if (!isRetryable(err)) throw err;
+        // Fall to the next link on transient errors AND on persistent schema
+        // invalidity — a different model may satisfy the schema where this
+        // one couldn't (post-repair). Anything else is a caller error.
+        if (!isRetryable(err) && !isSchemaValidationError(err)) throw err;
+        const reason = isSchemaValidationError(err) ? "schema-invalid" : "retryable";
         console.warn(
-          `[llm-gateway] "${link.provider}/${link.model}" failed (retryable), trying next in chain`,
+          `[llm-gateway] "${link.provider}/${link.model}" failed (${reason}), trying next in chain`,
         );
       }
     }

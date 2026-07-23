@@ -12,7 +12,7 @@ Built on the [Vercel AI SDK](https://sdk.vercel.ai) (Anthropic, Google, OpenAI, 
 ## Why
 
 - **Spend caps that actually hold.** Per-user daily caps plus an app-wide daily circuit breaker, checked against your usage store before every call. Unset ≠ uncapped: defaults are conservative, and only an explicit `0` opts out.
-- **Failover chains.** primary → fallback → backup providers, with 429/5xx-aware retries, `Retry-After` honoring, and equal-jitter backoff.
+- **Schema-validation-aware failover.** primary → fallback → backup providers, with 429/5xx-aware retries, `Retry-After` honoring, and equal-jitter backoff. When a model returns schema-invalid output, the validation error is fed back for one repair attempt, then the chain falls to the next provider — a different model often satisfies the schema where the first couldn't ([vercel/ai#9950](https://github.com/vercel/ai/issues/9950), [#9002](https://github.com/vercel/ai/issues/9002)). Chain links accept bring-your-own AI SDK models (Azure, Bedrock, custom base URLs).
 - **Deterministic CI.** Mock mode replaces providers with registered responders — your AI-dependent test suite runs offline with zero keys.
 - **Prompt library pattern.** Store-as-override, code-as-fallback: admins can edit prompts at runtime; a broken edit (missing `{{placeholder}}`) falls back to the code default instead of silently sending a malformed prompt.
 - **Judge + telemetry.** Optional per-call rubric scoring and full usage accounting (tokens, cost, latency, trace IDs), with an optional at-rest encryption hook for logged prompt/output snapshots.

@@ -24,6 +24,7 @@ export {
 export { renderTemplate, missingPlaceholders } from "./template.js";
 export {
   isRetryable,
+  isSchemaValidationError,
   retryAfterMs,
   backoffMs,
   BASE_DELAY_MS,

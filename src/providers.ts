@@ -170,6 +170,15 @@ export class ProviderRegistry {
   buildChain(links: ChainLinkConfig[], tier?: "fast" | "power"): ChainLink[] {
     const out: ChainLink[] = [];
     for (const link of links) {
+      if (link.languageModel) {
+        // BYO model: tier re-routing doesn't apply (we can't rebuild it).
+        out.push({
+          provider: link.provider,
+          model: link.model,
+          languageModel: link.languageModel,
+        });
+        continue;
+      }
       const model = (tier ? this.tierModel(link.provider, tier) : undefined) ?? link.model;
       const lm = this.buildLanguageModel(link.provider, model, link.apiKey);
       if (lm) out.push({ provider: link.provider, model, languageModel: lm });

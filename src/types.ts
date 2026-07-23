@@ -102,6 +102,11 @@ export interface ChainLinkConfig {
   model: string;
   /** Falls back to the provider's configured/env API key when omitted. */
   apiKey?: string;
+  /**
+   * Bring-your-own AI SDK model (Azure, Bedrock, custom base URLs, test
+   * fakes). When set, provider/model are used for attribution/pricing only.
+   */
+  languageModel?: import("ai").LanguageModel;
 }
 
 /**
