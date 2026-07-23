@@ -49,6 +49,15 @@ const { object } = await gw.runStructured({
 });
 ```
 
+### API key setup
+
+```bash
+npx llm-gateway init     # guided key entry → .env.local (chmod 600)
+npx llm-gateway doctor   # validate every configured key against the provider's live models API
+```
+
+Keys resolve in order: `ProviderConfig.apiKeys` (programmatic) → shell env → `.env.local` / `.env` (loaded by the CLI and smoke script via `loadEnvFiles()`; call it yourself in dev servers if you want file-based keys there too). This is deliberately not a secrets manager — production keys belong in your deploy platform's secret store.
+
 ### Testing without API keys
 
 ```ts

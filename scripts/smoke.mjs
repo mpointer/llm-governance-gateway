@@ -15,7 +15,10 @@ import {
   MemoryUsageStore,
   ProviderRegistry,
   listProviderModels,
+  loadEnvFiles,
 } from "../dist/index.js";
+
+loadEnvFiles(); // .env.local / .env in cwd; shell env wins
 
 const DEFAULT_MODELS = {
   anthropic: "claude-haiku-4-5-20251001",

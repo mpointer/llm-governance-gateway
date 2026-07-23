@@ -15,6 +15,9 @@
     "provenance": true
   },
   "type": "module",
+  "bin": {
+    "llm-gateway": "./dist/cli.js"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {

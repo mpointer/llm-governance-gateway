@@ -29,6 +29,7 @@ export {
   BASE_DELAY_MS,
   MAX_DELAY_MS,
 } from "./backoff.js";
+export { loadEnvFiles, parseEnvFile } from "./envfile.js";
 export {
   sanitizeIdentity,
   sanitized,
