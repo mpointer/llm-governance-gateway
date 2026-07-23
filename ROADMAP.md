@@ -12,7 +12,7 @@ Three things no popular tool combines today, all shipped here:
 
 - [ ] CI (typecheck + tests on PR), npm publish, provenance/attestation
 - [ ] Live smoke tests against all five providers
-- [ ] Schema-validation-aware failover: when a provider returns schema-invalid output, feed the validation error into the retry and fall to the next chain link instead of failing the call
+- [x] Schema-validation-aware failover: shipped in 0.1.0 (repair retry + chain fall-through)
 - [ ] `examples/` — Next.js server action, Hono Worker deployment, multi-app setup
 - [ ] README positioning rewrite around governance + supply-chain posture
 
