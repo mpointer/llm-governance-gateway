@@ -3,6 +3,17 @@
   "version": "0.1.0",
   "description": "Governed structured-output LLM pipeline: rate limit → spend caps (per-user + global circuit breaker) → cache → provider-chain failover → Zod validation → usage logging → LLM-judge, with a deterministic mock provider for CI.",
   "license": "MIT",
+  "author": "Michael Pointer <mpointer@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mpointer/llm-governance-gateway.git"
+  },
+  "homepage": "https://github.com/mpointer/llm-governance-gateway#readme",
+  "bugs": "https://github.com/mpointer/llm-governance-gateway/issues",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -32,7 +43,9 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "smoke": "npm run build && node scripts/smoke.mjs",
+    "prepublishOnly": "npm run typecheck && npm run test && npm run build"
   },
   "keywords": [
     "llm",
