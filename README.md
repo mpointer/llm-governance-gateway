@@ -198,7 +198,7 @@ Endpoints: `POST /run` (structured generation — send your Zod schema as JSON S
 
 ## Status
 
-Extracted from a production system (three independent in-house implementations converged on this design). API may shift before 1.0. Roadmap: standalone HTTP gateway (Hono/Workers) exposing `/run` for multi-app deployments, Drizzle/Postgres reference `UsageStore`, streaming support.
+Extracted from a production system (three independent in-house implementations converged on this design). API may shift before 1.0. Next up ([ROADMAP](./ROADMAP.md)): judge-in-the-request-path with budget-aware sampling, native Anthropic features (thinking, prompt caching, web search), streaming inside the governance pipeline.
 
 ## License
 
