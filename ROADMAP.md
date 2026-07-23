@@ -10,11 +10,11 @@ Three things no popular tool combines today, all shipped here:
 
 ## v0.2 (announcement-ready)
 
-- [ ] CI (typecheck + tests on PR), npm publish, provenance/attestation
-- [ ] Live smoke tests against all five providers
+- [x] CI (typecheck + tests on PR), npm publish workflow with provenance
+- [x] Live smoke script (validated on anthropic, openai, openrouter)
 - [x] Schema-validation-aware failover: shipped in 0.1.0 (repair retry + chain fall-through)
-- [ ] `examples/` — Next.js server action, Hono Worker deployment, multi-app setup
-- [ ] README positioning rewrite around governance + supply-chain posture
+- [x] `examples/` — Node, Next.js server action, Worker HTTP
+- [x] README positioning rewrite around governance + supply-chain posture
 
 ## v0.3
 
