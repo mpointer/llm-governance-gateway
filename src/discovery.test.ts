@@ -3,6 +3,7 @@ import { ProviderRegistry } from "./providers.js";
 import {
   listProviderModels,
   openRouterPricingToCents,
+  togetherPricingToCents,
   __resetModelsListCache,
 } from "./discovery.js";
 
@@ -20,6 +21,46 @@ describe("openRouterPricingToCents", () => {
   });
   it("accepts zero pricing (free models) without falling back", () => {
     expect(openRouterPricingToCents({ prompt: "0", completion: "0" })).toEqual({ in: 0, out: 0 });
+  });
+});
+
+describe("togetherPricingToCents", () => {
+  it("converts USD/1M-token numbers to cents per 1K tokens", () => {
+    // $0.88/M in, $0.88/M out (Llama 70B class)
+    const p = togetherPricingToCents({ input: 0.88, output: 0.88 })!;
+    expect(p.in).toBeCloseTo(0.088, 10);
+    expect(p.out).toBeCloseTo(0.088, 10);
+  });
+  it("rejects missing and negative pricing", () => {
+    expect(togetherPricingToCents(undefined)).toBeUndefined();
+    expect(togetherPricingToCents({ input: -1, output: 1 })).toBeUndefined();
+  });
+});
+
+describe("together discovery handles raw-array response + pricing sync", () => {
+  it("parses the array shape and registers pricing", async () => {
+    __resetModelsListCache();
+    const { vi } = await import("vitest");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify([
+            { id: "meta-llama/Llama-3.3-70B-Instruct-Turbo", pricing: { input: 0.88, output: 0.88 } },
+          ]),
+          { status: 200 },
+        ),
+      ),
+    );
+    try {
+      const registry = new ProviderRegistry({ apiKeys: { together: "tk" } });
+      const res = await listProviderModels(registry, "together");
+      expect(res.source).toBe("api");
+      expect(registry.hasPricing("meta-llama/Llama-3.3-70B-Instruct-Turbo")).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+      __resetModelsListCache();
+    }
   });
 });
 

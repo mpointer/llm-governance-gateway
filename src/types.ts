@@ -20,6 +20,8 @@ export interface UsageEntry {
   cacheReadTokens?: number | null;
   /** Server-side web searches performed (billed per request). */
   webSearches?: number | null;
+  /** true when a requireZdr constraint was enforced on this call (audit). */
+  zdrEnforced?: boolean | null;
   /** Already passed through the configured encrypt hook (if any). */
   inputText?: string | null;
   outputText?: string | null;
@@ -100,10 +102,20 @@ export interface RateLimiter {
   limit(identifier: string): Promise<RateLimitResult>;
 }
 
-export type ProviderId = "anthropic" | "google" | "openai" | "openrouter" | "venice";
+export type ProviderId =
+  | "anthropic"
+  | "google"
+  | "openai"
+  | "openrouter"
+  | "venice"
+  | "together"
+  | "huggingface";
 
 export interface ChainLinkConfig {
-  provider: ProviderId;
+  provider?: ProviderId;
+  /** Custom endpoint name (ProviderConfig.endpoints or ollama/vllm/lmstudio
+   *  preset). Mutually exclusive with `provider`. */
+  endpoint?: string;
   model: string;
   /** Falls back to the provider's configured/env API key when omitted. */
   apiKey?: string;
@@ -144,10 +156,27 @@ export interface ProviderConfig {
   tiers?: Partial<Record<ProviderId, { fast?: string; power?: string }>>;
   /** Merged over built-in pricing; add entries for models you use. */
   pricing?: Record<string, ModelPricing>;
+  /**
+   * Custom OpenAI-compatible endpoints (local/self-hosted serving: Ollama,
+   * vLLM, LM Studio, or anything speaking the protocol). Model ids use the
+   * endpoint name as prefix: "ollama:llama3.3", "vllm:qwen2.5-72b".
+   * Presets exist for ollama/vllm/lmstudio with localhost defaults.
+   * Endpoint tokens are logged but cost $0 and never count against spend
+   * caps — caps are about real money. Endpoints default to ZDR (self-hosted);
+   * override via `retention` if yours is shared infrastructure.
+   */
+  endpoints?: Record<string, { baseURL: string; apiKey?: string; apiKeyEnv?: string }>;
   /** Fallback pricing for unknown models (default: conservative mid-tier). */
   fallbackPricing?: ModelPricing;
   /** Cents per server-side web search request. Default 1 (≈$10/1k). */
   webSearchCentsPerCall?: number;
+  /**
+   * CALLER-ASSERTED zero-data-retention status, keyed by provider id or
+   * "provider:model". ZDR is a contractual property of YOUR account (e.g. an
+   * Anthropic ZDR addendum) — the library cannot detect it and will not
+   * pretend to. Missing entry = NOT ZDR (fail closed).
+   */
+  retention?: Record<string, { zdr: boolean; note?: string }>;
 }
 
 export interface SpendCapConfig {
@@ -177,6 +206,8 @@ export interface TaskRoutingConfig {
   defaults: Record<string, string>;
   /** Human labels for admin UIs. */
   labels?: Record<string, string>;
+  /** Per-task governance constraints (e.g. { intake: { requireZdr: true } }). */
+  constraints?: Record<string, { requireZdr?: boolean }>;
   store?: TaskOverrideStore;
   /** Override cache TTL ms (default 30s). */
   overrideTtlMs?: number;

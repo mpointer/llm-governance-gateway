@@ -21,6 +21,8 @@ const ENV_KEYS: Record<ProviderId, string> = {
   openai: "OPENAI_API_KEY",
   openrouter: "OPENROUTER_API_KEY",
   venice: "VENICE_API_KEY",
+  together: "TOGETHER_API_KEY",
+  huggingface: "HF_TOKEN",
 };
 
 const KEY_HINTS: Record<ProviderId, string> = {
@@ -29,6 +31,8 @@ const KEY_HINTS: Record<ProviderId, string> = {
   openai: "platform.openai.com/api-keys (sk-...)",
   openrouter: "openrouter.ai/keys (sk-or-...)",
   venice: "venice.ai/settings/api (optional)",
+  together: "api.together.ai/settings/api-keys",
+  huggingface: "huggingface.co/settings/tokens (hf_..., inference permission)",
 };
 
 function mask(key: string): string {

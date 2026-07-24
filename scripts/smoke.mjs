@@ -26,6 +26,8 @@ const DEFAULT_MODELS = {
   openai: "gpt-4.1-mini",
   openrouter: "openai/gpt-4o-mini",
   venice: "mistral-31-24b",
+  together: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+  huggingface: "meta-llama/Llama-3.3-70B-Instruct",
 };
 
 const registry = new ProviderRegistry({});

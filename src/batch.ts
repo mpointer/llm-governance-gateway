@@ -156,6 +156,8 @@ export interface SubmitBatchOptions<I> {
   cache?: boolean;
   /** Hard ceiling on the submit-time estimate — fail fast if exceeded. */
   maxCostCents?: number;
+  /** Require the batch model to be asserted ZDR in ProviderConfig.retention. */
+  requireZdr?: boolean;
   userId?: string;
   route?: string;
   app?: string;

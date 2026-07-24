@@ -3,7 +3,7 @@ import { generateObject, generateText, streamObject } from "ai";
 import type { LanguageModel, Schema } from "ai";
 import { z } from "zod";
 import { backoffMs, isRetryable, isSchemaValidationError } from "./backoff.js";
-import { JudgeGateError, RateLimitError, SpendCapError } from "./errors.js";
+import { JudgeGateError, RateLimitError, SpendCapError, ZdrViolationError } from "./errors.js";
 import { ProviderRegistry, parseModelId, type ChainLink } from "./providers.js";
 import {
   callNativeAnthropic,
@@ -163,6 +163,13 @@ export interface RunStructuredOptions<I, O> {
    * modelConfig.getOverride() > task > chain > static default.
    */
   task?: string;
+  /**
+   * Require zero-data-retention routing for this call: only links asserted
+   * ZDR in ProviderConfig.retention are eligible; chains SKIP non-eligible
+   * links and error only when none remain. Also set per task via
+   * TaskRoutingConfig.constraints.
+   */
+  requireZdr?: boolean;
   userId?: string;
   anonKey?: string;
   route?: string;
@@ -257,8 +264,10 @@ export class Gateway {
     this.promptDefaults = cfg.promptDefaults ?? [];
     this.prompts = cfg.prompts ?? new MemoryPromptStore();
     this.modelConfig = cfg.modelConfig;
-    this.tasks = cfg.tasks ? new TaskRouter(cfg.tasks) : undefined;
     this.registry = new ProviderRegistry(cfg.providers);
+    this.tasks = cfg.tasks
+      ? new TaskRouter(cfg.tasks, (id) => this.registry.parseAny(id))
+      : undefined;
     this.caps = cfg.caps ?? {};
     this.mock = cfg.mock ?? false;
     this.appId = cfg.appId ?? null;
@@ -369,12 +378,18 @@ export class Gateway {
       resolved = {
         provider: t.provider,
         model: t.model,
-        languageModel: this.registry.buildLanguageModel(t.provider, t.model) ?? undefined,
+        languageModel: this.registry.buildAny(t.provider, t.model) ?? undefined,
       };
     } else {
       const chainCfg = (await this.modelConfig?.getChain()) ?? [];
       const chain = this.registry.buildChain(chainCfg, opts.tier);
       resolved = chain[0] ?? this.registry.resolveDefault();
+    }
+    const streamRequireZdr =
+      opts.requireZdr === true ||
+      (opts.task !== undefined && (this.tasks?.requiresZdr(opts.task) ?? false));
+    if (streamRequireZdr && !this.registry.isZdr(resolved.provider, resolved.model)) {
+      throw new ZdrViolationError(resolved.provider, resolved.model, "streaming link");
     }
     if (!resolved.languageModel) {
       throw new Error(`No API key for provider "${resolved.provider}".`);
@@ -456,6 +471,9 @@ export class Gateway {
       throw new Error(
         `Batch supports Anthropic models only (resolved "${provider}/${model}").`,
       );
+    }
+    if (opts.requireZdr && !this.registry.isZdr(provider, model)) {
+      throw new ZdrViolationError(provider, model, "batch submit");
     }
 
     const promptConfig = await this.loadPrompt(opts.slug);
@@ -904,6 +922,14 @@ export class Gateway {
     const traceId = randomUUID();
     const identifier =
       opts.userId ?? (opts.anonKey ? `anon:${opts.anonKey}` : "anon");
+    const requireZdr =
+      opts.requireZdr === true ||
+      (opts.task !== undefined && (this.tasks?.requiresZdr(opts.task) ?? false));
+    const assertZdr = (p: string, m: string, context: string) => {
+      if (requireZdr && !this.registry.isZdr(p, m)) {
+        throw new ZdrViolationError(p, m, context);
+      }
+    };
 
     // 1. Rate limit
     const rl = await this.rateLimiter.limit(identifier);
@@ -991,7 +1017,8 @@ export class Gateway {
           );
         }
         const resolved = await this.tasks.modelForTask(opts.task);
-        const lm = this.registry.buildLanguageModel(resolved.provider, resolved.model);
+        assertZdr(resolved.provider, resolved.model, `task "${opts.task}"`);
+        const lm = this.registry.buildAny(resolved.provider, resolved.model);
         const nativeApplies =
           opts.anthropic && resolved.provider === "anthropic" && this.anthropicCfg;
         if (!lm && !nativeApplies) {
@@ -1020,6 +1047,7 @@ export class Gateway {
           provider: adminOverride.provider,
           model: promptConfig.modelHint ?? adminOverride.model,
         });
+        assertZdr(resolved.provider, resolved.model, "admin model override");
         const nativeApplies =
           opts.anthropic && resolved.provider === "anthropic" && this.anthropicCfg;
         if (!resolved.languageModel && !nativeApplies) {
@@ -1043,11 +1071,23 @@ export class Gateway {
         extras = result.extras;
       } else {
         const chainCfg = (await this.modelConfig?.getChain()) ?? [];
-        const chain = this.registry.buildChain(
+        const fullChain = this.registry.buildChain(
           chainCfg,
           opts.tier,
           opts.anthropic && this.anthropicCfg ? ["anthropic"] : undefined,
         );
+        // ZDR: SKIP non-eligible links; error only when the constraint
+        // eliminated every link that would otherwise have run.
+        const chain = requireZdr
+          ? fullChain.filter((l) => this.registry.isZdr(l.provider, l.model))
+          : fullChain;
+        if (requireZdr && fullChain.length > 0 && chain.length === 0) {
+          throw new ZdrViolationError(
+            fullChain[0]!.provider,
+            fullChain[0]!.model,
+            `all ${fullChain.length} chain link(s) filtered out`,
+          );
+        }
 
         if (chain.length === 0) {
           const resolved = this.registry.resolveDefault(
@@ -1060,6 +1100,7 @@ export class Gateway {
                 }
               : undefined,
           );
+          assertZdr(resolved.provider, resolved.model, "default model resolution");
           const nativeApplies =
             opts.anthropic && resolved.provider === "anthropic" && this.anthropicCfg;
           if (!resolved.languageModel && !nativeApplies) {
@@ -1116,13 +1157,14 @@ export class Gateway {
       model,
       inputTokens,
       outputTokens,
-      estimatedCostCents: this.registry.estimateCostCents(model, inputTokens, outputTokens, extras),
+      estimatedCostCents: this.registry.estimateForLink(provider, model, inputTokens, outputTokens, extras),
       cacheHit: false,
       traceId,
       durationMs,
       cacheCreateTokens: extras?.cacheCreateTokens ?? null,
       cacheReadTokens: extras?.cacheReadTokens ?? null,
       webSearches: extras?.webSearches ?? null,
+      zdrEnforced: requireZdr ? true : null,
       inputText: prompt,
       outputText: JSON.stringify(object),
     });
@@ -1143,7 +1185,7 @@ export class Gateway {
 
     // 8b. Model-graded judge (sampled, budget-aware, may gate)
     if (opts.judge) {
-      await this.runJudge(opts, prompt, object, usageLogId);
+      await this.runJudge(opts, prompt, object, usageLogId, requireZdr);
     }
 
     return { object, traceId, cacheHit: false, usageLogId };
@@ -1163,6 +1205,7 @@ export class Gateway {
     mainPrompt: string,
     object: O,
     mainUsageLogId: string | number,
+    requireZdr = false,
   ): Promise<void> {
     const judge = opts.judge!;
     const criteria = Object.keys(judge.criteria);
@@ -1185,6 +1228,15 @@ export class Gateway {
       return;
     }
     const { provider, model } = parseModelId(modelId);
+
+    // The judge sees the same data as the main call — the retention
+    // constraint applies to it too. Skip (never fail the main response).
+    if (requireZdr && !this.mock && !this.registry.isZdr(provider, model)) {
+      console.warn(
+        `[llm-gateway] judge skipped for "${opts.slug}": judge model "${provider}/${model}" is not asserted ZDR and this call requires it`,
+      );
+      return;
+    }
 
     const judgePrompt = buildJudgePrompt(judge.criteria, mainPrompt, object);
 
@@ -1264,7 +1316,7 @@ export class Gateway {
       model: judgeModel,
       inputTokens,
       outputTokens,
-      estimatedCostCents: this.registry.estimateCostCents(judgeModel, inputTokens, outputTokens),
+      estimatedCostCents: this.registry.estimateForLink(judgeProvider, judgeModel, inputTokens, outputTokens),
       cacheHit: false,
       traceId: randomUUID(),
       durationMs,
@@ -1324,7 +1376,7 @@ export class Gateway {
         const t = await this.tasks.modelForTask(opts.task);
         resolvedProvider = t.provider;
         resolvedModel = t.model;
-        lm = this.registry.buildLanguageModel(t.provider, t.model) ?? undefined;
+        lm = this.registry.buildAny(t.provider, t.model) ?? undefined;
       } else {
         const r = this.registry.resolveDefault();
         resolvedProvider = r.provider;

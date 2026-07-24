@@ -23,6 +23,20 @@ export class JudgeGateError extends Error {
   }
 }
 
+export class ZdrViolationError extends Error {
+  constructor(
+    public readonly provider: string,
+    public readonly model: string,
+    context: string,
+  ) {
+    super(
+      `ZDR required but "${provider}/${model}" is not asserted zero-data-retention (${context}). ` +
+        `Add it to ProviderConfig.retention only if your account contract actually guarantees ZDR.`,
+    );
+    this.name = "ZdrViolationError";
+  }
+}
+
 export class SpendCapError extends Error {
   constructor(
     public readonly spentCents: number,

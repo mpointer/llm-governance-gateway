@@ -17,11 +17,20 @@ export interface ResolvedModel {
 }
 
 export interface ChainLink {
-  provider: ProviderId;
+  /** Built-in ProviderId or custom endpoint name. */
+  provider: string;
   model: string;
   /** Absent only for links kept keyless (native-Anthropic execution path). */
   languageModel?: LanguageModel;
 }
+
+/** Localhost presets for common self-hosted serving stacks — usable with
+ *  zero config; override via ProviderConfig.endpoints. */
+const LOCAL_PRESETS: Record<string, string> = {
+  ollama: "http://localhost:11434/v1",
+  vllm: "http://localhost:8000/v1",
+  lmstudio: "http://localhost:1234/v1",
+};
 
 export const PROVIDER_IDS: ProviderId[] = [
   "anthropic",
@@ -29,11 +38,15 @@ export const PROVIDER_IDS: ProviderId[] = [
   "openai",
   "openrouter",
   "venice",
+  "together",
+  "huggingface",
 ];
 
 // OpenAI-compatible endpoints for aggregator providers.
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 const VENICE_BASE = "https://api.venice.ai/api/v1";
+const TOGETHER_BASE = "https://api.together.xyz/v1";
+const HF_ROUTER_BASE = "https://router.huggingface.co/v1";
 
 const ENV_KEYS: Record<ProviderId, string> = {
   anthropic: "ANTHROPIC_API_KEY",
@@ -41,6 +54,8 @@ const ENV_KEYS: Record<ProviderId, string> = {
   openai: "OPENAI_API_KEY",
   openrouter: "OPENROUTER_API_KEY",
   venice: "VENICE_API_KEY",
+  together: "TOGETHER_API_KEY",
+  huggingface: "HF_TOKEN",
 };
 
 /**
@@ -102,6 +117,74 @@ export class ProviderRegistry {
   }
 
   /**
+   * Caller-asserted ZDR status. "provider:model" beats "provider"; missing
+   * entry = NOT ZDR (fail closed). "mock" and "cache" are trivially ZDR.
+   * Custom endpoints default to ZDR (self-hosted) unless overridden.
+   */
+  isZdr(provider: string, model: string): boolean {
+    if (provider === "mock" || provider === "cache") return true;
+    const r = this.cfg.retention;
+    const entry = r?.[`${provider}:${model}`] ?? r?.[provider];
+    if (entry) return entry.zdr === true;
+    return this.isEndpoint(provider); // self-hosted default: ZDR
+  }
+
+  /** Is this name a configured custom endpoint or a local preset? */
+  isEndpoint(name: string): boolean {
+    return !!(this.cfg.endpoints?.[name] ?? LOCAL_PRESETS[name]);
+  }
+
+  /** Endpoint-aware model-id parse: built-in prefixes win, then endpoint
+   *  names, then bare = Anthropic. */
+  parseAny(id: string): { provider: string; model: string; endpoint: boolean } {
+    const idx = id.indexOf(":");
+    if (idx > 0) {
+      const prefix = id.slice(0, idx);
+      if ((PROVIDER_IDS as string[]).includes(prefix)) {
+        return { provider: prefix, model: id.slice(idx + 1), endpoint: false };
+      }
+      if (this.isEndpoint(prefix)) {
+        return { provider: prefix, model: id.slice(idx + 1), endpoint: true };
+      }
+    }
+    const p = parseModelId(id);
+    return { provider: p.provider, model: p.model, endpoint: false };
+  }
+
+  buildEndpointModel(name: string, model: string): LanguageModel | null {
+    const cfg = this.cfg.endpoints?.[name];
+    const baseURL = cfg?.baseURL ?? LOCAL_PRESETS[name];
+    if (!baseURL) return null;
+    const apiKey =
+      cfg?.apiKey ??
+      (cfg?.apiKeyEnv ? process.env[cfg.apiKeyEnv] : undefined) ??
+      "local-no-key"; // local servers typically ignore auth; SDK requires a string
+    return createOpenAI({ apiKey, baseURL }).chat(model);
+  }
+
+  /** Build for a built-in provider OR a custom endpoint. */
+  buildAny(provider: string, model: string): LanguageModel | null {
+    if (this.isEndpoint(provider)) return this.buildEndpointModel(provider, model);
+    if ((PROVIDER_IDS as string[]).includes(provider)) {
+      return this.buildLanguageModel(provider as ProviderId, model);
+    }
+    return null;
+  }
+
+  /** Link-aware cost estimate: custom endpoints cost $0 (tokens are still
+   *  logged) so spend caps stay about real money. */
+  estimateForLink(
+    provider: string,
+    model: string,
+    inputTokens: number,
+    outputTokens: number,
+    extras?: { cacheCreateTokens?: number; cacheReadTokens?: number; webSearches?: number },
+  ): number {
+    if (this.isEndpoint(provider)) return 0;
+    return this.estimateCostCents(model, inputTokens, outputTokens, extras);
+  }
+
+  /**
    * Known model ids per provider from the static maps (tier routing +
    * pricing). Fallback when a provider's models API is unreachable.
    */
@@ -141,6 +224,10 @@ export class ProviderRegistry {
         return createOpenAI({ apiKey: key, baseURL: OPENROUTER_BASE }).chat(model);
       case "venice":
         return createOpenAI({ apiKey: key, baseURL: VENICE_BASE }).chat(model);
+      case "together":
+        return createOpenAI({ apiKey: key, baseURL: TOGETHER_BASE }).chat(model);
+      case "huggingface":
+        return createOpenAI({ apiKey: key, baseURL: HF_ROUTER_BASE }).chat(model);
       default:
         return null;
     }
@@ -177,19 +264,22 @@ export class ProviderRegistry {
   ): ChainLink[] {
     const out: ChainLink[] = [];
     for (const link of links) {
+      const name = link.endpoint ?? link.provider;
+      if (!name) continue; // one of provider/endpoint is required
       if (link.languageModel) {
         // BYO model: tier re-routing doesn't apply (we can't rebuild it).
-        out.push({
-          provider: link.provider,
-          model: link.model,
-          languageModel: link.languageModel,
-        });
+        out.push({ provider: name, model: link.model, languageModel: link.languageModel });
         continue;
       }
-      const model = (tier ? this.tierModel(link.provider, tier) : undefined) ?? link.model;
-      const lm = this.buildLanguageModel(link.provider, model, link.apiKey);
-      if (lm) out.push({ provider: link.provider, model, languageModel: lm });
-      else if (keepKeyless?.includes(link.provider)) out.push({ provider: link.provider, model });
+      if (link.endpoint) {
+        const lm = this.buildEndpointModel(link.endpoint, link.model);
+        if (lm) out.push({ provider: link.endpoint, model: link.model, languageModel: lm });
+        continue;
+      }
+      const model = (tier ? this.tierModel(link.provider!, tier) : undefined) ?? link.model;
+      const lm = this.buildLanguageModel(link.provider!, model, link.apiKey);
+      if (lm) out.push({ provider: link.provider!, model, languageModel: lm });
+      else if (keepKeyless?.includes(link.provider!)) out.push({ provider: link.provider!, model });
     }
     return out;
   }

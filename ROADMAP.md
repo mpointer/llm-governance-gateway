@@ -27,8 +27,10 @@ Three things no popular tool combines today, all shipped here:
 ## v0.4+
 
 - [ ] OTel / Langfuse export hooks (integrate with observability, don't compete with it)
-- [ ] Provider expansion — Together.ai + Hugging Face (#1), Bedrock/Azure/Vertex/watsonx (#2), local serving via custom OpenAI-compatible endpoints: Ollama, vLLM, LM Studio (#3)
-- [ ] ZDR-aware routing — zero-data-retention metadata + task-level `requireZdr` constraints (#4); candidate fourth headline differentiator
+- [x] Together.ai + Hugging Face providers (#1) — shipped: first-class ids, discovery, Together pricing sync
+- [x] Local serving (#3) — shipped: custom OpenAI-compatible endpoint registry, ollama/vllm/lmstudio presets, zero-cost cap exclusion, local-first chains
+- [ ] Enterprise providers: Bedrock/Azure/Vertex/watsonx (#2) — needs structured per-provider config design
+- [x] ZDR-aware routing (#4) — shipped: caller-asserted retention map (fail closed), task/call constraints, chain skip, zdrEnforced audit field, judge/stream/batch enforcement
 - [x] OpenRouter pricing auto-sync — shipped: discovery registers vendor pricing into the registry
 - [ ] Pluggable guardrail hooks (pre/post) — TypeScript-native, no Python sidecar
 - [ ] Admin UI reference (prompt library, task routing, spend dashboards)

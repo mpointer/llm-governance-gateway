@@ -10,19 +10,24 @@ const DEFAULT_OVERRIDE_TTL_MS = 30_000;
 
 export interface ResolvedTaskModel {
   task: string;
-  provider: ProviderId;
+  /** Built-in ProviderId or custom endpoint name. */
+  provider: string;
   model: string;
   /** "override" = admin store, "default" = code registry. */
   source: "override" | "default";
 }
 
+type ModelParser = (id: string) => { provider: string; model: string };
+
 export class TaskRouter {
   private readonly cfg: TaskRoutingConfig;
+  private readonly parse: ModelParser;
   private overrides: Record<string, string> = {};
   private overridesExpireAt = 0;
 
-  constructor(cfg: TaskRoutingConfig) {
+  constructor(cfg: TaskRoutingConfig, parse?: ModelParser) {
     this.cfg = cfg;
+    this.parse = parse ?? parseModelId;
   }
 
   tasks(): string[] {
@@ -31,6 +36,11 @@ export class TaskRouter {
 
   label(task: string): string {
     return this.cfg.labels?.[task] ?? task;
+  }
+
+  /** Task-level governance constraint: must this task run ZDR-only? */
+  requiresZdr(task: string): boolean {
+    return this.cfg.constraints?.[task]?.requireZdr === true;
   }
 
   /** Test seam / admin write path: force override refresh on next resolve. */
@@ -66,7 +76,7 @@ export class TaskRouter {
     const overrides = await this.loadOverrides();
     const overridden = overrides[task];
     if (overridden) {
-      const { provider, model } = parseModelId(overridden);
+      const { provider, model } = this.parse(overridden);
       return { task, provider, model, source: "override" };
     }
     const def = this.cfg.defaults[task];
@@ -75,7 +85,7 @@ export class TaskRouter {
         `Unknown AI task "${task}". Known tasks: ${this.tasks().join(", ")}`,
       );
     }
-    const { provider, model } = parseModelId(def);
+    const { provider, model } = this.parse(def);
     return { task, provider, model, source: "default" };
   }
 }

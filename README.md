@@ -11,7 +11,7 @@ rate limit → spend caps (per-user + global circuit breaker) → cache
 
 No sidecar proxy to deploy. No hosted control plane. No sprawling dependency tree — five runtime deps (the [Vercel AI SDK](https://sdk.vercel.ai), three provider adapters, Zod), everything else optional peers. It runs *in your process*, enforces caps against *your* database, and the whole pipeline — caps, cache, failover, judge — runs deterministically in CI with zero API keys.
 
-Providers: Anthropic, Google, OpenAI, OpenRouter, Venice — plus bring-your-own AI SDK model (Azure, Bedrock, custom endpoints) in any failover chain.
+Providers: Anthropic, Google, OpenAI, OpenRouter, Venice, Together.ai, Hugging Face — plus self-hosted endpoints (Ollama, vLLM, LM Studio, or any OpenAI-compatible server) and bring-your-own AI SDK models (Azure, Bedrock) in any failover chain.
 
 ## Why
 
@@ -167,6 +167,51 @@ const res = await gw.runPromptTest({
 });
 // res.text, res.costCents, res.durationMs — spend logged as route "admin:prompt-test"
 ```
+
+### Local / self-hosted endpoints
+
+Ollama, vLLM, and LM Studio work zero-config via localhost presets; any OpenAI-compatible server works via the endpoint registry:
+
+```ts
+const gw = new Gateway({
+  usage,
+  providers: { endpoints: { gpubox: { baseURL: "http://gpu:8000/v1", apiKeyEnv: "VLLM_KEY" } } },
+  modelConfig: {
+    getOverride: async () => null,
+    getChain: async () => [
+      { endpoint: "gpubox", model: "qwen2.5-72b" },              // local first
+      { provider: "anthropic", model: "claude-sonnet-4-6" },     // cloud fallback
+    ],
+  },
+});
+// Task ids too: defaults: { summarize: "ollama:llama3.3" }
+```
+
+Endpoint tokens are logged but cost $0 and never count against spend caps — caps are about real money. A flaky local vLLM gets the same schema-validated failover as a cloud API, so local-first/cloud-fallback chains work out of the box.
+
+### ZDR-aware routing (zero data retention)
+
+Route by where data is retained, not just what it costs:
+
+```ts
+const gw = new Gateway({
+  usage,
+  providers: {
+    retention: {
+      anthropic: { zdr: true, note: "org ZDR addendum signed 2026-05" },
+      "openai:gpt-4.1-enterprise": { zdr: true }, // model-specific beats provider-level
+    },
+  },
+  tasks: {
+    defaults: { intake_summary: "claude-haiku-4-5-20251001" },
+    constraints: { intake_summary: { requireZdr: true } },
+  },
+});
+
+await gw.runStructured({ ...opts, requireZdr: true }); // or via the task constraint
+```
+
+Failover chains **skip** non-eligible links and error only when none remain; the usage log records `zdrEnforced` so audits can prove the constraint held. Two things stated plainly: retention status is **caller-asserted** — ZDR is a contractual property of *your* account (Anthropic ZDR addendum, OpenAI enterprise tiers, in-region Bedrock), and this library will not pretend to detect it; missing entries are treated as NOT ZDR (fail closed). Self-hosted endpoints default to ZDR — override if yours is shared infrastructure. Check your own contracts: [Anthropic Trust Center](https://trust.anthropic.com), [OpenAI enterprise privacy](https://openai.com/enterprise-privacy), provider DPAs generally.
 
 ### Native Anthropic features (opt-in)
 

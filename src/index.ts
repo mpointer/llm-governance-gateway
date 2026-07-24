@@ -7,7 +7,7 @@ export {
   type PromptTestOptions,
   type PromptTestResult,
 } from "./gateway.js";
-export { RateLimitError, SpendCapError, JudgeGateError } from "./errors.js";
+export { RateLimitError, SpendCapError, JudgeGateError, ZdrViolationError } from "./errors.js";
 export {
   ProviderRegistry,
   parseModelId,
@@ -20,6 +20,7 @@ export {
   listProviderModels,
   listAllProviderModels,
   openRouterPricingToCents,
+  togetherPricingToCents,
   __resetModelsListCache,
   type ProviderModels,
 } from "./discovery.js";

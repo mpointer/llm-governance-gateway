@@ -44,6 +44,24 @@ export function openRouterPricingToCents(
   return { in: inUsd * 100_000, out: outUsd * 100_000 };
 }
 
+interface TogetherModel {
+  id: string;
+  /** USD per 1M tokens (note: different unit from OpenRouter's per-token). */
+  pricing?: { input?: number; output?: number };
+}
+
+/** Together prices are USD per 1M tokens → cents per 1K = usd × 0.1. */
+export function togetherPricingToCents(
+  pricing: TogetherModel["pricing"],
+): { in: number; out: number } | undefined {
+  if (!pricing) return undefined;
+  const inUsd = Number(pricing.input);
+  const outUsd = Number(pricing.output);
+  if (!Number.isFinite(inUsd) || !Number.isFinite(outUsd)) return undefined;
+  if (inUsd < 0 || outUsd < 0) return undefined;
+  return { in: inUsd * 0.1, out: outUsd * 0.1 };
+}
+
 async function fetchJson(url: string, headers: Record<string, string>): Promise<unknown> {
   const res = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -97,6 +115,26 @@ async function fetchProviderModels(
     }
     case "venice": {
       const data = (await fetchJson("https://api.venice.ai/api/v1/models", {
+        Authorization: `Bearer ${apiKey}`,
+      })) as { data?: { id: string }[] };
+      return (data.data ?? []).map((m) => m.id).sort();
+    }
+    case "together": {
+      // Together returns a raw array (not {data}) with $/1M-token pricing.
+      const raw = (await fetchJson("https://api.together.xyz/v1/models", {
+        Authorization: `Bearer ${apiKey}`,
+      })) as
+        | TogetherModel[]
+        | { data?: TogetherModel[] };
+      const models = Array.isArray(raw) ? raw : (raw.data ?? []);
+      for (const m of models) {
+        const pricing = togetherPricingToCents(m.pricing);
+        if (pricing) registry.addPricing(m.id, pricing);
+      }
+      return models.map((m) => m.id).sort();
+    }
+    case "huggingface": {
+      const data = (await fetchJson("https://router.huggingface.co/v1/models", {
         Authorization: `Bearer ${apiKey}`,
       })) as { data?: { id: string }[] };
       return (data.data ?? []).map((m) => m.id).sort();
