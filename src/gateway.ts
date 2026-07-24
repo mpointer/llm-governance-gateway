@@ -228,6 +228,8 @@ export interface RunTextResult {
   finishReason?: string;
   provider: string;
   model: string;
+  inputTokens: number;
+  outputTokens: number;
   traceId: string;
   cacheHit: boolean;
   usageLogId?: string | number;
@@ -349,7 +351,16 @@ export class Gateway {
           traceId,
           zdrEnforced: requireZdr ? true : null,
         });
-        return { text: cached, provider: "cache", model: "cache", traceId, cacheHit: true, usageLogId };
+        return {
+          text: cached,
+          provider: "cache",
+          model: "cache",
+          inputTokens: 0,
+          outputTokens: 0,
+          traceId,
+          cacheHit: true,
+          usageLogId,
+        };
       }
     }
 
@@ -484,7 +495,7 @@ export class Gateway {
       outputText: text,
     });
 
-    return { text, finishReason, provider, model, traceId, cacheHit: false, usageLogId };
+    return { text, finishReason, provider, model, inputTokens, outputTokens, traceId, cacheHit: false, usageLogId };
   }
 
   // ===========================================================================
