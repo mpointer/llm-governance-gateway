@@ -3,6 +3,8 @@ export {
   cacheKey,
   type RunStructuredOptions,
   type RunStructuredResult,
+  type RunTextOptions,
+  type RunTextResult,
   type StreamStructuredResult,
   type PromptTestOptions,
   type PromptTestResult,

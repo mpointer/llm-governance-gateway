@@ -202,6 +202,37 @@ async function* singleEmission<T>(value: T): AsyncGenerator<T> {
   yield value;
 }
 
+export interface RunTextOptions<I> {
+  slug: string;
+  input: I;
+  variables: (input: I) => Record<string, string>;
+  /** Inline prompt body — skips the prompt store/defaults lookup. */
+  promptBody?: string;
+  system?: string;
+  temperature?: number;
+  maxOutputTokens?: number;
+  cacheParts?: string[];
+  cache?: boolean;
+  tier?: "fast" | "power";
+  task?: string;
+  requireZdr?: boolean;
+  userId?: string;
+  anonKey?: string;
+  route?: string;
+  app?: string;
+}
+
+export interface RunTextResult {
+  text: string;
+  /** AI SDK finishReason ("stop", "length", ...). Absent for cache/mock. */
+  finishReason?: string;
+  provider: string;
+  model: string;
+  traceId: string;
+  cacheHit: boolean;
+  usageLogId?: string | number;
+}
+
 const JUDGE_SNIPPET_LIMIT = 4000;
 
 function buildJudgePrompt(
@@ -276,6 +307,184 @@ export class Gateway {
     this.judgeDefaults = cfg.judge;
     this.anthropicCfg = cfg.anthropic;
     this.batchCfg = cfg.batch;
+  }
+
+  // ===========================================================================
+  // Governed TEXT generation — same front door as runStructured, generateText
+  // body. Added for adopters whose call sites are text-first (summaries,
+  // JSON-by-convention parsing done caller-side). No schema repair (nothing
+  // to validate); chain failover on transient errors only.
+  // ===========================================================================
+
+  async runText<I>(opts: RunTextOptions<I>): Promise<RunTextResult> {
+    const traceId = randomUUID();
+    const identifier = opts.userId ?? (opts.anonKey ? `anon:${opts.anonKey}` : "anon");
+    const requireZdr =
+      opts.requireZdr === true ||
+      (opts.task !== undefined && (this.tasks?.requiresZdr(opts.task) ?? false));
+
+    const rl = await this.rateLimiter.limit(identifier);
+    if (!rl.success) throw new RateLimitError(rl.limit, rl.remaining);
+    await this.checkSpendCap(opts.userId, opts.route);
+
+    const useCache = opts.cache !== false;
+    if (useCache && !opts.cacheParts) {
+      throw new Error("runText: cacheParts is required unless cache:false is set.");
+    }
+    const key = useCache ? cacheKey(opts.slug, opts.cacheParts!) : null;
+    if (key) {
+      const cached = await this.cache.get<string>(key);
+      if (cached !== undefined) {
+        const usageLogId = await this.logUsage({
+          app: opts.app,
+          userId: opts.userId ?? null,
+          route: opts.route ?? null,
+          promptSlug: opts.slug,
+          provider: "cache",
+          model: "cache",
+          inputTokens: 0,
+          outputTokens: 0,
+          estimatedCostCents: 0,
+          cacheHit: true,
+          traceId,
+          zdrEnforced: requireZdr ? true : null,
+        });
+        return { text: cached, provider: "cache", model: "cache", traceId, cacheHit: true, usageLogId };
+      }
+    }
+
+    const promptConfig: PromptConfig = opts.promptBody
+      ? { body: opts.promptBody }
+      : await this.loadPrompt(opts.slug);
+    const prompt = renderTemplate(promptConfig.body, opts.variables(opts.input));
+    const temperature = opts.temperature ?? promptConfig.temperature;
+
+    let text: string;
+    let finishReason: string | undefined;
+    let inputTokens: number;
+    let outputTokens: number;
+    let provider: string;
+    let model: string;
+    let durationMs: number;
+
+    const attemptText = async (lm: LanguageModel) => {
+      for (let retry = 0; ; ) {
+        try {
+          const res = await generateText({
+            model: lm,
+            prompt,
+            ...(opts.system ? { system: opts.system } : {}),
+            ...(temperature !== undefined ? { temperature } : {}),
+            ...(opts.maxOutputTokens !== undefined ? { maxOutputTokens: opts.maxOutputTokens } : {}),
+            abortSignal: AbortSignal.timeout(60_000),
+          });
+          return res;
+        } catch (err) {
+          if (!isRetryable(err) || retry >= 2) throw err;
+          await new Promise<void>((r) => setTimeout(r, backoffMs(retry, err)));
+          retry++;
+        }
+      }
+    };
+
+    if (this.mock) {
+      const responder = this.mockResponders.get(opts.slug);
+      if (!responder) {
+        throw new Error(`Mock mode is on but no responder registered for "${opts.slug}".`);
+      }
+      text = String(responder(opts.input));
+      inputTokens = Math.ceil(prompt.length / 4);
+      outputTokens = Math.ceil(text.length / 4);
+      provider = "mock";
+      model = "mock";
+      durationMs = 0;
+    } else {
+      // Single-link resolution + ZDR-filtered chain (parallel to runStructured).
+      const adminOverride = (await this.modelConfig?.getOverride()) ?? null;
+      let links: { provider: string; model: string; languageModel?: LanguageModel }[];
+      if (adminOverride) {
+        links = [this.registry.resolveDefault(adminOverride)];
+      } else if (opts.task && this.tasks) {
+        const t = await this.tasks.modelForTask(opts.task);
+        links = [
+          {
+            provider: t.provider,
+            model: t.model,
+            languageModel: this.registry.buildAny(t.provider, t.model) ?? undefined,
+          },
+        ];
+      } else {
+        const chainCfg = (await this.modelConfig?.getChain()) ?? [];
+        const full = this.registry.buildChain(chainCfg, opts.tier);
+        links = full.length > 0 ? full : [this.registry.resolveDefault()];
+        if (requireZdr) {
+          const eligible = links.filter((l) => this.registry.isZdr(l.provider, l.model));
+          if (links.length > 0 && eligible.length === 0) {
+            throw new ZdrViolationError(links[0]!.provider, links[0]!.model, "runText chain");
+          }
+          links = eligible;
+        }
+      }
+      if (links.length === 1 && requireZdr && !this.registry.isZdr(links[0]!.provider, links[0]!.model)) {
+        throw new ZdrViolationError(links[0]!.provider, links[0]!.model, "runText link");
+      }
+
+      const start = Date.now();
+      let lastErr: unknown;
+      let done = false;
+      text = "";
+      inputTokens = 0;
+      outputTokens = 0;
+      provider = "";
+      model = "";
+      durationMs = 0;
+      for (const link of links) {
+        if (!link.languageModel) {
+          lastErr = new Error(`No API key for provider "${link.provider}".`);
+          continue;
+        }
+        try {
+          const res = await attemptText(link.languageModel);
+          text = res.text;
+          finishReason = res.finishReason;
+          inputTokens = res.usage.inputTokens ?? 0;
+          outputTokens = res.usage.outputTokens ?? 0;
+          provider = link.provider;
+          model = link.model;
+          durationMs = Date.now() - start;
+          done = true;
+          break;
+        } catch (err) {
+          lastErr = err;
+          if (!isRetryable(err) && links.length === 1) throw err;
+          console.warn(
+            `[llm-gateway] runText "${link.provider}/${link.model}" failed, trying next link`,
+          );
+        }
+      }
+      if (!done) throw lastErr ?? new Error("runText: no provider produced a result");
+    }
+
+    if (key) await this.cache.set(key, text, this.cacheTtlSeconds);
+    const usageLogId = await this.logUsage({
+      app: opts.app,
+      userId: opts.userId ?? null,
+      route: opts.route ?? null,
+      promptSlug: opts.slug,
+      provider,
+      model,
+      inputTokens,
+      outputTokens,
+      estimatedCostCents: this.registry.estimateForLink(provider, model, inputTokens, outputTokens),
+      cacheHit: false,
+      traceId,
+      durationMs,
+      zdrEnforced: requireZdr ? true : null,
+      inputText: prompt,
+      outputText: text,
+    });
+
+    return { text, finishReason, provider, model, traceId, cacheHit: false, usageLogId };
   }
 
   // ===========================================================================
