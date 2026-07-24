@@ -48,7 +48,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "smoke": "npm run build && node scripts/smoke.mjs",
-    "prepublishOnly": "npm run typecheck && npm run test && npm run build"
+    "prepublishOnly": "npm run typecheck && npm run test && npm run build",
+    "smoke:batch": "npm run build && node scripts/smoke-batch.mjs"
   },
   "keywords": [
     "llm",
@@ -81,6 +82,7 @@
     }
   },
   "devDependencies": {
+    "@anthropic-ai/sdk": "^0.114.0",
     "@types/node": "^26.1.1",
     "@types/sql.js": "^1.4.9",
     "drizzle-orm": "^0.45.2",
