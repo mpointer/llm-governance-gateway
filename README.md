@@ -11,7 +11,7 @@ rate limit → spend caps (per-user + global circuit breaker) → cache
 
 No sidecar proxy to deploy. No hosted control plane. No sprawling dependency tree — five runtime deps (the [Vercel AI SDK](https://sdk.vercel.ai), three provider adapters, Zod), everything else optional peers. It runs *in your process*, enforces caps against *your* database, and the whole pipeline — caps, cache, failover, judge — runs deterministically in CI with zero API keys.
 
-Providers: Anthropic, Google, OpenAI, OpenRouter, Venice, Together.ai, Hugging Face — plus self-hosted endpoints (Ollama, vLLM, LM Studio, or any OpenAI-compatible server) and bring-your-own AI SDK models (Azure, Bedrock) in any failover chain.
+Providers: Anthropic, Google, OpenAI, OpenRouter, Venice, Together.ai, Hugging Face — plus self-hosted endpoints (Ollama, vLLM, LM Studio, or any OpenAI-compatible server) and enterprise clouds (Bedrock, Azure, Vertex AI, watsonx.ai) via BYO-SDK [provider factories](./examples/enterprise-recipes.md) — all mixable in one failover chain.
 
 ## Why
 
@@ -190,6 +190,35 @@ const gw = new Gateway({
 ```
 
 Endpoint tokens are logged but cost $0 and never count against spend caps — caps are about real money. A flaky local vLLM gets the same schema-validated failover as a cloud API, so local-first/cloud-fallback chains work out of the box.
+
+### Enterprise clouds (Bedrock, Azure, Vertex, watsonx)
+
+Bring your own cloud SDK — the gateway takes a factory, keeping this package at zero cloud dependencies and leaving SigV4/Entra/ADC/IAM auth to the SDKs built for it:
+
+```ts
+import { createAmazonBedrock } from "@ai-sdk/amazon-bedrock"; // your dependency
+
+const bedrock = createAmazonBedrock({ region: "us-east-1" });
+const gw = new Gateway({
+  usage,
+  providers: {
+    factories: { bedrock: { model: (id) => bedrock(id) } },
+    pricing: { "anthropic.claude-sonnet-4-6-v1:0": { in: 0.3, out: 1.5 } }, // region rates: yours to supply
+    retention: { bedrock: { zdr: true, note: "in-region, no retention per AWS terms" } },
+  },
+  modelConfig: {
+    getOverride: async () => null,
+    getChain: async () => [
+      { factory: "bedrock", model: "anthropic.claude-sonnet-4-6-v1:0" },
+      { provider: "anthropic", model: "claude-sonnet-4-6" }, // direct-API fallback
+    ],
+  },
+});
+// Task ids too: "bedrock:anthropic.claude-...". Recipes for all four clouds
+// (including a watsonx IAM token-refresh helper): examples/enterprise-recipes.md
+```
+
+Factory models cost real money: unknown pricing warns and estimates conservatively — never silent $0 — and factories are NOT ZDR until you assert your contract terms.
 
 ### ZDR-aware routing (zero data retention)
 

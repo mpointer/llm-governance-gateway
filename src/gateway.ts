@@ -1227,7 +1227,7 @@ export class Gateway {
       console.warn("[llm-gateway] judge skipped: no judge model resolvable");
       return;
     }
-    const { provider, model } = parseModelId(modelId);
+    const { provider, model } = this.registry.parseAny(modelId);
 
     // The judge sees the same data as the main call — the retention
     // constraint applies to it too. Skip (never fail the main response).
@@ -1288,7 +1288,7 @@ export class Gateway {
       judgeModel = "mock";
       durationMs = 0;
     } else {
-      const lm = this.registry.buildLanguageModel(provider, model);
+      const lm = this.registry.buildAny(provider, model);
       if (!lm) {
         console.warn(`[llm-gateway] judge skipped: no API key for "${provider}"`);
         return;
@@ -1368,10 +1368,10 @@ export class Gateway {
       let resolvedModel: string;
       let lm: LanguageModel | undefined;
       if (opts.model) {
-        const parsed = parseModelId(opts.model);
+        const parsed = this.registry.parseAny(opts.model);
         resolvedProvider = parsed.provider;
         resolvedModel = parsed.model;
-        lm = this.registry.buildLanguageModel(parsed.provider, parsed.model) ?? undefined;
+        lm = this.registry.buildAny(parsed.provider, parsed.model) ?? undefined;
       } else if (opts.task && this.tasks) {
         const t = await this.tasks.modelForTask(opts.task);
         resolvedProvider = t.provider;

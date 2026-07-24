@@ -137,8 +137,13 @@ export class ProviderRegistry {
     return !!(this.cfg.endpoints?.[name] ?? LOCAL_PRESETS[name]);
   }
 
-  /** Endpoint-aware model-id parse: built-in prefixes win, then endpoint
-   *  names, then bare = Anthropic. */
+  /** Is this name a configured provider factory? */
+  isFactory(name: string): boolean {
+    return !!this.cfg.factories?.[name];
+  }
+
+  /** Namespace-aware model-id parse: built-in prefixes win, then endpoint
+   *  names, then factory names, then bare = Anthropic. */
   parseAny(id: string): { provider: string; model: string; endpoint: boolean } {
     const idx = id.indexOf(":");
     if (idx > 0) {
@@ -149,9 +154,18 @@ export class ProviderRegistry {
       if (this.isEndpoint(prefix)) {
         return { provider: prefix, model: id.slice(idx + 1), endpoint: true };
       }
+      if (this.isFactory(prefix)) {
+        return { provider: prefix, model: id.slice(idx + 1), endpoint: false };
+      }
     }
     const p = parseModelId(id);
     return { provider: p.provider, model: p.model, endpoint: false };
+  }
+
+  buildFactoryModel(name: string, model: string): LanguageModel | null {
+    const f = this.cfg.factories?.[name];
+    if (!f) return null;
+    return f.model(model);
   }
 
   buildEndpointModel(name: string, model: string): LanguageModel | null {
@@ -165,9 +179,10 @@ export class ProviderRegistry {
     return createOpenAI({ apiKey, baseURL }).chat(model);
   }
 
-  /** Build for a built-in provider OR a custom endpoint. */
+  /** Build for a built-in provider, custom endpoint, or provider factory. */
   buildAny(provider: string, model: string): LanguageModel | null {
     if (this.isEndpoint(provider)) return this.buildEndpointModel(provider, model);
+    if (this.isFactory(provider)) return this.buildFactoryModel(provider, model);
     if ((PROVIDER_IDS as string[]).includes(provider)) {
       return this.buildLanguageModel(provider as ProviderId, model);
     }
@@ -267,11 +282,16 @@ export class ProviderRegistry {
   ): ChainLink[] {
     const out: ChainLink[] = [];
     for (const link of links) {
-      const name = link.endpoint ?? link.provider;
-      if (!name) continue; // one of provider/endpoint is required
+      const name = link.factory ?? link.endpoint ?? link.provider;
+      if (!name) continue; // one of provider/endpoint/factory is required
       if (link.languageModel) {
         // BYO model: tier re-routing doesn't apply (we can't rebuild it).
         out.push({ provider: name, model: link.model, languageModel: link.languageModel });
+        continue;
+      }
+      if (link.factory) {
+        const lm = this.buildFactoryModel(link.factory, link.model);
+        if (lm) out.push({ provider: link.factory, model: link.model, languageModel: lm });
         continue;
       }
       if (link.endpoint) {

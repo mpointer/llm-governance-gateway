@@ -114,8 +114,11 @@ export type ProviderId =
 export interface ChainLinkConfig {
   provider?: ProviderId;
   /** Custom endpoint name (ProviderConfig.endpoints or ollama/vllm/lmstudio
-   *  preset). Mutually exclusive with `provider`. */
+   *  preset). Mutually exclusive with `provider` and `factory`. */
   endpoint?: string;
+  /** Provider factory name (ProviderConfig.factories). Mutually exclusive
+   *  with `provider` and `endpoint`. */
+  factory?: string;
   model: string;
   /** Falls back to the provider's configured/env API key when omitted. */
   apiKey?: string;
@@ -166,6 +169,23 @@ export interface ProviderConfig {
    * override via `retention` if yours is shared infrastructure.
    */
   endpoints?: Record<string, { baseURL: string; apiKey?: string; apiKeyEnv?: string }>;
+  /**
+   * Provider factories for clouds that need structured auth/config (Bedrock,
+   * Azure, Vertex, watsonx — see docs/design/enterprise-providers.md). BYO
+   * cloud SDK: the factory returns a ready AI SDK LanguageModel. Model ids
+   * use the factory name as prefix: "bedrock:anthropic.claude-...".
+   * Unlike local endpoints, factory models cost REAL money: pricing comes
+   * from `pricing` entries (fallback warns, never silent $0) and factories
+   * are NOT ZDR unless asserted in `retention`.
+   */
+  factories?: Record<
+    string,
+    {
+      model: (modelId: string) => import("ai").LanguageModel;
+      /** Optional discovery hook for doctor/admin UIs. */
+      listModels?: () => Promise<string[]>;
+    }
+  >;
   /** Fallback pricing for unknown models (default: conservative mid-tier). */
   fallbackPricing?: ModelPricing;
   /** Cents per server-side web search request. Default 1 (≈$10/1k). */
