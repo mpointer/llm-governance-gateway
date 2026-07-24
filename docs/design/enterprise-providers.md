@@ -108,11 +108,13 @@ wrapping the recipes with the SDK as optional peer.
   config, $0 pricing); factories are for everything else. Endpoints could be
   reimplemented atop factories someday; not worth the churn now.
 
-## Open questions
+## Decisions (2026-07-24)
 
-1. Chain config field name: `factory: "bedrock"` (parallel to `endpoint:`) vs
-   overloading `provider:` with factory names. Leaning `factory:` — explicit
-   beats clever, and the union type stays honest.
-2. Should `watsonx`'s IAM token refresh get a documented helper (tokens expire
-   hourly; naive factories will 401 mid-day)? Leaning yes: a 20-line
-   `refreshingTokenFactory()` utility in the recipe, not in the library.
+1. **Chain config uses an explicit `factory:` field**, parallel to
+   `endpoint:` — explicit beats clever, and the union type stays honest.
+2. **The watsonx recipe ships a documented IAM refresh helper** (IBM IAM
+   tokens expire hourly; a naive factory 401s mid-day). It lives in the
+   recipe/examples, not the library — the library stays auth-agnostic.
+   Sketch: a closure caching `{ token, expiresAt }`, exchanging the apikey at
+   iam.cloud.ibm.com when <5 min remain, surfaced as a `fetch`-wrapping or
+   headers-provider function passed to the factory's client.
