@@ -23,19 +23,23 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./drizzle-sqlite": {
       "types": "./dist/adapters/drizzle-sqlite.d.ts",
-      "import": "./dist/adapters/drizzle-sqlite.js"
+      "import": "./dist/adapters/drizzle-sqlite.js",
+      "default": "./dist/adapters/drizzle-sqlite.js"
     },
     "./drizzle-pg": {
       "types": "./dist/adapters/drizzle-pg.d.ts",
-      "import": "./dist/adapters/drizzle-pg.js"
+      "import": "./dist/adapters/drizzle-pg.js",
+      "default": "./dist/adapters/drizzle-pg.js"
     },
     "./http": {
       "types": "./dist/http/app.d.ts",
-      "import": "./dist/http/app.js"
+      "import": "./dist/http/app.js",
+      "default": "./dist/http/app.js"
     }
   },
   "files": [
