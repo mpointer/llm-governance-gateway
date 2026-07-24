@@ -29,7 +29,7 @@ Three things no popular tool combines today, all shipped here:
 - [ ] OTel / Langfuse export hooks (integrate with observability, don't compete with it)
 - [x] Together.ai + Hugging Face providers (#1) — shipped: first-class ids, discovery, Together pricing sync
 - [x] Local serving (#3) — shipped: custom OpenAI-compatible endpoint registry, ollama/vllm/lmstudio presets, zero-cost cap exclusion, local-first chains
-- [ ] Enterprise providers: Bedrock/Azure/Vertex/watsonx (#2) — needs structured per-provider config design
+- [ ] Enterprise providers: Bedrock/Azure/Vertex/watsonx (#2) — design DECIDED: provider-factory registry (BYO cloud SDK, zero new deps). See [docs/design/enterprise-providers.md](./docs/design/enterprise-providers.md)
 - [x] ZDR-aware routing (#4) — shipped: caller-asserted retention map (fail closed), task/call constraints, chain skip, zdrEnforced audit field, judge/stream/batch enforcement
 - [x] OpenRouter pricing auto-sync — shipped: discovery registers vendor pricing into the registry
 - [ ] Pluggable guardrail hooks (pre/post) — TypeScript-native, no Python sidecar
