@@ -1,6 +1,6 @@
 # llm-governance-gateway
 
-**The governance layer LLM proxies promised — as a TypeScript library you can read.**
+**The governance layer LLM proxies promised as a TypeScript library you can read.**
 
 Every call runs through one governed pipeline:
 
@@ -9,22 +9,22 @@ rate limit → spend caps (per-user + global circuit breaker) → cache
 → schema-validated provider failover → usage log → LLM-judge
 ```
 
-No sidecar proxy to deploy. No hosted control plane. No sprawling dependency tree — five runtime deps (the [Vercel AI SDK](https://sdk.vercel.ai), three provider adapters, Zod), everything else optional peers. It runs *in your process*, enforces caps against *your* database, and the whole pipeline — caps, cache, failover, judge — runs deterministically in CI with zero API keys.
+No sidecar proxy to deploy. No hosted control plane. No sprawling dependency tree and five runtime deps (the [Vercel AI SDK](https://sdk.vercel.ai), three provider adapters, Zod), everything else optional peers. It runs *in your process*, enforces caps against *your* database, and the whole pipeline from caps, cache, failover, to judge, runs deterministically in CI with zero API keys.
 
-Providers: Anthropic, Google, OpenAI, OpenRouter, Venice — plus bring-your-own AI SDK model (Azure, Bedrock, custom endpoints) in any failover chain.
+Providers: Anthropic, Google, OpenAI, OpenRouter, Venice, plus bring-your-own AI SDK model (Azure, Bedrock, custom endpoints) in any failover chain.
 
 ## Why
 
 Spend controls in this space are usually observed (dashboards that tell you *after* the money is gone) or enforced by infrastructure you must operate and trust (proxies, gateways, hosted control planes). This library takes the third path: governance as code in your own runtime, checked before every call, type-safe from Zod schema to spend cap.
 
 - **Spend caps that actually hold.** Per-user daily caps plus an app-wide daily circuit breaker, checked against your usage store before every call. Unset ≠ uncapped: defaults are conservative, and only an explicit `0` opts out.
-- **Schema-validation-aware failover.** primary → fallback → backup providers, with 429/5xx-aware retries, `Retry-After` honoring, and equal-jitter backoff. When a model returns schema-invalid output, the validation error is fed back for one repair attempt, then the chain falls to the next provider — a different model often satisfies the schema where the first couldn't ([vercel/ai#9950](https://github.com/vercel/ai/issues/9950), [#9002](https://github.com/vercel/ai/issues/9002)). Chain links accept bring-your-own AI SDK models (Azure, Bedrock, custom base URLs).
-- **Deterministic CI.** Mock mode replaces providers with registered responders — your AI-dependent test suite runs offline with zero keys.
+- **Schema-validation-aware failover.** primary → fallback → backup providers, with 429/5xx-aware retries, `Retry-After` honoring, and equal-jitter backoff. When a model returns schema-invalid output, the validation error is fed back for one repair attempt, then the chain falls to the next provider. A different model often satisfies the schema where the first couldn't ([vercel/ai#9950](https://github.com/vercel/ai/issues/9950), [#9002](https://github.com/vercel/ai/issues/9002)). Chain links accept bring-your-own AI SDK models (Azure, Bedrock, custom base URLs).
+- **Deterministic CI.** Mock mode replaces providers with registered responders so your AI-dependent test suite runs offline with zero keys.
 - **Prompt library pattern.** Store-as-override, code-as-fallback: admins can edit prompts at runtime; a broken edit (missing `{{placeholder}}`) falls back to the code default instead of silently sending a malformed prompt.
 - **Judge in the request path — sampled and budget-aware.** Model-graded rubric scoring runs inline (not offline, not async-later): define criteria, sample a fraction of calls, and optionally *gate* low-scoring responses. The judge skips itself when its estimated cost would cross the global spend cap — a governance check never blows the budget — and gated responses still persist their scores for audit. Plus a free caller-computed rubric and full usage accounting (tokens, cost, latency, trace IDs) with an optional at-rest encryption hook.
 - **Task-based routing.** Name your call sites (`"enrich"`, `"dedup_judge"`, `"editorial"`), assign each a default model in code, and let an admin store override models per task at runtime — with TTL caching and graceful degradation to code defaults when the store is down.
 - **Live model discovery.** `listAllProviderModels()` queries each vendor's models API for every provider with an API key configured; keyless or erroring providers fall back to static lists so admin UIs stay usable offline.
-- **Prompt test runs.** `runPromptTest()` executes an edited (even unsaved) prompt body with sample variables against any model, bypassing the cache but *not* usage logging — test spend shows up in the cost dashboard under `admin:prompt-test`.
+- **Prompt test runs.** `runPromptTest()` executes an edited (even unsaved) prompt body with sample variables against any model, bypassing the cache but *not* usage logging.  The test spend shows up in the cost dashboard under `admin:prompt-test`.
 
 ## Quickstart
 
@@ -62,7 +62,7 @@ npx llm-gateway init     # guided key entry → .env.local (chmod 600)
 npx llm-gateway doctor   # validate every configured key against the provider's live models API
 ```
 
-Keys resolve in order: `ProviderConfig.apiKeys` (programmatic) → shell env → `.env.local` / `.env` (loaded by the CLI and smoke script via `loadEnvFiles()`; call it yourself in dev servers if you want file-based keys there too). This is deliberately not a secrets manager — production keys belong in your deploy platform's secret store.
+Keys resolve in order: `ProviderConfig.apiKeys` (programmatic) → shell env → `.env.local` / `.env` (loaded by the CLI and smoke script via `loadEnvFiles()`; call it yourself in dev servers if you want file-based keys there too). This is deliberately not a secrets manager because production keys belong in your deploy platform's secret store.
 
 ### Testing without API keys
 
