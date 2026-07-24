@@ -212,6 +212,47 @@ const res = await gw.runStructured({
 
 Scores land in your `UsageStore` (`saveJudgeScore`) linked to the call's usage row; judge spend is logged under `route: "judge:<route>"` so eval cost is visible, not hidden. In mock mode, register `judge:<slug>` responders to test gating deterministically.
 
+### Batch processing (50% token cost)
+
+Anthropic Message Batches with two-phase spend accounting — see [the design doc](./docs/design/batch-processing.md):
+
+```ts
+import Anthropic from "@anthropic-ai/sdk";
+import { anthropicBatchClient, MemoryBatchJobStore } from "llm-governance-gateway";
+
+const gw = new Gateway({
+  usage,
+  batch: { client: anthropicBatchClient(new Anthropic({ apiKey })), store: jobStore },
+});
+
+const sub = await gw.submitBatch(ItemSchema, {
+  slug: "menu_extract",
+  model: "claude-haiku-4-5-20251001",
+  items: pages.map((p) => ({ id: p.id, variables: { html: p.html } })),
+  maxCostCents: 500, // optional hard ceiling — the ESTIMATE is not the guarantee
+});
+// sub.cached — items served from cache, never submitted
+// Reservation logged at submit: a submitted batch is committed money.
+
+// Later (cron): if ((await gw.pollBatch(sub.batchId)).ready) …
+const { results, costCents } = await gw.reconcileBatch(sub.batchId, ItemSchema);
+// per-item: { ok:true, object } | { ok:false, reason: "schema"|"errored"|"expired"|"canceled" }
+```
+
+Reconcile logs per-item discounted actuals, releases the reservation with a compensating row (net spend = actuals), and is idempotent by job state. Schema-invalid items are flagged, never silently re-run at sync prices.
+
+### Streaming
+
+`streamStructured` runs the same governance front door (rate limit → caps → cache), then streams partial objects:
+
+```ts
+const res = await gw.streamStructured({ ...opts });
+for await (const partial of res.partialObjectStream) render(partial);
+const final = await res.object; // resolves after usage logging + cache write
+```
+
+v1 constraints, stated plainly: no mid-stream failover (the first resolvable link is used), no repair retry, no judge, no native-Anthropic options. Cache hits return a single-emission stream.
+
 ### HTTP service (multi-app deployments)
 
 Mount the pipeline as a service so apps in any language share one enforcement point. Hono (optional peer dep) runs on Cloudflare Workers, Node, Bun, and Deno:

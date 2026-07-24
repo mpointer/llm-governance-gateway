@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { generateObject, generateText } from "ai";
+import { generateObject, generateText, streamObject } from "ai";
 import type { LanguageModel, Schema } from "ai";
 import { z } from "zod";
 import { backoffMs, isRetryable, isSchemaValidationError } from "./backoff.js";
@@ -7,9 +7,18 @@ import { JudgeGateError, RateLimitError, SpendCapError } from "./errors.js";
 import { ProviderRegistry, parseModelId, type ChainLink } from "./providers.js";
 import {
   callNativeAnthropic,
+  extractEmitToolInput,
   NativeSchemaError,
   type NativeCallOptions,
 } from "./anthropic-native.js";
+import {
+  batchSchemaToJson,
+  buildBatchParams,
+  type BatchItemResult,
+  type ReconcileResult,
+  type SubmitBatchOptions,
+  type SubmitBatchResult,
+} from "./batch.js";
 import { TaskRouter } from "./tasks.js";
 import { missingPlaceholders, renderTemplate } from "./template.js";
 import type {
@@ -172,6 +181,20 @@ export interface RunStructuredResult<O> {
 
 type MockResponder = (input: unknown) => unknown;
 
+export interface StreamStructuredResult<O> {
+  /** true = served from cache; the stream emits the full object once. */
+  cached: boolean;
+  traceId: string;
+  /** Progressively larger partials (single emission when cached/mocked). */
+  partialObjectStream: AsyncIterable<Partial<O>>;
+  /** Resolves AFTER usage logging and cache write complete. */
+  object: Promise<O>;
+}
+
+async function* singleEmission<T>(value: T): AsyncGenerator<T> {
+  yield value;
+}
+
 const JUDGE_SNIPPET_LIMIT = 4000;
 
 function buildJudgePrompt(
@@ -224,6 +247,7 @@ export class Gateway {
   private readonly encrypt?: (t: string) => string;
   private readonly judgeDefaults?: GatewayConfig["judge"];
   private readonly anthropicCfg?: GatewayConfig["anthropic"];
+  private readonly batchCfg?: GatewayConfig["batch"];
   private readonly mockResponders = new Map<string, MockResponder>();
 
   constructor(cfg: GatewayConfig) {
@@ -242,6 +266,387 @@ export class Gateway {
     this.encrypt = cfg.encrypt;
     this.judgeDefaults = cfg.judge;
     this.anthropicCfg = cfg.anthropic;
+    this.batchCfg = cfg.batch;
+  }
+
+  // ===========================================================================
+  // Streaming — same governance front door, streamObject body.
+  // v1 constraints (documented): no mid-stream failover (the first resolvable
+  // link is used; a mid-stream provider error surfaces to the consumer), no
+  // repair retry, no judge, no native-Anthropic options.
+  // ===========================================================================
+
+  async streamStructured<I, O>(
+    opts: Omit<RunStructuredOptions<I, O>, "judge" | "anthropic" | "schema"> & {
+      schema: z.ZodType<O>;
+    },
+  ): Promise<StreamStructuredResult<O>> {
+    const traceId = randomUUID();
+    const identifier = opts.userId ?? (opts.anonKey ? `anon:${opts.anonKey}` : "anon");
+
+    const rl = await this.rateLimiter.limit(identifier);
+    if (!rl.success) throw new RateLimitError(rl.limit, rl.remaining);
+    await this.checkSpendCap(opts.userId, opts.route);
+
+    const useCache = opts.cache !== false;
+    if (useCache && !opts.cacheParts) {
+      throw new Error("streamStructured: cacheParts is required unless cache:false is set.");
+    }
+    const key = useCache ? cacheKey(opts.slug, opts.cacheParts!) : null;
+    if (key) {
+      const cached = await this.cache.get<O>(key);
+      if (cached !== undefined) {
+        await this.logUsage({
+          app: opts.app,
+          userId: opts.userId ?? null,
+          route: opts.route ?? null,
+          promptSlug: opts.slug,
+          provider: "cache",
+          model: "cache",
+          inputTokens: 0,
+          outputTokens: 0,
+          estimatedCostCents: 0,
+          cacheHit: true,
+          traceId,
+        });
+        return {
+          cached: true,
+          traceId,
+          partialObjectStream: singleEmission(cached as Partial<O>),
+          object: Promise.resolve(cached),
+        };
+      }
+    }
+
+    const promptConfig: PromptConfig = opts.promptBody
+      ? { body: opts.promptBody }
+      : await this.loadPrompt(opts.slug);
+    const prompt = renderTemplate(promptConfig.body, opts.variables(opts.input));
+    const temperature = opts.temperature ?? promptConfig.temperature;
+
+    const finalize = async (object: O, inTok: number, outTok: number, provider: string, model: string, durationMs: number) => {
+      if (key) await this.cache.set(key, object, this.cacheTtlSeconds);
+      await this.logUsage({
+        app: opts.app,
+        userId: opts.userId ?? null,
+        route: opts.route ?? null,
+        promptSlug: opts.slug,
+        provider,
+        model,
+        inputTokens: inTok,
+        outputTokens: outTok,
+        estimatedCostCents: this.registry.estimateCostCents(model, inTok, outTok),
+        cacheHit: false,
+        traceId,
+        durationMs,
+        inputText: prompt,
+        outputText: JSON.stringify(object),
+      });
+    };
+
+    if (this.mock) {
+      const responder = this.mockResponders.get(opts.slug);
+      if (!responder) {
+        throw new Error(`Mock mode is on but no responder registered for "${opts.slug}".`);
+      }
+      const object = opts.schema.parse(responder(opts.input));
+      await finalize(object, Math.ceil(prompt.length / 4), Math.ceil(JSON.stringify(object).length / 4), "mock", "mock", 0);
+      return {
+        cached: false,
+        traceId,
+        partialObjectStream: singleEmission(object as Partial<O>),
+        object: Promise.resolve(object),
+      };
+    }
+
+    // Single-link resolution: adminOverride > task > chain[0] > default.
+    const adminOverride = (await this.modelConfig?.getOverride()) ?? null;
+    let resolved: { provider: string; model: string; languageModel?: LanguageModel };
+    if (adminOverride) {
+      resolved = this.registry.resolveDefault(adminOverride);
+    } else if (opts.task && this.tasks) {
+      const t = await this.tasks.modelForTask(opts.task);
+      resolved = {
+        provider: t.provider,
+        model: t.model,
+        languageModel: this.registry.buildLanguageModel(t.provider, t.model) ?? undefined,
+      };
+    } else {
+      const chainCfg = (await this.modelConfig?.getChain()) ?? [];
+      const chain = this.registry.buildChain(chainCfg, opts.tier);
+      resolved = chain[0] ?? this.registry.resolveDefault();
+    }
+    if (!resolved.languageModel) {
+      throw new Error(`No API key for provider "${resolved.provider}".`);
+    }
+
+    const start = Date.now();
+    const stream = streamObject({
+      model: resolved.languageModel,
+      schema: opts.schema,
+      prompt,
+      ...(opts.system ? { system: opts.system } : {}),
+      ...(temperature !== undefined ? { temperature } : {}),
+    });
+
+    const objectPromise = (async () => {
+      const object = await stream.object; // schema-validated by the AI SDK
+      const usage = await stream.usage;
+      await finalize(
+        object,
+        usage.inputTokens ?? 0,
+        usage.outputTokens ?? 0,
+        resolved.provider,
+        resolved.model,
+        Date.now() - start,
+      );
+      return object;
+    })();
+
+    return {
+      cached: false,
+      traceId,
+      partialObjectStream: stream.partialObjectStream as AsyncIterable<Partial<O>>,
+      object: objectPromise,
+    };
+  }
+
+  // ===========================================================================
+  // Batch processing — see docs/design/batch-processing.md
+  // ===========================================================================
+
+  private requireBatch() {
+    if (!this.batchCfg) {
+      throw new Error("Batch requires GatewayConfig.batch ({ client, store }).");
+    }
+    return this.batchCfg;
+  }
+
+  /** Governed batch submit: cache pre-check, estimate + optional hard
+   *  ceiling, spend-cap check WITH the projected reservation, then submit
+   *  and log the reservation row. */
+  async submitBatch<I, O>(
+    schema: z.ZodType<O>,
+    opts: SubmitBatchOptions<I>,
+  ): Promise<SubmitBatchResult> {
+    const cfg = this.requireBatch();
+    const discount = cfg.discount ?? 0.5;
+    const allowance = cfg.outputAllowanceTokens ?? 1024;
+
+    // Rate limit (one submit = one governed action).
+    const identifier = opts.userId ?? "anon";
+    const rl = await this.rateLimiter.limit(identifier);
+    if (!rl.success) throw new RateLimitError(rl.limit, rl.remaining);
+
+    // Model resolution: explicit > task > default. Must be Anthropic.
+    let provider: string;
+    let model: string;
+    if (opts.model) {
+      ({ provider, model } = parseModelId(opts.model));
+    } else if (opts.task && this.tasks) {
+      const t = await this.tasks.modelForTask(opts.task);
+      provider = t.provider;
+      model = t.model;
+    } else {
+      const d = this.registry.resolveDefault();
+      provider = d.provider;
+      model = d.model;
+    }
+    if (provider !== "anthropic") {
+      throw new Error(
+        `Batch supports Anthropic models only (resolved "${provider}/${model}").`,
+      );
+    }
+
+    const promptConfig = await this.loadPrompt(opts.slug);
+    const jsonSchema = batchSchemaToJson(schema);
+    const useCache = opts.cache !== false;
+
+    // Cache pre-check: serve hits now, submit only misses.
+    const cached: { id: string; object: unknown }[] = [];
+    const misses: { id: string; prompt: string; cacheK: string | null }[] = [];
+    for (const item of opts.items) {
+      const prompt = renderTemplate(promptConfig.body, item.variables);
+      const k = useCache ? cacheKey(opts.slug, [JSON.stringify(item.variables)]) : null;
+      if (k) {
+        const hit = await this.cache.get<O>(k);
+        if (hit !== undefined) {
+          cached.push({ id: item.id, object: hit });
+          continue;
+        }
+      }
+      misses.push({ id: item.id, prompt, cacheK: k });
+    }
+    if (misses.length === 0) {
+      return { batchId: null, cached, submittedCount: 0, reservedCents: 0 };
+    }
+
+    // Submit-time ESTIMATE (documented as such — maxCostCents is the
+    // guarantee, the estimate is not).
+    let estimateCents = 0;
+    for (const m of misses) {
+      estimateCents +=
+        this.registry.estimateCostCents(model, Math.ceil(m.prompt.length / 4), allowance) *
+        discount;
+    }
+    if (opts.maxCostCents !== undefined && estimateCents > opts.maxCostCents) {
+      throw new Error(
+        `Batch estimate ${estimateCents.toFixed(2)}¢ exceeds maxCostCents ${opts.maxCostCents}¢ (${misses.length} items). Split the batch or raise the ceiling.`,
+      );
+    }
+    await this.checkSpendCap(opts.userId, opts.route ?? `batch:${opts.slug}`, estimateCents);
+
+    const requests = misses.map((m) => ({
+      customId: m.id,
+      params: buildBatchParams({
+        model,
+        prompt: m.prompt,
+        system: opts.system,
+        jsonSchema,
+        temperature: opts.temperature ?? promptConfig.temperature,
+        maxTokens: cfg.maxTokensPerItem ?? 4096,
+      }),
+    }));
+
+    const { id: batchId } = await cfg.client.submit(requests);
+
+    // Reservation row: committed money counts against caps immediately.
+    await this.logUsage({
+      app: opts.app,
+      userId: opts.userId ?? null,
+      route: `batch:reserve:${opts.slug}`,
+      promptSlug: opts.slug,
+      provider: "anthropic",
+      model,
+      inputTokens: 0,
+      outputTokens: 0,
+      estimatedCostCents: estimateCents,
+      cacheHit: false,
+      traceId: `batch:${batchId}`,
+    });
+
+    await cfg.store.createJob({
+      batchId,
+      slug: opts.slug,
+      model,
+      status: "submitted",
+      itemCount: misses.length,
+      cachedCount: cached.length,
+      reservedCents: estimateCents,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    return { batchId, cached, submittedCount: misses.length, reservedCents: estimateCents };
+  }
+
+  /** Poll provider status and sync the job store. Cron/queue-friendly. */
+  async pollBatch(batchId: string): Promise<{ status: string; ready: boolean }> {
+    const cfg = this.requireBatch();
+    const job = await cfg.store.getJob(batchId);
+    if (!job) throw new Error(`Unknown batch job "${batchId}"`);
+    if (job.status === "reconciled") return { status: "reconciled", ready: false };
+    const { status } = await cfg.client.check(batchId);
+    if (status === "ended" && job.status === "submitted") {
+      await cfg.store.updateJob(batchId, { status: "ended" });
+    }
+    return { status, ready: status === "ended" };
+  }
+
+  /**
+   * Stream results, validate each item, log per-item actuals (discounted),
+   * release the reservation. Idempotent by job state: a reconciled job
+   * returns { alreadyReconciled: true } without re-logging. (Cache write-back
+   * of batch results is a caller concern in v1 — the job store doesn't
+   * persist per-item cache keys.)
+   */
+  async reconcileBatch<O>(
+    batchId: string,
+    schema: z.ZodType<O>,
+  ): Promise<ReconcileResult<O>> {
+    const cfg = this.requireBatch();
+    const discount = cfg.discount ?? 0.5;
+    const job = await cfg.store.getJob(batchId);
+    if (!job) throw new Error(`Unknown batch job "${batchId}"`);
+    if (job.status === "reconciled") {
+      return { results: [], costCents: job.reconciledCents ?? 0, alreadyReconciled: true };
+    }
+    await cfg.store.updateJob(batchId, { status: "reconciling" });
+
+    // Phase 1: stream + validate (no side effects yet).
+    const results: BatchItemResult<O>[] = [];
+    const usageRows: Omit<UsageEntry, "createdAt">[] = [];
+    let totalCents = 0;
+
+    for await (const item of cfg.client.results(batchId)) {
+      if (item.result.type !== "succeeded") {
+        results.push({
+          id: item.customId,
+          ok: false,
+          reason: item.result.type,
+          ...(item.result.type === "errored"
+            ? { error: String((item.result as { error: unknown }).error).slice(0, 300) }
+            : {}),
+        });
+        continue; // unprocessed items are not billed and log no usage
+      }
+      const msg = item.result.message;
+      const u = msg.usage ?? {};
+      const cents =
+        this.registry.estimateCostCents(
+          job.model,
+          u.input_tokens ?? 0,
+          u.output_tokens ?? 0,
+          {
+            cacheCreateTokens: u.cache_creation_input_tokens ?? 0,
+            cacheReadTokens: u.cache_read_input_tokens ?? 0,
+          },
+        ) * discount;
+      totalCents += cents;
+      usageRows.push({
+        userId: null,
+        route: `batch:${job.slug}`,
+        promptSlug: job.slug,
+        provider: "anthropic",
+        model: job.model,
+        inputTokens: u.input_tokens ?? 0,
+        outputTokens: u.output_tokens ?? 0,
+        estimatedCostCents: cents,
+        cacheHit: false,
+        traceId: `${batchId}:${item.customId}`, // deterministic — duplicates detectable
+        cacheCreateTokens: u.cache_creation_input_tokens ?? null,
+        cacheReadTokens: u.cache_read_input_tokens ?? null,
+      });
+      try {
+        const raw = extractEmitToolInput(msg);
+        results.push({ id: item.customId, ok: true, object: schema.parse(raw) });
+      } catch (err) {
+        results.push({
+          id: item.customId,
+          ok: false,
+          reason: "schema",
+          error: err instanceof Error ? err.message.slice(0, 300) : String(err),
+        });
+      }
+    }
+
+    // Phase 2: side effects — per-item actuals, then reservation release.
+    for (const row of usageRows) await this.logUsage(row);
+    await this.logUsage({
+      userId: null,
+      route: `batch:release:${job.slug}`,
+      promptSlug: job.slug,
+      provider: "anthropic",
+      model: job.model,
+      inputTokens: 0,
+      outputTokens: 0,
+      estimatedCostCents: -job.reservedCents, // compensating row
+      cacheHit: false,
+      traceId: `batch:${batchId}:release`,
+    });
+    await cfg.store.updateJob(batchId, { status: "reconciled", reconciledCents: totalCents });
+
+    return { results, costCents: totalCents, alreadyReconciled: false };
   }
 
   // ---------------------------------------------------------------------------
@@ -332,13 +737,18 @@ export class Gateway {
   // Spend caps: global circuit breaker first (per-identity caps can't see
   // N users × cap on a viral day), then the per-identity cap.
   // -------------------------------------------------------------------------
-  private async checkSpendCap(userId: string | undefined, route: string | undefined) {
+  private async checkSpendCap(
+    userId: string | undefined,
+    route: string | undefined,
+    /** Projected additional spend (batch reservations) counted against caps. */
+    projectedCents = 0,
+  ) {
     const todayUtc = new Date();
     todayUtc.setUTCHours(0, 0, 0, 0);
 
     const globalCap = this.caps.globalDailyCents ?? DEFAULT_GLOBAL_CAP_CENTS;
     if (globalCap) {
-      const total = await this.usage.sumSpendCents(todayUtc);
+      const total = (await this.usage.sumSpendCents(todayUtc)) + projectedCents;
       if (total >= globalCap) {
         await this.usage.recordSpendCapEvent({
           userId: userId ?? null,
@@ -363,7 +773,8 @@ export class Gateway {
     }
     if (!capCents) return; // explicit 0 = deliberate opt-out
 
-    const spent = await this.usage.sumSpendCents(todayUtc, userId ?? null);
+    const spent =
+      (await this.usage.sumSpendCents(todayUtc, userId ?? null)) + projectedCents;
     if (spent >= capCents) {
       await this.usage.recordSpendCapEvent({
         userId: userId ?? null,

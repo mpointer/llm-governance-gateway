@@ -20,9 +20,9 @@ Three things no popular tool combines today, all shipped here:
 
 - [x] **Judge-in-the-request-path with budget-aware sampling** — shipped: sampled model-graded scoring, cap-aware self-skip, observe/gate modes, audit-first gating
 - [x] Native Anthropic path — shipped: BYO @anthropic-ai/sdk client, adaptive/budgeted thinking, cache_control, server-side web search, cache-token cost accounting, cross-path failover
-- [ ] **Governed batch processing** — Anthropic Message Batches (50% cost) with two-phase spend accounting (reserve at submit, reconcile per item), DB-tracked jobs, streamed JSONL results, idempotent crash recovery. Design: [docs/design/batch-processing.md](./docs/design/batch-processing.md). Ships with/after the native Anthropic path (needs the native SDK).
+- [x] **Governed batch processing** — shipped: two-phase reservation/release, cache pre-check, maxCostCents ceiling, idempotent reconcile, per-item schema validation. Design: [docs/design/batch-processing.md](./docs/design/batch-processing.md)
 - [x] Cache-aware cost model — shipped with the native path (cacheWrite/cacheRead rates, web-search per-call pricing)
-- [ ] Streaming (`streamObject`/`streamText`) inside the same governance pipeline
+- [x] Streaming — shipped: streamStructured with the full governance front door (v1: no mid-stream failover/judge/native)
 
 ## v0.4+
 

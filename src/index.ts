@@ -3,6 +3,7 @@ export {
   cacheKey,
   type RunStructuredOptions,
   type RunStructuredResult,
+  type StreamStructuredResult,
   type PromptTestOptions,
   type PromptTestResult,
 } from "./gateway.js";
@@ -32,6 +33,21 @@ export {
   MAX_DELAY_MS,
 } from "./backoff.js";
 export { loadEnvFiles, parseEnvFile } from "./envfile.js";
+export {
+  anthropicBatchClient,
+  MemoryBatchJobStore,
+  buildBatchParams,
+  type BatchClient,
+  type BatchJobStore,
+  type BatchJob,
+  type BatchConfig,
+  type BatchRequestItem,
+  type BatchResultItem,
+  type BatchItemResult,
+  type SubmitBatchOptions,
+  type SubmitBatchResult,
+  type ReconcileResult,
+} from "./batch.js";
 export {
   callNativeAnthropic,
   NativeSchemaError,

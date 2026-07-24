@@ -1,6 +1,6 @@
 {
   "name": "llm-governance-gateway",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Governed structured-output LLM pipeline: rate limit → spend caps (per-user + global circuit breaker) → cache → provider-chain failover → Zod validation → usage logging → LLM-judge, with a deterministic mock provider for CI.",
   "license": "MIT",
   "author": "Michael Pointer <mpointer@gmail.com>",

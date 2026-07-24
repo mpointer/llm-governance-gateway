@@ -229,6 +229,9 @@ export interface GatewayConfig {
    * web search; every other provider stays on the AI SDK path.
    */
   anthropic?: import("./anthropic-native.js").NativeAnthropicConfig;
+  /** Governed batch processing (Anthropic Message Batches). See
+   *  docs/design/batch-processing.md. */
+  batch?: import("./batch.js").BatchConfig;
   /** Deterministic mock mode: no provider calls; responders supply outputs. */
   mock?: boolean;
   /** Tag written to every usage row (multi-app deployments). */

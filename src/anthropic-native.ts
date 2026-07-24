@@ -70,7 +70,21 @@ export class NativeSchemaError extends Error {
   override name = "AI_TypeValidationError";
 }
 
-const EMIT_TOOL = "emit_result";
+export const EMIT_TOOL = "emit_result";
+
+/** Extract the emit-tool input from a message, or throw NativeSchemaError. */
+export function extractEmitToolInput(msg: AnthropicMessage): unknown {
+  const toolUse = msg.content.find(
+    (b): b is { type: "tool_use"; name: string; input: unknown } =>
+      b.type === "tool_use" && (b as { name?: string }).name === EMIT_TOOL,
+  );
+  if (!toolUse) {
+    throw new NativeSchemaError(
+      `Anthropic response contained no ${EMIT_TOOL} tool call`,
+    );
+  }
+  return toolUse.input;
+}
 
 function defaultSupportsThinking(model: string): boolean {
   return (
