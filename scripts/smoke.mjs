@@ -43,11 +43,26 @@ for (const provider of configured) {
   const model =
     process.env[`SMOKE_MODEL_${provider.toUpperCase()}`] ?? DEFAULT_MODELS[provider];
 
-  // 1. Discovery
+  // Gateway first so discovery syncs vendor pricing (OpenRouter) into the
+  // SAME registry the generation step uses for cost estimation.
+  const gw = new Gateway({
+    usage: new MemoryUsageStore(),
+    promptDefaults: [
+      { slug: "smoke", body: "Reply with the single word: {{word}}", variables: ["word"] },
+    ],
+    modelConfig: {
+      getOverride: async () => null,
+      getChain: async () => [{ provider, model }],
+    },
+    caps: { userDailyCents: 0, anonDailyCents: 0, globalDailyCents: 0 },
+  });
+
+  // 1. Discovery (+ pricing sync)
   try {
-    const d = await listProviderModels(registry, provider);
+    const d = await listProviderModels(gw.registry, provider);
     const note = d.error ? ` (error: ${d.error})` : "";
-    console.log(`[${provider}] discovery: ${d.models.length} models, source=${d.source}${note}`);
+    const priced = provider === "openrouter" && gw.registry.hasPricing(model) ? ", pricing synced" : "";
+    console.log(`[${provider}] discovery: ${d.models.length} models, source=${d.source}${note}${priced}`);
     if (d.source !== "api") failures++;
   } catch (e) {
     console.error(`[${provider}] discovery FAILED: ${e.message}`);
@@ -56,17 +71,6 @@ for (const provider of configured) {
 
   // 2. Governed generation
   try {
-    const gw = new Gateway({
-      usage: new MemoryUsageStore(),
-      promptDefaults: [
-        { slug: "smoke", body: "Reply with the single word: {{word}}", variables: ["word"] },
-      ],
-      modelConfig: {
-        getOverride: async () => null,
-        getChain: async () => [{ provider, model }],
-      },
-      caps: { userDailyCents: 0, anonDailyCents: 0, globalDailyCents: 0 },
-    });
     const t0 = Date.now();
     const res = await gw.runStructured({
       slug: "smoke",

@@ -20,6 +20,7 @@ Three things no popular tool combines today, all shipped here:
 
 - [ ] **Judge-in-the-request-path with budget-aware sampling** — inline rubric/model-graded scoring that can flag or gate responses, sampled (e.g. 5% of calls) so eval spend stays bounded. Existing eval platforms score offline/async only.
 - [ ] Native Anthropic path (opt-in): adaptive extended thinking, prompt-caching `cache_control`, server-side web search — AI SDK path remains the default
+- [ ] **Governed batch processing** — Anthropic Message Batches (50% cost) with two-phase spend accounting (reserve at submit, reconcile per item), DB-tracked jobs, streamed JSONL results, idempotent crash recovery. Design: [docs/design/batch-processing.md](./docs/design/batch-processing.md). Ships with/after the native Anthropic path (needs the native SDK).
 - [ ] Cache-aware cost model (cache-write/cache-read token rates)
 - [ ] Streaming (`streamObject`/`streamText`) inside the same governance pipeline
 
@@ -27,7 +28,7 @@ Three things no popular tool combines today, all shipped here:
 
 - [ ] OTel / Langfuse export hooks (integrate with observability, don't compete with it)
 - [ ] Provider expansion: Azure OpenAI, Bedrock, Ollama, watsonx
-- [ ] OpenRouter pricing auto-sync (their models API returns prices — kill pricing-table drift)
+- [x] OpenRouter pricing auto-sync — shipped: discovery registers vendor pricing into the registry
 - [ ] Pluggable guardrail hooks (pre/post) — TypeScript-native, no Python sidecar
 - [ ] Admin UI reference (prompt library, task routing, spend dashboards)
 

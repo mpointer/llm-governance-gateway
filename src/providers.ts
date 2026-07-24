@@ -186,6 +186,15 @@ export class ProviderRegistry {
     return out;
   }
 
+  /** Register/override pricing at runtime (e.g. synced from a vendor's models API). */
+  addPricing(model: string, pricing: ModelPricing): void {
+    this.pricing[model] = pricing;
+  }
+
+  hasPricing(model: string): boolean {
+    return model in this.pricing;
+  }
+
   estimateCostCents(model: string, inputTokens: number, outputTokens: number): number {
     if (model === "mock" || model === "cache") return 0;
     const rate = this.pricing[model];

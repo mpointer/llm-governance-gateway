@@ -18,6 +18,7 @@ export { TaskRouter, type ResolvedTaskModel } from "./tasks.js";
 export {
   listProviderModels,
   listAllProviderModels,
+  openRouterPricingToCents,
   __resetModelsListCache,
   type ProviderModels,
 } from "./discovery.js";

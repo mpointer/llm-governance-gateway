@@ -21,13 +21,40 @@ export interface ProviderModels {
 const OPENAI_EXCLUDE =
   /(embed|whisper|tts|audio|realtime|image|dall-e|moderation|transcribe|search|davinci|babbage|instruct)/i;
 
+interface OpenRouterModel {
+  id: string;
+  /** USD per single token, as decimal strings. Negative = dynamic/BYOK. */
+  pricing?: { prompt?: string; completion?: string };
+}
+
+/**
+ * Convert OpenRouter per-token USD strings to cents per 1K tokens.
+ * Returns undefined for missing, non-finite, or negative (dynamic) pricing —
+ * never register a price we don't actually know.
+ */
+export function openRouterPricingToCents(
+  pricing: OpenRouterModel["pricing"],
+): { in: number; out: number } | undefined {
+  if (!pricing) return undefined;
+  const inUsd = Number(pricing.prompt);
+  const outUsd = Number(pricing.completion);
+  if (!Number.isFinite(inUsd) || !Number.isFinite(outUsd)) return undefined;
+  if (inUsd < 0 || outUsd < 0) return undefined;
+  // USD/token → cents/1K tokens: × 1000 tokens × 100 cents.
+  return { in: inUsd * 100_000, out: outUsd * 100_000 };
+}
+
 async function fetchJson(url: string, headers: Record<string, string>): Promise<unknown> {
   const res = await fetch(url, { headers, signal: AbortSignal.timeout(10_000) });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 
-async function fetchProviderModels(provider: ProviderId, apiKey: string): Promise<string[]> {
+async function fetchProviderModels(
+  provider: ProviderId,
+  apiKey: string,
+  registry: ProviderRegistry,
+): Promise<string[]> {
   switch (provider) {
     case "anthropic": {
       const data = (await fetchJson("https://api.anthropic.com/v1/models?limit=100", {
@@ -58,8 +85,15 @@ async function fetchProviderModels(provider: ProviderId, apiKey: string): Promis
     case "openrouter": {
       const data = (await fetchJson("https://openrouter.ai/api/v1/models", {
         Authorization: `Bearer ${apiKey}`,
-      })) as { data?: { id: string }[] };
-      return (data.data ?? []).map((m) => m.id).sort();
+      })) as { data?: OpenRouterModel[] };
+      const models = data.data ?? [];
+      // OpenRouter's models API includes per-token USD pricing — sync it into
+      // the registry so estimateCostCents never falls back for these models.
+      for (const m of models) {
+        const pricing = openRouterPricingToCents(m.pricing);
+        if (pricing) registry.addPricing(m.id, pricing);
+      }
+      return models.map((m) => m.id).sort();
     }
     case "venice": {
       const data = (await fetchJson("https://api.venice.ai/api/v1/models", {
@@ -97,7 +131,7 @@ export async function listProviderModels(
     };
   } else {
     try {
-      const models = await fetchProviderModels(provider, apiKey);
+      const models = await fetchProviderModels(provider, apiKey, registry);
       value =
         models.length > 0
           ? { provider, models, source: "api", configured: true }
