@@ -5,6 +5,11 @@
 //   npx llm-gateway doctor   validate every configured key against the
 //                            provider's live models API (default command)
 //
+// Known limit: doctor proves the key authenticates against the MODELS API.
+// Providers with scoped keys (e.g. Venice inference vs admin) can pass
+// doctor yet 401 on generation — `npm run smoke` is the generation-level
+// check.
+//
 // Deliberately NOT a secrets manager: keys live in your .env.local / shell /
 // deploy platform. This is entry + validation UX only.
 
@@ -30,7 +35,7 @@ const KEY_HINTS: Record<ProviderId, string> = {
   google: "aistudio.google.com/apikey",
   openai: "platform.openai.com/api-keys (sk-...)",
   openrouter: "openrouter.ai/keys (sk-or-...)",
-  venice: "venice.ai/settings/api (optional)",
+  venice: "venice.ai/settings/api — must be an INFERENCE-scoped key (admin keys pass doctor but 401 on generation)",
   together: "api.together.ai/settings/api-keys",
   huggingface: "huggingface.co/settings/tokens (hf_..., inference permission)",
 };

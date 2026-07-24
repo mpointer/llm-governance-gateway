@@ -64,6 +64,8 @@ npx llm-gateway doctor   # validate every configured key against the provider's 
 
 Keys resolve in order: `ProviderConfig.apiKeys` (programmatic) → shell env → `.env.local` / `.env` (loaded by the CLI and smoke script via `loadEnvFiles()`; call it yourself in dev servers if you want file-based keys there too). This is deliberately not a secrets manager — production keys belong in your deploy platform's secret store.
 
+One honest limit: `doctor` validates keys against each provider's *models* API. Providers with scoped keys (Venice separates inference from admin keys, for example) can pass `doctor` yet 401 on generation — a generation-level smoke test is the stronger check.
+
 ### Testing without API keys
 
 ```ts
