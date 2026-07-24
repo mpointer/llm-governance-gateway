@@ -19,7 +19,8 @@ export interface ResolvedModel {
 export interface ChainLink {
   provider: ProviderId;
   model: string;
-  languageModel: LanguageModel;
+  /** Absent only for links kept keyless (native-Anthropic execution path). */
+  languageModel?: LanguageModel;
 }
 
 export const PROVIDER_IDS: ProviderId[] = [
@@ -167,7 +168,13 @@ export class ProviderRegistry {
     return { provider, model, languageModel: lm ?? undefined };
   }
 
-  buildChain(links: ChainLinkConfig[], tier?: "fast" | "power"): ChainLink[] {
+  buildChain(
+    links: ChainLinkConfig[],
+    tier?: "fast" | "power",
+    /** Providers to keep in the chain even without a resolvable API key
+     *  (the native execution path brings its own client). */
+    keepKeyless?: ProviderId[],
+  ): ChainLink[] {
     const out: ChainLink[] = [];
     for (const link of links) {
       if (link.languageModel) {
@@ -182,6 +189,7 @@ export class ProviderRegistry {
       const model = (tier ? this.tierModel(link.provider, tier) : undefined) ?? link.model;
       const lm = this.buildLanguageModel(link.provider, model, link.apiKey);
       if (lm) out.push({ provider: link.provider, model, languageModel: lm });
+      else if (keepKeyless?.includes(link.provider)) out.push({ provider: link.provider, model });
     }
     return out;
   }
@@ -195,17 +203,32 @@ export class ProviderRegistry {
     return model in this.pricing;
   }
 
-  estimateCostCents(model: string, inputTokens: number, outputTokens: number): number {
+  estimateCostCents(
+    model: string,
+    inputTokens: number,
+    outputTokens: number,
+    extras?: { cacheCreateTokens?: number; cacheReadTokens?: number; webSearches?: number },
+  ): number {
     if (model === "mock" || model === "cache") return 0;
-    const rate = this.pricing[model];
+    let rate = this.pricing[model];
     if (!rate) {
-      const fb = this.cfg.fallbackPricing ?? DEFAULT_FALLBACK_PRICING;
+      rate = this.cfg.fallbackPricing ?? DEFAULT_FALLBACK_PRICING;
       // Don't silently log $0 — a missing pricing entry must be visible.
       console.warn(
         `[llm-gateway] no pricing for "${model}" — using fallback estimate. Add it to ProviderConfig.pricing.`,
       );
-      return (inputTokens * fb.in + outputTokens * fb.out) / 1000;
     }
-    return (inputTokens * rate.in + outputTokens * rate.out) / 1000;
+    // Anthropic ratios as defaults: cache write 1.25× input, cache read 0.1×.
+    const cacheWriteRate = rate.cacheWrite ?? rate.in * 1.25;
+    const cacheReadRate = rate.cacheRead ?? rate.in * 0.1;
+    const tokenCents =
+      (inputTokens * rate.in +
+        outputTokens * rate.out +
+        (extras?.cacheCreateTokens ?? 0) * cacheWriteRate +
+        (extras?.cacheReadTokens ?? 0) * cacheReadRate) /
+      1000;
+    const searchCents =
+      (extras?.webSearches ?? 0) * (this.cfg.webSearchCentsPerCall ?? 1);
+    return tokenCents + searchCents;
   }
 }

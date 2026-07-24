@@ -5,6 +5,11 @@ import { z } from "zod";
 import { backoffMs, isRetryable, isSchemaValidationError } from "./backoff.js";
 import { JudgeGateError, RateLimitError, SpendCapError } from "./errors.js";
 import { ProviderRegistry, parseModelId, type ChainLink } from "./providers.js";
+import {
+  callNativeAnthropic,
+  NativeSchemaError,
+  type NativeCallOptions,
+} from "./anthropic-native.js";
 import { TaskRouter } from "./tasks.js";
 import { missingPlaceholders, renderTemplate } from "./template.js";
 import type {
@@ -55,6 +60,7 @@ async function attemptGenerate<O>(
   zodSchema: OutputSchema<O>,
   prompt: string,
   temperature?: number,
+  system?: string,
 ): Promise<AttemptResult<O>> {
   let currentPrompt = prompt;
   let repaired = false;
@@ -65,6 +71,7 @@ async function attemptGenerate<O>(
         model,
         schema: zodSchema,
         prompt: currentPrompt,
+        ...(system ? { system } : {}),
         ...(temperature !== undefined ? { temperature } : {}),
         abortSignal: AbortSignal.timeout(60_000),
       });
@@ -113,6 +120,15 @@ export interface RunStructuredOptions<I, O> {
   promptBody?: string;
   /** Overrides the stored/default prompt's temperature when set. */
   temperature?: number;
+  /** System prompt (AI SDK `system`, or native Anthropic system block). */
+  system?: string;
+  /**
+   * Native Anthropic features for this call: thinking, prompt-caching
+   * cache_control, server-side web search. Requires GatewayConfig.anthropic
+   * (throws otherwise — features must never silently not apply). Only affects
+   * links whose provider is "anthropic"; other chain links use the AI SDK.
+   */
+  anthropic?: NativeCallOptions;
   /** Per-call app tag for the usage log; defaults to GatewayConfig.appId. */
   app?: string;
   /**
@@ -207,6 +223,7 @@ export class Gateway {
   private readonly cacheTtlSeconds: number;
   private readonly encrypt?: (t: string) => string;
   private readonly judgeDefaults?: GatewayConfig["judge"];
+  private readonly anthropicCfg?: GatewayConfig["anthropic"];
   private readonly mockResponders = new Map<string, MockResponder>();
 
   constructor(cfg: GatewayConfig) {
@@ -224,6 +241,86 @@ export class Gateway {
     this.cacheTtlSeconds = cfg.cacheTtlSeconds ?? DEFAULT_CACHE_TTL_SECONDS;
     this.encrypt = cfg.encrypt;
     this.judgeDefaults = cfg.judge;
+    this.anthropicCfg = cfg.anthropic;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Unified single-link executor: native Anthropic when the call requests
+  // native features AND the link is Anthropic AND a native client is
+  // configured; AI SDK generateObject otherwise. Native failures reuse the
+  // same repair/transient semantics as attemptGenerate.
+  // ---------------------------------------------------------------------------
+  private async execLink<O>(
+    link: { provider: string; model: string; languageModel?: LanguageModel },
+    schema: OutputSchema<O>,
+    prompt: string,
+    system: string | undefined,
+    temperature: number | undefined,
+    native: NativeCallOptions | undefined,
+  ): Promise<AttemptResult<O> & { extras?: { cacheCreateTokens: number; cacheReadTokens: number; webSearches: number } }> {
+    if (native && link.provider === "anthropic" && this.anthropicCfg) {
+      let currentPrompt = prompt;
+      let repaired = false;
+      let transientRetries = 0;
+      for (;;) {
+        try {
+          const res = await callNativeAnthropic(this.anthropicCfg, {
+            model: link.model,
+            prompt: currentPrompt,
+            system,
+            schema: schema as Parameters<typeof callNativeAnthropic>[1]["schema"],
+            temperature,
+            native,
+          });
+          // Validate the tool input; wrap failures so the shared
+          // isSchemaValidationError machinery sees them.
+          let object: O;
+          if (isZodSchema(schema)) {
+            try {
+              object = schema.parse(res.object);
+            } catch (err) {
+              throw new NativeSchemaError(
+                err instanceof Error ? err.message : String(err),
+              );
+            }
+          } else {
+            object = res.object as O;
+          }
+          return {
+            object,
+            usage: { inputTokens: res.inputTokens, outputTokens: res.outputTokens },
+            extras: {
+              cacheCreateTokens: res.cacheCreateTokens,
+              cacheReadTokens: res.cacheReadTokens,
+              webSearches: res.webSearches,
+            },
+          };
+        } catch (err) {
+          if (isSchemaValidationError(err) && !repaired) {
+            repaired = true;
+            const detail =
+              err instanceof Error ? err.message.slice(0, 500) : String(err).slice(0, 500);
+            currentPrompt =
+              prompt +
+              "\n\nIMPORTANT: Your previous response failed schema validation with this error:\n" +
+              detail +
+              "\nCall the tool again with input that satisfies the schema exactly.";
+            continue;
+          }
+          if (!isRetryable(err) || transientRetries >= 2) throw err;
+          await new Promise<void>((r) => setTimeout(r, backoffMs(transientRetries, err)));
+          transientRetries++;
+        }
+      }
+    }
+
+    if (!link.languageModel) {
+      throw new Error(
+        `No API key for provider "${link.provider}" (and native execution does not apply).`,
+      );
+    }
+    const result = await attemptGenerate(link.languageModel, schema, prompt, temperature, system);
+    return result;
   }
 
   /** Register a deterministic responder used when mock mode is on. */
@@ -344,12 +441,14 @@ export class Gateway {
     zodSchema: OutputSchema<O>,
     prompt: string,
     temperature?: number,
+    system?: string,
+    native?: NativeCallOptions,
   ) {
     const start = Date.now();
     let lastErr: unknown;
     for (const link of chain) {
       try {
-        const result = await attemptGenerate(link.languageModel, zodSchema, prompt, temperature);
+        const result = await this.execLink(link, zodSchema, prompt, system, temperature, native);
         return {
           object: result.object,
           inputTokens: result.usage.inputTokens,
@@ -357,6 +456,7 @@ export class Gateway {
           provider: link.provider,
           model: link.model,
           durationMs: Date.now() - start,
+          extras: result.extras,
         };
       } catch (err) {
         lastErr = err;
@@ -436,6 +536,13 @@ export class Gateway {
     const prompt = renderTemplate(promptConfig.body, opts.variables(opts.input));
     const temperature = opts.temperature ?? promptConfig.temperature;
 
+    // Native features must never silently not apply.
+    if (opts.anthropic && !this.anthropicCfg && !this.mock) {
+      throw new Error(
+        "runStructured received `anthropic` native options but GatewayConfig.anthropic is not configured.",
+      );
+    }
+
     // 5. Generate
     let object: O;
     let inputTokens: number;
@@ -443,6 +550,7 @@ export class Gateway {
     let provider: string;
     let model: string;
     let durationMs: number;
+    let extras: { cacheCreateTokens: number; cacheReadTokens: number; webSearches: number } | undefined;
 
     if (this.mock) {
       const responder = this.mockResponders.get(opts.slug);
@@ -473,33 +581,21 @@ export class Gateway {
         }
         const resolved = await this.tasks.modelForTask(opts.task);
         const lm = this.registry.buildLanguageModel(resolved.provider, resolved.model);
-        if (!lm) {
+        const nativeApplies =
+          opts.anthropic && resolved.provider === "anthropic" && this.anthropicCfg;
+        if (!lm && !nativeApplies) {
           throw new Error(
             `Task "${opts.task}" routes to "${resolved.provider}/${resolved.model}" but that provider has no API key.`,
           );
         }
         const start = Date.now();
-        const result = await attemptGenerate(lm, opts.schema, prompt, temperature);
-        object = result.object;
-        inputTokens = result.usage.inputTokens;
-        outputTokens = result.usage.outputTokens;
-        provider = resolved.provider;
-        model = resolved.model;
-        durationMs = Date.now() - start;
-      } else if (adminOverride) {
-        const resolved = this.registry.resolveDefault({
-          provider: adminOverride.provider,
-          model: promptConfig.modelHint ?? adminOverride.model,
-        });
-        if (!resolved.languageModel) {
-          throw new Error(`No API key for provider "${resolved.provider}".`);
-        }
-        const start = Date.now();
-        const result = await attemptGenerate(
-          resolved.languageModel,
+        const result = await this.execLink(
+          { provider: resolved.provider, model: resolved.model, languageModel: lm ?? undefined },
           opts.schema,
           prompt,
+          opts.system,
           temperature,
+          opts.anthropic,
         );
         object = result.object;
         inputTokens = result.usage.inputTokens;
@@ -507,9 +603,40 @@ export class Gateway {
         provider = resolved.provider;
         model = resolved.model;
         durationMs = Date.now() - start;
+        extras = result.extras;
+      } else if (adminOverride) {
+        const resolved = this.registry.resolveDefault({
+          provider: adminOverride.provider,
+          model: promptConfig.modelHint ?? adminOverride.model,
+        });
+        const nativeApplies =
+          opts.anthropic && resolved.provider === "anthropic" && this.anthropicCfg;
+        if (!resolved.languageModel && !nativeApplies) {
+          throw new Error(`No API key for provider "${resolved.provider}".`);
+        }
+        const start = Date.now();
+        const result = await this.execLink(
+          resolved,
+          opts.schema,
+          prompt,
+          opts.system,
+          temperature,
+          opts.anthropic,
+        );
+        object = result.object;
+        inputTokens = result.usage.inputTokens;
+        outputTokens = result.usage.outputTokens;
+        provider = resolved.provider;
+        model = resolved.model;
+        durationMs = Date.now() - start;
+        extras = result.extras;
       } else {
         const chainCfg = (await this.modelConfig?.getChain()) ?? [];
-        const chain = this.registry.buildChain(chainCfg, opts.tier);
+        const chain = this.registry.buildChain(
+          chainCfg,
+          opts.tier,
+          opts.anthropic && this.anthropicCfg ? ["anthropic"] : undefined,
+        );
 
         if (chain.length === 0) {
           const resolved = this.registry.resolveDefault(
@@ -522,17 +649,21 @@ export class Gateway {
                 }
               : undefined,
           );
-          if (!resolved.languageModel) {
+          const nativeApplies =
+            opts.anthropic && resolved.provider === "anthropic" && this.anthropicCfg;
+          if (!resolved.languageModel && !nativeApplies) {
             throw new Error(
               "No AI provider configured. Set an API key (config or env) or provide a ModelConfigStore.",
             );
           }
           const start = Date.now();
-          const result = await attemptGenerate(
-            resolved.languageModel,
+          const result = await this.execLink(
+            resolved,
             opts.schema,
             prompt,
+            opts.system,
             temperature,
+            opts.anthropic,
           );
           object = result.object;
           inputTokens = result.usage.inputTokens ?? 0;
@@ -540,12 +671,15 @@ export class Gateway {
           provider = resolved.provider;
           model = resolved.model;
           durationMs = Date.now() - start;
+          extras = result.extras;
         } else {
           const gen = await this.callWithChain(
             chain,
             opts.schema,
             prompt,
             temperature,
+            opts.system,
+            opts.anthropic,
           );
           object = gen.object;
           inputTokens = gen.inputTokens;
@@ -553,6 +687,7 @@ export class Gateway {
           provider = gen.provider;
           model = gen.model;
           durationMs = gen.durationMs;
+          extras = gen.extras;
         }
       }
     }
@@ -570,10 +705,13 @@ export class Gateway {
       model,
       inputTokens,
       outputTokens,
-      estimatedCostCents: this.registry.estimateCostCents(model, inputTokens, outputTokens),
+      estimatedCostCents: this.registry.estimateCostCents(model, inputTokens, outputTokens, extras),
       cacheHit: false,
       traceId,
       durationMs,
+      cacheCreateTokens: extras?.cacheCreateTokens ?? null,
+      cacheReadTokens: extras?.cacheReadTokens ?? null,
+      webSearches: extras?.webSearches ?? null,
       inputText: prompt,
       outputText: JSON.stringify(object),
     });

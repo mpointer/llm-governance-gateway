@@ -5,13 +5,15 @@ export const BASE_DELAY_MS = 500;
 export const MAX_DELAY_MS = 8_000;
 
 // Retry only on 429 (rate limited) and 5xx (server) — never on other 4xx,
-// which are caller errors that won't succeed on retry.
+// which are caller errors that won't succeed on retry. Reads both
+// `statusCode` (AI SDK) and `status` (@anthropic-ai/sdk).
 export function isRetryable(err: unknown): boolean {
-  if (err != null && typeof err === "object" && "statusCode" in err) {
-    const s = (err as { statusCode: number }).statusCode;
-    return s === 429 || (s >= 500 && s < 600);
-  }
-  return false;
+  if (err == null || typeof err !== "object") return false;
+  const s =
+    (err as { statusCode?: number }).statusCode ??
+    (err as { status?: number }).status;
+  if (typeof s !== "number") return false;
+  return s === 429 || (s >= 500 && s < 600);
 }
 
 /**

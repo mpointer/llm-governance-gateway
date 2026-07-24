@@ -35,6 +35,9 @@ export const aiUsageLog = sqliteTable("ai_usage_log", {
   cacheHit: integer("cache_hit", { mode: "boolean" }).notNull(),
   traceId: text("trace_id").notNull(),
   durationMs: integer("duration_ms"),
+  cacheCreateTokens: integer("cache_create_tokens"),
+  cacheReadTokens: integer("cache_read_tokens"),
+  webSearches: integer("web_searches"),
   inputText: text("input_text"),
   outputText: text("output_text"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
@@ -81,6 +84,9 @@ export class DrizzleSqliteUsageStore implements UsageStore {
         cacheHit: entry.cacheHit,
         traceId: entry.traceId,
         durationMs: entry.durationMs ?? null,
+        cacheCreateTokens: entry.cacheCreateTokens ?? null,
+        cacheReadTokens: entry.cacheReadTokens ?? null,
+        webSearches: entry.webSearches ?? null,
         inputText: entry.inputText ?? null,
         outputText: entry.outputText ?? null,
         createdAt: entry.createdAt,
@@ -139,6 +145,7 @@ export async function ensureTables(db: SqliteDb): Promise<void> {
     input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
     estimated_cost_cents REAL NOT NULL, cache_hit INTEGER NOT NULL,
     trace_id TEXT NOT NULL, duration_ms INTEGER,
+    cache_create_tokens INTEGER, cache_read_tokens INTEGER, web_searches INTEGER,
     input_text TEXT, output_text TEXT, created_at INTEGER NOT NULL
   )`);
   await db.run(sql`CREATE INDEX IF NOT EXISTS idx_ai_usage_spend

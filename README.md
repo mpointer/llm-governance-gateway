@@ -168,6 +168,31 @@ const res = await gw.runPromptTest({
 // res.text, res.costCents, res.durationMs — spend logged as route "admin:prompt-test"
 ```
 
+### Native Anthropic features (opt-in)
+
+Adaptive extended thinking, prompt-caching `cache_control`, and server-side web search need Anthropic's native API. Bring your own client — the package takes no dependency on `@anthropic-ai/sdk`:
+
+```ts
+import Anthropic from "@anthropic-ai/sdk";
+
+const gw = new Gateway({
+  usage,
+  anthropic: { client: new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }) },
+});
+
+await gw.runStructured({
+  ...opts,
+  system: "You are a meticulous analyst.",
+  anthropic: {
+    thinking: true,                 // adaptive; or { budgetTokens: 8000 }
+    cacheSystem: true,              // ephemeral cache_control on the system block
+    webSearch: { maxUses: 4 },      // server-side web search, billed per request
+  },
+});
+```
+
+Only Anthropic links use the native client — other chain providers stay on the AI SDK, and failover still works across the boundary (native link fails → AI SDK fallback link runs). Thinking is gated per model (sending it to Haiku would 400). Cache-write/cache-read tokens and web-search counts are captured in the usage log and included in cost estimates.
+
 ### Judge in the request path
 
 ```ts

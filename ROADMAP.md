@@ -19,9 +19,9 @@ Three things no popular tool combines today, all shipped here:
 ## v0.3
 
 - [x] **Judge-in-the-request-path with budget-aware sampling** — shipped: sampled model-graded scoring, cap-aware self-skip, observe/gate modes, audit-first gating
-- [ ] Native Anthropic path (opt-in): adaptive extended thinking, prompt-caching `cache_control`, server-side web search — AI SDK path remains the default
+- [x] Native Anthropic path — shipped: BYO @anthropic-ai/sdk client, adaptive/budgeted thinking, cache_control, server-side web search, cache-token cost accounting, cross-path failover
 - [ ] **Governed batch processing** — Anthropic Message Batches (50% cost) with two-phase spend accounting (reserve at submit, reconcile per item), DB-tracked jobs, streamed JSONL results, idempotent crash recovery. Design: [docs/design/batch-processing.md](./docs/design/batch-processing.md). Ships with/after the native Anthropic path (needs the native SDK).
-- [ ] Cache-aware cost model (cache-write/cache-read token rates)
+- [x] Cache-aware cost model — shipped with the native path (cacheWrite/cacheRead rates, web-search per-call pricing)
 - [ ] Streaming (`streamObject`/`streamText`) inside the same governance pipeline
 
 ## v0.4+

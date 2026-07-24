@@ -33,6 +33,13 @@ export {
 } from "./backoff.js";
 export { loadEnvFiles, parseEnvFile } from "./envfile.js";
 export {
+  callNativeAnthropic,
+  NativeSchemaError,
+  type AnthropicMessagesClient,
+  type NativeAnthropicConfig,
+  type NativeCallOptions,
+} from "./anthropic-native.js";
+export {
   sanitizeIdentity,
   sanitized,
   SANITIZER_VERSION,

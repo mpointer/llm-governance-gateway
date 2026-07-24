@@ -15,6 +15,11 @@ export interface UsageEntry {
   cacheHit: boolean;
   traceId: string;
   durationMs?: number | null;
+  /** Prompt-cache token counts (native Anthropic path). */
+  cacheCreateTokens?: number | null;
+  cacheReadTokens?: number | null;
+  /** Server-side web searches performed (billed per request). */
+  webSearches?: number | null;
   /** Already passed through the configured encrypt hook (if any). */
   inputText?: string | null;
   outputText?: string | null;
@@ -125,6 +130,10 @@ export interface ModelPricing {
   in: number;
   /** Cents per 1K output tokens. */
   out: number;
+  /** Cents per 1K cache-write tokens. Default: 1.25 × in (Anthropic ratio). */
+  cacheWrite?: number;
+  /** Cents per 1K cache-read tokens. Default: 0.1 × in (Anthropic ratio). */
+  cacheRead?: number;
 }
 
 export interface ProviderConfig {
@@ -137,6 +146,8 @@ export interface ProviderConfig {
   pricing?: Record<string, ModelPricing>;
   /** Fallback pricing for unknown models (default: conservative mid-tier). */
   fallbackPricing?: ModelPricing;
+  /** Cents per server-side web search request. Default 1 (≈$10/1k). */
+  webSearchCentsPerCall?: number;
 }
 
 export interface SpendCapConfig {
@@ -211,6 +222,13 @@ export interface GatewayConfig {
   caps?: SpendCapConfig;
   /** Gateway-level defaults for the model-graded judge. */
   judge?: JudgeDefaults;
+  /**
+   * Native Anthropic path (opt-in). Pass a @anthropic-ai/sdk client (or
+   * structural equivalent). Calls that set `anthropic:` options route
+   * Anthropic links through this client for thinking / prompt caching /
+   * web search; every other provider stays on the AI SDK path.
+   */
+  anthropic?: import("./anthropic-native.js").NativeAnthropicConfig;
   /** Deterministic mock mode: no provider calls; responders supply outputs. */
   mock?: boolean;
   /** Tag written to every usage row (multi-app deployments). */
