@@ -21,7 +21,7 @@ Spend controls in this space are usually observed (dashboards that tell you *aft
 - **Schema-validation-aware failover.** primary → fallback → backup providers, with 429/5xx-aware retries, `Retry-After` honoring, and equal-jitter backoff. When a model returns schema-invalid output, the validation error is fed back for one repair attempt, then the chain falls to the next provider — a different model often satisfies the schema where the first couldn't ([vercel/ai#9950](https://github.com/vercel/ai/issues/9950), [#9002](https://github.com/vercel/ai/issues/9002)). Chain links accept bring-your-own AI SDK models (Azure, Bedrock, custom base URLs).
 - **Deterministic CI.** Mock mode replaces providers with registered responders — your AI-dependent test suite runs offline with zero keys.
 - **Prompt library pattern.** Store-as-override, code-as-fallback: admins can edit prompts at runtime; a broken edit (missing `{{placeholder}}`) falls back to the code default instead of silently sending a malformed prompt.
-- **Judge + telemetry.** Optional per-call rubric scoring and full usage accounting (tokens, cost, latency, trace IDs), with an optional at-rest encryption hook for logged prompt/output snapshots.
+- **Judge in the request path — sampled and budget-aware.** Model-graded rubric scoring runs inline (not offline, not async-later): define criteria, sample a fraction of calls, and optionally *gate* low-scoring responses. The judge skips itself when its estimated cost would cross the global spend cap — a governance check never blows the budget — and gated responses still persist their scores for audit. Plus a free caller-computed rubric and full usage accounting (tokens, cost, latency, trace IDs) with an optional at-rest encryption hook.
 - **Task-based routing.** Name your call sites (`"enrich"`, `"dedup_judge"`, `"editorial"`), assign each a default model in code, and let an admin store override models per task at runtime — with TTL caching and graceful degradation to code defaults when the store is down.
 - **Live model discovery.** `listAllProviderModels()` queries each vendor's models API for every provider with an API key configured; keyless or erroring providers fall back to static lists so admin UIs stay usable offline.
 - **Prompt test runs.** `runPromptTest()` executes an edited (even unsaved) prompt body with sample variables against any model, bypassing the cache but *not* usage logging — test spend shows up in the cost dashboard under `admin:prompt-test`.
@@ -167,6 +167,25 @@ const res = await gw.runPromptTest({
 });
 // res.text, res.costCents, res.durationMs — spend logged as route "admin:prompt-test"
 ```
+
+### Judge in the request path
+
+```ts
+const res = await gw.runStructured({
+  ...opts,
+  judge: {
+    criteria: {
+      grounded: "Every claim is supported by the provided context",
+      brevity: "No filler or repetition",
+    },
+    sampleRate: 0.1,            // judge 10% of calls — bounded eval spend
+    model: "claude-haiku-4-5-20251001", // cheap judge model
+    mode: "gate", threshold: 3, // optional: throw JudgeGateError below 3/5
+  },
+});
+```
+
+Scores land in your `UsageStore` (`saveJudgeScore`) linked to the call's usage row; judge spend is logged under `route: "judge:<route>"` so eval cost is visible, not hidden. In mock mode, register `judge:<slug>` responders to test gating deterministically.
 
 ### HTTP service (multi-app deployments)
 

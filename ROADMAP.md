@@ -18,7 +18,7 @@ Three things no popular tool combines today, all shipped here:
 
 ## v0.3
 
-- [ ] **Judge-in-the-request-path with budget-aware sampling** — inline rubric/model-graded scoring that can flag or gate responses, sampled (e.g. 5% of calls) so eval spend stays bounded. Existing eval platforms score offline/async only.
+- [x] **Judge-in-the-request-path with budget-aware sampling** — shipped: sampled model-graded scoring, cap-aware self-skip, observe/gate modes, audit-first gating
 - [ ] Native Anthropic path (opt-in): adaptive extended thinking, prompt-caching `cache_control`, server-side web search — AI SDK path remains the default
 - [ ] **Governed batch processing** — Anthropic Message Batches (50% cost) with two-phase spend accounting (reserve at submit, reconcile per item), DB-tracked jobs, streamed JSONL results, idempotent crash recovery. Design: [docs/design/batch-processing.md](./docs/design/batch-processing.md). Ships with/after the native Anthropic path (needs the native SDK).
 - [ ] Cache-aware cost model (cache-write/cache-read token rates)
@@ -27,7 +27,8 @@ Three things no popular tool combines today, all shipped here:
 ## v0.4+
 
 - [ ] OTel / Langfuse export hooks (integrate with observability, don't compete with it)
-- [ ] Provider expansion: Azure OpenAI, Bedrock, Ollama, watsonx
+- [ ] Provider expansion — Together.ai + Hugging Face (#1), Bedrock/Azure/Vertex/watsonx (#2), local serving via custom OpenAI-compatible endpoints: Ollama, vLLM, LM Studio (#3)
+- [ ] ZDR-aware routing — zero-data-retention metadata + task-level `requireZdr` constraints (#4); candidate fourth headline differentiator
 - [x] OpenRouter pricing auto-sync — shipped: discovery registers vendor pricing into the registry
 - [ ] Pluggable guardrail hooks (pre/post) — TypeScript-native, no Python sidecar
 - [ ] Admin UI reference (prompt library, task routing, spend dashboards)

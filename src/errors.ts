@@ -8,6 +8,21 @@ export class RateLimitError extends Error {
   }
 }
 
+export class JudgeGateError extends Error {
+  constructor(
+    public readonly scores: Record<string, number>,
+    public readonly overallScore: number,
+    public readonly threshold: number,
+    /** The generated object that failed the gate — callers may still use it. */
+    public readonly object: unknown,
+  ) {
+    super(
+      `Response failed judge gate: overall ${overallScore.toFixed(2)} < threshold ${threshold}`,
+    );
+    this.name = "JudgeGateError";
+  }
+}
+
 export class SpendCapError extends Error {
   constructor(
     public readonly spentCents: number,

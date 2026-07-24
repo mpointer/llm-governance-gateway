@@ -6,7 +6,7 @@ export {
   type PromptTestOptions,
   type PromptTestResult,
 } from "./gateway.js";
-export { RateLimitError, SpendCapError } from "./errors.js";
+export { RateLimitError, SpendCapError, JudgeGateError } from "./errors.js";
 export {
   ProviderRegistry,
   parseModelId,
@@ -62,6 +62,8 @@ export type {
   RateLimiter,
   RateLimitResult,
   ModelConfigStore,
+  JudgeConfig,
+  JudgeDefaults,
   TaskRoutingConfig,
   TaskOverrideStore,
   ChainLinkConfig,

@@ -171,6 +171,34 @@ export interface TaskRoutingConfig {
   overrideTtlMs?: number;
 }
 
+/**
+ * Model-graded judge configuration (per-call, with gateway-level defaults).
+ * Distinct from the legacy `judgeRubric` callback, which is caller-computed
+ * and free; this one spends real tokens and is therefore sampled and
+ * budget-aware.
+ */
+export interface JudgeConfig {
+  /** Criterion name → plain-language description given to the judge model. */
+  criteria: Record<string, string>;
+  /** Fraction of eligible calls judged (0..1). Default from gateway, else 1. */
+  sampleRate?: number;
+  /** Prefixed model id for the judge. Default: gateway judge model, else the
+   *  default provider's fast tier. Use a cheap model — this runs in-path. */
+  model?: string;
+  /** "observe" (default): record scores. "gate": throw JudgeGateError when
+   *  overallScore falls below threshold (scores are still persisted first). */
+  mode?: "observe" | "gate";
+  /** Minimum acceptable overall score (0-5 scale) for gate mode. Default 3. */
+  threshold?: number;
+}
+
+export interface JudgeDefaults {
+  model?: string;
+  sampleRate?: number;
+  /** Injectable RNG for deterministic sampling in tests. Default Math.random. */
+  random?: () => number;
+}
+
 export interface GatewayConfig {
   usage: UsageStore;
   cache?: CacheStore;
@@ -181,6 +209,8 @@ export interface GatewayConfig {
   tasks?: TaskRoutingConfig;
   providers?: ProviderConfig;
   caps?: SpendCapConfig;
+  /** Gateway-level defaults for the model-graded judge. */
+  judge?: JudgeDefaults;
   /** Deterministic mock mode: no provider calls; responders supply outputs. */
   mock?: boolean;
   /** Tag written to every usage row (multi-app deployments). */

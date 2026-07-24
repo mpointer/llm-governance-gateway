@@ -1,14 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import { generateObject, generateText } from "ai";
 import type { LanguageModel, Schema } from "ai";
-import type { z } from "zod";
+import { z } from "zod";
 import { backoffMs, isRetryable, isSchemaValidationError } from "./backoff.js";
-import { RateLimitError, SpendCapError } from "./errors.js";
+import { JudgeGateError, RateLimitError, SpendCapError } from "./errors.js";
 import { ProviderRegistry, parseModelId, type ChainLink } from "./providers.js";
 import { TaskRouter } from "./tasks.js";
 import { missingPlaceholders, renderTemplate } from "./template.js";
 import type {
   GatewayConfig,
+  JudgeConfig,
   PromptDefault,
   ProviderId,
   UsageEntry,
@@ -140,7 +141,10 @@ export interface RunStructuredOptions<I, O> {
   userId?: string;
   anonKey?: string;
   route?: string;
+  /** Free, caller-computed rubric (no tokens spent). Kept for simple cases. */
   judgeRubric?: (object: O) => Record<string, number>;
+  /** Model-graded judge: sampled, budget-aware, runs in the request path. */
+  judge?: JudgeConfig;
 }
 
 export interface RunStructuredResult<O> {
@@ -151,6 +155,34 @@ export interface RunStructuredResult<O> {
 }
 
 type MockResponder = (input: unknown) => unknown;
+
+const JUDGE_SNIPPET_LIMIT = 4000;
+
+function buildJudgePrompt(
+  criteria: Record<string, string>,
+  mainPrompt: string,
+  object: unknown,
+): string {
+  const criteriaList = Object.entries(criteria)
+    .map(([name, desc]) => `- ${name}: ${desc}`)
+    .join("\n");
+  const clip = (s: string) =>
+    s.length > JUDGE_SNIPPET_LIMIT ? s.slice(0, JUDGE_SNIPPET_LIMIT) + "\n...[truncated]" : s;
+  return [
+    "You are a strict quality judge. Score the RESPONSE against each criterion",
+    "on a 0-5 scale (0 = complete failure, 3 = acceptable, 5 = excellent).",
+    "Judge only what is present; do not reward verbosity.",
+    "",
+    "Criteria:",
+    criteriaList,
+    "",
+    "=== ORIGINAL REQUEST ===",
+    clip(mainPrompt),
+    "",
+    "=== RESPONSE (JSON) ===",
+    clip(JSON.stringify(object)),
+  ].join("\n");
+}
 
 export function cacheKey(slug: string, parts: string[]): string {
   const hash = createHash("sha256")
@@ -174,6 +206,7 @@ export class Gateway {
   private readonly appId: string | null;
   private readonly cacheTtlSeconds: number;
   private readonly encrypt?: (t: string) => string;
+  private readonly judgeDefaults?: GatewayConfig["judge"];
   private readonly mockResponders = new Map<string, MockResponder>();
 
   constructor(cfg: GatewayConfig) {
@@ -190,6 +223,7 @@ export class Gateway {
     this.appId = cfg.appId ?? null;
     this.cacheTtlSeconds = cfg.cacheTtlSeconds ?? DEFAULT_CACHE_TTL_SECONDS;
     this.encrypt = cfg.encrypt;
+    this.judgeDefaults = cfg.judge;
   }
 
   /** Register a deterministic responder used when mock mode is on. */
@@ -544,7 +578,7 @@ export class Gateway {
       outputText: JSON.stringify(object),
     });
 
-    // 8. Judge
+    // 8a. Free caller-computed rubric
     if (opts.judgeRubric) {
       const rubric = opts.judgeRubric(object);
       const values = Object.values(rubric);
@@ -558,7 +592,147 @@ export class Gateway {
       });
     }
 
+    // 8b. Model-graded judge (sampled, budget-aware, may gate)
+    if (opts.judge) {
+      await this.runJudge(opts, prompt, object, usageLogId);
+    }
+
     return { object, traceId, cacheHit: false, usageLogId };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Judge-in-the-request-path. Rules:
+  //   - Sampled: only sampleRate of eligible calls spend judge tokens.
+  //   - Budget-aware: if the estimated judge cost would cross the global cap,
+  //     the judge is SKIPPED (with a warning) — a governance check must never
+  //     be the thing that blows the budget or fails the main response.
+  //   - Gate mode throws JudgeGateError AFTER persisting scores and usage, so
+  //     the audit trail exists even for rejected responses.
+  // ---------------------------------------------------------------------------
+  private async runJudge<I, O>(
+    opts: RunStructuredOptions<I, O>,
+    mainPrompt: string,
+    object: O,
+    mainUsageLogId: string | number,
+  ): Promise<void> {
+    const judge = opts.judge!;
+    const criteria = Object.keys(judge.criteria);
+    if (criteria.length === 0) return;
+
+    const sampleRate = judge.sampleRate ?? this.judgeDefaults?.sampleRate ?? 1;
+    const rng = this.judgeDefaults?.random ?? Math.random;
+    if (sampleRate <= 0 || rng() >= sampleRate) return;
+
+    const modelId =
+      judge.model ??
+      this.judgeDefaults?.model ??
+      (() => {
+        const d = this.registry.resolveDefault();
+        const fast = this.registry.tierModel(d.provider, "fast");
+        return fast ? `${d.provider === "anthropic" ? "" : d.provider + ":"}${fast}` : null;
+      })();
+    if (!modelId) {
+      console.warn("[llm-gateway] judge skipped: no judge model resolvable");
+      return;
+    }
+    const { provider, model } = parseModelId(modelId);
+
+    const judgePrompt = buildJudgePrompt(judge.criteria, mainPrompt, object);
+
+    // Budget-awareness: estimate the judge call and skip if it would cross
+    // the global breaker. Uses prompt-length heuristic (4 chars/token) plus a
+    // small output allowance — coarse, but the point is "don't judge when
+    // we're at the cliff edge", not exact accounting.
+    const globalCap = this.caps.globalDailyCents ?? DEFAULT_GLOBAL_CAP_CENTS;
+    if (globalCap) {
+      const todayUtc = new Date();
+      todayUtc.setUTCHours(0, 0, 0, 0);
+      const spent = await this.usage.sumSpendCents(todayUtc);
+      const estCost = this.registry.estimateCostCents(
+        model,
+        Math.ceil(judgePrompt.length / 4),
+        criteria.length * 12,
+      );
+      if (spent + estCost >= globalCap) {
+        console.warn(
+          `[llm-gateway] judge skipped for "${opts.slug}": estimated cost would cross the global cap`,
+        );
+        return;
+      }
+    }
+
+    const scoreSchema = z.object(
+      Object.fromEntries(criteria.map((k) => [k, z.number().min(0).max(5)])),
+    ) as z.ZodType<Record<string, number>>;
+
+    let scores: Record<string, number>;
+    let inputTokens: number;
+    let outputTokens: number;
+    let judgeProvider: string;
+    let judgeModel: string;
+    let durationMs: number;
+
+    if (this.mock) {
+      const responder = this.mockResponders.get(`judge:${opts.slug}`);
+      if (!responder) {
+        console.warn(
+          `[llm-gateway] mock mode: no "judge:${opts.slug}" responder — judge skipped`,
+        );
+        return;
+      }
+      scores = scoreSchema.parse(responder(object));
+      inputTokens = Math.ceil(judgePrompt.length / 4);
+      outputTokens = criteria.length * 12;
+      judgeProvider = "mock";
+      judgeModel = "mock";
+      durationMs = 0;
+    } else {
+      const lm = this.registry.buildLanguageModel(provider, model);
+      if (!lm) {
+        console.warn(`[llm-gateway] judge skipped: no API key for "${provider}"`);
+        return;
+      }
+      const start = Date.now();
+      const result = await attemptGenerate(lm, scoreSchema, judgePrompt);
+      scores = result.object;
+      inputTokens = result.usage.inputTokens;
+      outputTokens = result.usage.outputTokens;
+      judgeProvider = provider;
+      judgeModel = model;
+      durationMs = Date.now() - start;
+    }
+
+    const values = Object.values(scores);
+    const overall = values.length > 0 ? values.reduce((a, b) => a + b, 0) / values.length : 0;
+
+    // Persist BEFORE gating: rejected responses must still leave an audit trail.
+    await this.logUsage({
+      app: opts.app,
+      userId: opts.userId ?? null,
+      route: `judge:${opts.route ?? opts.slug}`,
+      promptSlug: opts.slug,
+      provider: judgeProvider,
+      model: judgeModel,
+      inputTokens,
+      outputTokens,
+      estimatedCostCents: this.registry.estimateCostCents(judgeModel, inputTokens, outputTokens),
+      cacheHit: false,
+      traceId: randomUUID(),
+      durationMs,
+    });
+    await this.usage.saveJudgeScore({
+      usageLogId: mainUsageLogId,
+      rubric: scores,
+      overallScore: overall,
+      createdAt: new Date(),
+    });
+
+    if ((judge.mode ?? "observe") === "gate") {
+      const threshold = judge.threshold ?? 3;
+      if (overall < threshold) {
+        throw new JudgeGateError(scores, overall, threshold, object);
+      }
+    }
   }
 
   /**
