@@ -22,7 +22,7 @@ loadEnvFiles(); // .env.local / .env in cwd; shell env wins
 
 const DEFAULT_MODELS = {
   anthropic: "claude-haiku-4-5-20251001",
-  google: "gemini-2.0-flash",
+  google: "gemini-3.1-flash-lite",
   openai: "gpt-4.1-mini",
   openrouter: "openai/gpt-4o-mini",
   venice: "mistral-31-24b",
@@ -86,7 +86,17 @@ for (const provider of configured) {
       `[${provider}] generate ok via ${model}: ${JSON.stringify(res.object)} (${Date.now() - t0}ms, trace ${res.traceId.slice(0, 8)})\n`,
     );
   } catch (e) {
-    console.error(`[${provider}] generate FAILED via ${model}: ${e.message}\n`);
+    // AI SDK errors often carry the real diagnosis outside .message.
+    const detail = [
+      e.name && e.name !== "Error" ? e.name : null,
+      e.statusCode ?? e.status ? `HTTP ${e.statusCode ?? e.status}` : null,
+      e.message || null,
+      e.responseBody ? `body: ${String(e.responseBody).slice(0, 300)}` : null,
+      e.cause?.message ? `cause: ${e.cause.message}` : null,
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    console.error(`[${provider}] generate FAILED via ${model}: ${detail || "(no detail)"}\n`);
     failures++;
   }
 }

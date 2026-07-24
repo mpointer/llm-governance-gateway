@@ -79,7 +79,10 @@ export function parseModelId(id: string): { provider: ProviderId; model: string 
 // ProviderConfig.tiers as models evolve. Aggregators have no built-in tiers.
 const BUILTIN_TIERS: Partial<Record<ProviderId, { fast: string; power: string }>> = {
   anthropic: { fast: "claude-haiku-4-5-20251001", power: "claude-sonnet-4-6" },
-  google: { fast: "gemini-2.0-flash", power: "gemini-2.5-pro" },
+  // gemini-2.0-flash retired by Google 2026-07 (API returns "no longer
+  // available"); 3.1-flash-lite is Google's recommended replacement,
+  // verified live 2026-07.
+  google: { fast: "gemini-3.1-flash-lite", power: "gemini-2.5-pro" },
   openai: { fast: "gpt-4.1-mini", power: "gpt-4.1" },
 };
 
@@ -90,7 +93,7 @@ const BUILTIN_PRICING: Record<string, ModelPricing> = {
   "claude-haiku-4-5-20251001": { in: 0.08, out: 0.4 },
   "gemini-2.5-pro": { in: 0.125, out: 0.5 },
   "gemini-2.5-flash": { in: 0.015, out: 0.06 },
-  "gemini-2.0-flash": { in: 0.01, out: 0.04 },
+  "gemini-3.1-flash-lite": { in: 0.025, out: 0.15 }, // paid-tier ceiling, ai.google.dev pricing 2026-07
   "gpt-4.1": { in: 0.2, out: 0.8 },
   "gpt-4.1-mini": { in: 0.04, out: 0.16 },
   "gpt-4.1-nano": { in: 0.01, out: 0.04 },
