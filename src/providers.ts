@@ -22,6 +22,8 @@ export interface ChainLink {
   model: string;
   /** Absent only for links kept keyless (native-Anthropic execution path). */
   languageModel?: LanguageModel;
+  /** Per-link temperature override; null = never send. See ChainLinkConfig. */
+  temperature?: number | null;
 }
 
 /** Localhost presets for common self-hosted serving stacks — usable with
@@ -97,6 +99,9 @@ const BUILTIN_PRICING: Record<string, ModelPricing> = {
   "gpt-4.1": { in: 0.2, out: 0.8 },
   "gpt-4.1-mini": { in: 0.04, out: 0.16 },
   "gpt-4.1-nano": { in: 0.01, out: 0.04 },
+  // Embeddings (no output tokens).
+  "text-embedding-3-small": { in: 0.002, out: 0 },
+  "text-embedding-3-large": { in: 0.013, out: 0 },
 };
 
 const DEFAULT_FALLBACK_PRICING: ModelPricing = { in: 0.3, out: 1.5 };
@@ -286,23 +291,23 @@ export class ProviderRegistry {
       if (!name) continue; // one of provider/endpoint/factory is required
       if (link.languageModel) {
         // BYO model: tier re-routing doesn't apply (we can't rebuild it).
-        out.push({ provider: name, model: link.model, languageModel: link.languageModel });
+        out.push({ provider: name, model: link.model, languageModel: link.languageModel, temperature: link.temperature });
         continue;
       }
       if (link.factory) {
         const lm = this.buildFactoryModel(link.factory, link.model);
-        if (lm) out.push({ provider: link.factory, model: link.model, languageModel: lm });
+        if (lm) out.push({ provider: link.factory, model: link.model, languageModel: lm, temperature: link.temperature });
         continue;
       }
       if (link.endpoint) {
         const lm = this.buildEndpointModel(link.endpoint, link.model);
-        if (lm) out.push({ provider: link.endpoint, model: link.model, languageModel: lm });
+        if (lm) out.push({ provider: link.endpoint, model: link.model, languageModel: lm, temperature: link.temperature });
         continue;
       }
       const model = (tier ? this.tierModel(link.provider!, tier) : undefined) ?? link.model;
       const lm = this.buildLanguageModel(link.provider!, model, link.apiKey);
-      if (lm) out.push({ provider: link.provider!, model, languageModel: lm });
-      else if (keepKeyless?.includes(link.provider!)) out.push({ provider: link.provider!, model });
+      if (lm) out.push({ provider: link.provider!, model, languageModel: lm, temperature: link.temperature });
+      else if (keepKeyless?.includes(link.provider!)) out.push({ provider: link.provider!, model, temperature: link.temperature });
     }
     return out;
   }

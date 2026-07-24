@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { generateObject, generateText, streamObject } from "ai";
+import { embedMany, generateObject, generateText, streamObject } from "ai";
 import type { LanguageModel, Schema } from "ai";
 import { z } from "zod";
 import { backoffMs, isRetryable, isSchemaValidationError } from "./backoff.js";
@@ -19,6 +19,14 @@ import {
   type SubmitBatchOptions,
   type SubmitBatchResult,
 } from "./batch.js";
+import {
+  buildEmbeddingModel,
+  mockEmbedding,
+  DEFAULT_EMBEDDING_MODEL,
+  DEFAULT_EMBEDDING_DIMENSIONS,
+  type EmbedOptions,
+  type EmbedResult,
+} from "./embeddings.js";
 import { TaskRouter } from "./tasks.js";
 import { missingPlaceholders, renderTemplate } from "./template.js";
 import type {
@@ -312,6 +320,82 @@ export class Gateway {
   }
 
   // ===========================================================================
+  // Governed embeddings — same front door (rate limit, caps, ZDR, ledger).
+  // Embedding spend at document-pipeline volume is real money; it must not
+  // bypass governance just because it isn't chat.
+  // ===========================================================================
+
+  async embed(texts: string[], opts: EmbedOptions = {}): Promise<EmbedResult> {
+    const traceId = randomUUID();
+    if (texts.length === 0) {
+      return {
+        embeddings: [],
+        provider: "none",
+        model: "none",
+        inputTokens: 0,
+        traceId,
+      };
+    }
+    const identifier = opts.userId ?? (opts.anonKey ? `anon:${opts.anonKey}` : "anon");
+    const rl = await this.rateLimiter.limit(identifier);
+    if (!rl.success) throw new RateLimitError(rl.limit, rl.remaining);
+    await this.checkSpendCap(opts.userId, opts.route);
+
+    const modelId = opts.model ?? DEFAULT_EMBEDDING_MODEL;
+    const { provider, model } = this.registry.parseAny(modelId);
+    if (opts.requireZdr && !this.mock && !this.registry.isZdr(provider, model)) {
+      throw new ZdrViolationError(provider, model, "embed");
+    }
+
+    let embeddings: number[][];
+    let inputTokens: number;
+    let usedProvider = provider;
+    let usedModel = model;
+
+    if (this.mock) {
+      const dims = opts.dimensions ?? DEFAULT_EMBEDDING_DIMENSIONS;
+      embeddings = texts.map((t) => mockEmbedding(t, dims));
+      inputTokens = texts.reduce((s, t) => s + Math.ceil(t.length / 4), 0);
+      usedProvider = "mock";
+      usedModel = "mock";
+    } else {
+      const em =
+        opts.embeddingModel ?? buildEmbeddingModel(this.registry, provider, model);
+      if (!em) {
+        throw new Error(
+          `embed: no embedding model for "${provider}/${model}". v1 supports openai:* natively; pass opts.embeddingModel for anything else.`,
+        );
+      }
+      const res = await embedMany({
+        model: em,
+        values: texts,
+        ...(opts.dimensions !== undefined
+          ? { providerOptions: { openai: { dimensions: opts.dimensions } } }
+          : {}),
+      });
+      embeddings = res.embeddings as number[][];
+      inputTokens = res.usage?.tokens ?? texts.reduce((s, t) => s + Math.ceil(t.length / 4), 0);
+    }
+
+    const usageLogId = await this.logUsage({
+      app: opts.app,
+      userId: opts.userId ?? null,
+      route: opts.route ?? null,
+      promptSlug: null,
+      provider: usedProvider,
+      model: usedModel,
+      inputTokens,
+      outputTokens: 0,
+      estimatedCostCents: this.registry.estimateForLink(usedProvider, usedModel, inputTokens, 0),
+      cacheHit: false,
+      traceId,
+      zdrEnforced: opts.requireZdr ? true : null,
+    });
+
+    return { embeddings, provider: usedProvider, model: usedModel, inputTokens, traceId, usageLogId };
+  }
+
+  // ===========================================================================
   // Governed TEXT generation — same front door as runStructured, generateText
   // body. Added for adopters whose call sites are text-first (summaries,
   // JSON-by-convention parsing done caller-side). No schema repair (nothing
@@ -378,14 +462,15 @@ export class Gateway {
     let model: string;
     let durationMs: number;
 
-    const attemptText = async (lm: LanguageModel) => {
+    const attemptText = async (lm: LanguageModel, linkTemp?: number | null) => {
+      const effTemp = linkTemp === null ? undefined : (linkTemp ?? temperature);
       for (let retry = 0; ; ) {
         try {
           const res = await generateText({
             model: lm,
             prompt,
             ...(opts.system ? { system: opts.system } : {}),
-            ...(temperature !== undefined ? { temperature } : {}),
+            ...(effTemp !== undefined ? { temperature: effTemp } : {}),
             ...(opts.maxOutputTokens !== undefined ? { maxOutputTokens: opts.maxOutputTokens } : {}),
             abortSignal: AbortSignal.timeout(60_000),
           });
@@ -455,7 +540,7 @@ export class Gateway {
           continue;
         }
         try {
-          const res = await attemptText(link.languageModel);
+          const res = await attemptText(link.languageModel, (link as ChainLink).temperature);
           text = res.text;
           finishReason = res.finishReason;
           inputTokens = res.usage.inputTokens ?? 0;
@@ -894,13 +979,16 @@ export class Gateway {
   // same repair/transient semantics as attemptGenerate.
   // ---------------------------------------------------------------------------
   private async execLink<O>(
-    link: { provider: string; model: string; languageModel?: LanguageModel },
+    link: { provider: string; model: string; languageModel?: LanguageModel; temperature?: number | null },
     schema: OutputSchema<O>,
     prompt: string,
     system: string | undefined,
-    temperature: number | undefined,
+    callTemperature: number | undefined,
     native: NativeCallOptions | undefined,
   ): Promise<AttemptResult<O> & { extras?: { cacheCreateTokens: number; cacheReadTokens: number; webSearches: number } }> {
+    // Per-link temperature: link (incl. null = never send) > call > prompt.
+    const temperature =
+      link.temperature === null ? undefined : (link.temperature ?? callTemperature);
     if (native && link.provider === "anthropic" && this.anthropicCfg) {
       let currentPrompt = prompt;
       let repaired = false;

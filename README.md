@@ -269,6 +269,31 @@ await gw.runStructured({
 
 Only Anthropic links use the native client — other chain providers stay on the AI SDK, and failover still works across the boundary (native link fails → AI SDK fallback link runs). Thinking is gated per model (sending it to Haiku would 400). Cache-write/cache-read tokens and web-search counts are captured in the usage log and included in cost estimates.
 
+### Governed embeddings
+
+Embedding spend at document-pipeline volume is real money — it goes through the same front door (rate limit, caps, ZDR, ledger):
+
+```ts
+const { embeddings } = await gw.embed(texts, {
+  model: "openai:text-embedding-3-small", // default; pricing built in
+  dimensions: 1536,
+  userId, route: "docs/pipeline",
+});
+// Mock mode: deterministic seeded unit vectors (identical input → identical
+// vector). BYO any AI SDK EmbeddingModel via opts.embeddingModel (Voyage, custom).
+```
+
+### Per-link temperature
+
+Model temperature tolerance differs per chain link — claude-sonnet-5 rejects any non-default temperature (a 4xx, which is deliberately *not* retryable, so it fails the call rather than falling through). Override per link: `null` = never send, a number pins it, unset inherits the call level:
+
+```ts
+getChain: async () => [
+  { provider: "anthropic", model: "claude-sonnet-5", temperature: null },
+  { provider: "openai", model: "gpt-4o", temperature: 0.3 },
+],
+```
+
 ### Judge in the request path
 
 ```ts

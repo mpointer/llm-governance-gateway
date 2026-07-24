@@ -123,6 +123,15 @@ export interface ChainLinkConfig {
   /** Falls back to the provider's configured/env API key when omitted. */
   apiKey?: string;
   /**
+   * Per-link temperature. `null` = NEVER send temperature on this link (for
+   * models that 400 on non-default values, e.g. claude-sonnet-5); a number
+   * pins it. Resolution: link (incl. null) > call-level > prompt-config.
+   * Note: an unsupported-temperature 4xx is deliberately non-retryable, so
+   * without this override a bad temperature on the primary link fails the
+   * call rather than falling through the chain.
+   */
+  temperature?: number | null;
+  /**
    * Bring-your-own AI SDK model (Azure, Bedrock, custom base URLs, test
    * fakes). When set, provider/model are used for attribution/pricing only.
    */
