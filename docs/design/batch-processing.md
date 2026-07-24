@@ -75,11 +75,19 @@ for await (const r of gw.batchResults(job.id)) {
 - **Cost model**: per-provider batch discount multiplier (default 0.5 for
   Anthropic), integrated with the cache-aware token rates work.
 
+## Decisions
+
+- **Submit-time reservation: estimate by default, optional hard ceiling.**
+  (Decided 2026-07-23.) Reservation = estimated prompt tokens × batch rate,
+  plus a bounded output allowance. Callers may set `maxCostCents` per job as
+  a hard ceiling — submit fails fast if the estimate exceeds it. The docs
+  MUST call out prominently that the default reservation is an ESTIMATE:
+  actual reconciled spend can exceed it (long outputs), so the ceiling — not
+  the estimate — is the guarantee. Estimation accuracy gets a dedicated test
+  fixture comparing reserved vs reconciled across realistic workloads.
+
 ## Open questions
 
-- Should submit-time reservation use estimated tokens (cheap, imprecise) or
-  require a caller-supplied budget per batch (explicit, annoying)? Leaning:
-  estimate by default, optional `maxCostCents` hard ceiling per job.
 - Judge sampling on batch results: same rubric path as sync, sampled — cheap
   to add once judge-in-path (v0.3) lands. Sequence judge first.
 ```
