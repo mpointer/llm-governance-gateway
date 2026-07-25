@@ -24,6 +24,25 @@ Three things no popular tool combines today, all shipped here:
 - [x] Cache-aware cost model — shipped with the native path (cacheWrite/cacheRead rates, web-search per-call pricing)
 - [x] Streaming — shipped: streamStructured with the full governance front door (v1: no mid-stream failover/judge/native)
 
+## Shipped via adoption harvest (v0.6–v0.7)
+
+These weren't planned here; they were demanded by the first production
+adopter and flowed back within days. That loop is the project's real
+development model, so it gets recorded alongside the plan:
+
+- [x] `runText` — governed plain-text generation (v0.6.0): the adopter's
+      seam was text-first; same front door, chain failover, finishReason
+      surfaced for truncation diagnostics
+- [x] Token counts on `RunTextResult` (v0.6.0) — first-adopter feedback,
+      same day
+- [x] `default` export conditions (v0.6.0) — drizzle-kit's CJS resolver
+      couldn't load import-only subpath exports
+- [x] Governed embeddings `gw.embed()` (v0.7.0) — embedding spend was
+      bypassing the ledger and caps entirely in the adopter's doc pipeline
+- [x] Per-link temperature `number | null` (v0.7.0) — claude-sonnet-5
+      rejects non-default temperature; per-call temperature couldn't express
+      per-link tolerance
+
 ## v0.4+
 
 - [ ] OTel / Langfuse export hooks (integrate with observability, don't compete with it)
