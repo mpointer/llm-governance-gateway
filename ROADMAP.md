@@ -51,6 +51,8 @@ development model, so it gets recorded alongside the plan:
 - [x] Enterprise providers (#2) — shipped: provider-factory registry (BYO cloud SDK, zero new deps), factory: chain links, recipes for all four clouds incl. watsonx IAM refresh. Design: [docs/design/enterprise-providers.md](./docs/design/enterprise-providers.md)
 - [x] ZDR-aware routing (#4) — shipped: caller-asserted retention map (fail closed), task/call constraints, chain skip, zdrEnforced audit field, judge/stream/batch enforcement
 - [x] OpenRouter pricing auto-sync — shipped: discovery registers vendor pricing into the registry
+- [ ] Web-search-grounded `runText` — surfaced by civic-data-adapters v0.2: its discovery callback wants grounded text generation, but native Anthropic web search currently works only through `runStructured`. Extending the native path to `runText` makes the gateway the natural discovery provider (real cross-package demand, not speculation)
+- [ ] Docs: local-bootstrap publish guide — first publish of a new package can't use trusted publishing (config requires an existing package) and `publishConfig.provenance` breaks local publishes; both bit us, both belong in written-down form
 - [ ] Pluggable guardrail hooks (pre/post) — TypeScript-native, no Python sidecar
 - [ ] Admin UI reference (prompt library, task routing, spend dashboards)
 
