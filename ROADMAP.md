@@ -53,8 +53,8 @@ development model, so it gets recorded alongside the plan:
 - [x] OpenRouter pricing auto-sync — shipped: discovery registers vendor pricing into the registry
 - [x] Web-search-grounded `runText` — shipped: `runText({ anthropic: { webSearch } })` runs the native text path (no emit tool, text blocks concatenated, stop_reason mapped to AI SDK vocabulary), web searches ledgered and priced, failover to plain AI SDK links preserved. Demand source: civic-data-adapters' discovery callback.
 - [x] Docs: local-bootstrap publish guide — shipped: [docs/publishing.md](./docs/publishing.md), the first-publish bootstrap sequence with both traps written down
-- [ ] Pluggable guardrail hooks (pre/post) — TypeScript-native, no Python sidecar
-- [ ] Admin UI reference (prompt library, task routing, spend dashboards)
+- [ ] Pluggable guardrail hooks (pre/post) — TypeScript-native, no Python sidecar. Design: [docs/design/guardrail-hooks.md](./docs/design/guardrail-hooks.md); gated on real adopter demand (FMA crisis pipeline is the likely trigger)
+- [ ] Admin UI reference (prompt library, task routing, spend dashboards) — design: [docs/design/admin-ui-reference.md](./docs/design/admin-ui-reference.md); sequenced after the Show HN wave, informed by external-adopter issues
 
 ## Non-goals
 
