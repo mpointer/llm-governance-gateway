@@ -45,7 +45,7 @@ development model, so it gets recorded alongside the plan:
 
 ## v0.4+
 
-- [ ] OTel / Langfuse export hooks (integrate with observability, don't compete with it)
+- [x] OTel / Langfuse export hooks — shipped: `GatewayConfig.observability` (onUsage / onSpendCapEvent / onJudgeScore, fire-and-forget after durable writes) plus `toOtelAttributes` mapping to the GenAI semantic conventions. No new dependencies.
 - [x] Together.ai + Hugging Face providers (#1) — shipped: first-class ids, discovery, Together pricing sync
 - [x] Local serving (#3) — shipped: custom OpenAI-compatible endpoint registry, ollama/vllm/lmstudio presets, zero-cost cap exclusion, local-first chains
 - [x] Enterprise providers (#2) — shipped: provider-factory registry (BYO cloud SDK, zero new deps), factory: chain links, recipes for all four clouds incl. watsonx IAM refresh. Design: [docs/design/enterprise-providers.md](./docs/design/enterprise-providers.md)

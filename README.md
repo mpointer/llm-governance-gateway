@@ -369,6 +369,25 @@ const final = await res.object; // resolves after usage logging + cache write
 
 v1 constraints, stated plainly: no mid-stream failover (the first resolvable link is used), no repair retry, no judge, no native-Anthropic options. Cache hits return a single-emission stream.
 
+### Observability export (OTel, Langfuse, metrics)
+
+The gateway is a governance library, not an observability platform — so it exports instead of competing. Three hooks fire after each durable write, fire-and-forget: a throwing or slow exporter can never break or block a governed call.
+
+```ts
+import { toOtelAttributes } from "llm-governance-gateway";
+
+const gw = new Gateway({
+  usage,
+  observability: {
+    onUsage: (entry) => span?.setAttributes(toOtelAttributes(entry)),
+    onSpendCapEvent: (e) => meter.counter("llm_cap_blocks").add(1, { route: e.route ?? "" }),
+    onJudgeScore: (s) => langfuse.score({ traceId: String(s.usageLogId), value: s.overallScore }),
+  },
+});
+```
+
+`toOtelAttributes` maps usage entries onto the OTel GenAI semantic conventions (`gen_ai.*`) plus `llm_gateway.*` extensions for cost, cache hits, web searches, and ZDR enforcement. No OTel or Langfuse dependency is taken; the hooks receive plain objects. One privacy note: when an encrypt hook is configured, `inputText`/`outputText` reach your exporter already encrypted, so the at-rest guarantee extends to telemetry.
+
 ### HTTP service (multi-app deployments)
 
 Mount the pipeline as a service so apps in any language share one enforcement point. Hono (optional peer dep) runs on Cloudflare Workers, Node, Bun, and Deno:

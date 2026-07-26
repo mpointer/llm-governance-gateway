@@ -33,8 +33,11 @@ import { missingPlaceholders, renderTemplate } from "./template.js";
 import type {
   GatewayConfig,
   JudgeConfig,
+  ObservabilityHooks,
   PromptDefault,
   ProviderId,
+  SpendCapEvent,
+  JudgeScore,
   UsageEntry,
 } from "./types.js";
 import {
@@ -306,6 +309,8 @@ export class Gateway {
   private readonly anthropicCfg?: GatewayConfig["anthropic"];
   private readonly batchCfg?: GatewayConfig["batch"];
   private readonly mockResponders = new Map<string, MockResponder>();
+  private readonly obs?: ObservabilityHooks;
+  private readonly obsWarned = new Set<string>();
 
   constructor(cfg: GatewayConfig) {
     this.usage = cfg.usage;
@@ -326,6 +331,40 @@ export class Gateway {
     this.judgeDefaults = cfg.judge;
     this.anthropicCfg = cfg.anthropic;
     this.batchCfg = cfg.batch;
+    this.obs = cfg.observability;
+  }
+
+  /** Fire an observability hook without letting it break the request path:
+   *  sync throws and async rejections are swallowed, warned once per hook. */
+  private emitObs<T>(name: string, fn: ((payload: T) => void | Promise<void>) | undefined, payload: T): void {
+    if (!fn) return;
+    const warn = (err: unknown) => {
+      if (this.obsWarned.has(name)) return;
+      this.obsWarned.add(name);
+      console.warn(
+        `[llm-gateway] observability hook ${name} failed (further failures suppressed): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    };
+    try {
+      const r = fn(payload);
+      if (r && typeof (r as Promise<void>).catch === "function") {
+        (r as Promise<void>).catch(warn);
+      }
+    } catch (err) {
+      warn(err);
+    }
+  }
+
+  private async recordCapEvent(event: SpendCapEvent): Promise<void> {
+    await this.usage.recordSpendCapEvent(event);
+    this.emitObs("onSpendCapEvent", this.obs?.onSpendCapEvent, event);
+  }
+
+  private async saveJudge(score: JudgeScore): Promise<void> {
+    await this.usage.saveJudgeScore(score);
+    this.emitObs("onJudgeScore", this.obs?.onJudgeScore, score);
   }
 
   // ===========================================================================
@@ -1147,7 +1186,7 @@ export class Gateway {
     if (globalCap) {
       const total = (await this.usage.sumSpendCents(todayUtc)) + projectedCents;
       if (total >= globalCap) {
-        await this.usage.recordSpendCapEvent({
+        await this.recordCapEvent({
           userId: userId ?? null,
           capCents: globalCap,
           spentCents: total,
@@ -1173,7 +1212,7 @@ export class Gateway {
     const spent =
       (await this.usage.sumSpendCents(todayUtc, userId ?? null)) + projectedCents;
     if (spent >= capCents) {
-      await this.usage.recordSpendCapEvent({
+      await this.recordCapEvent({
         userId: userId ?? null,
         capCents,
         spentCents: spent,
@@ -1284,7 +1323,7 @@ export class Gateway {
   private async logUsage(f: Omit<UsageEntry, "createdAt">): Promise<string | number> {
     const enc = (t: string | null) =>
       t != null && this.encrypt ? this.encrypt(t) : t;
-    return this.usage.logUsage({
+    const entry: UsageEntry = {
       ...f,
       app: f.app ?? this.appId,
       // Prompts and outputs can carry user PII. When an encrypt hook is
@@ -1292,7 +1331,10 @@ export class Gateway {
       inputText: enc(truncate(f.inputText)),
       outputText: enc(truncate(f.outputText)),
       createdAt: new Date(),
-    });
+    };
+    const id = await this.usage.logUsage(entry);
+    this.emitObs("onUsage", this.obs?.onUsage, { ...entry, id });
+    return id;
   }
 
   async runStructured<I, O>(
@@ -1554,7 +1596,7 @@ export class Gateway {
       const values = Object.values(rubric);
       const overall =
         values.length > 0 ? values.reduce((a, b) => a + b, 0) / values.length : 0;
-      await this.usage.saveJudgeScore({
+      await this.saveJudge({
         usageLogId,
         rubric,
         overallScore: overall,
@@ -1700,7 +1742,7 @@ export class Gateway {
       traceId: randomUUID(),
       durationMs,
     });
-    await this.usage.saveJudgeScore({
+    await this.saveJudge({
       usageLogId: mainUsageLogId,
       rubric: scores,
       overallScore: overall,
