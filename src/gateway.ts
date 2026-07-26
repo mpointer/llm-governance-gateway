@@ -7,6 +7,7 @@ import { JudgeGateError, RateLimitError, SpendCapError, ZdrViolationError } from
 import { ProviderRegistry, parseModelId, type ChainLink } from "./providers.js";
 import {
   callNativeAnthropic,
+  callNativeAnthropicText,
   extractEmitToolInput,
   NativeSchemaError,
   type NativeCallOptions,
@@ -228,6 +229,12 @@ export interface RunTextOptions<I> {
   anonKey?: string;
   route?: string;
   app?: string;
+  /** Native Anthropic options (web search, thinking, cacheSystem). Applies
+   *  on anthropic chain links when GatewayConfig.anthropic is configured;
+   *  non-anthropic links in the same chain run the plain AI SDK path, so a
+   *  grounded call can still fail over to an ungrounded link rather than
+   *  fail outright. */
+  anthropic?: NativeCallOptions;
 }
 
 export interface RunTextResult {
@@ -241,6 +248,8 @@ export interface RunTextResult {
   traceId: string;
   cacheHit: boolean;
   usageLogId?: string | number;
+  /** Server-side web searches the answer used (native Anthropic path). */
+  webSearches?: number;
 }
 
 const JUDGE_SNIPPET_LIMIT = 4000;
@@ -454,6 +463,13 @@ export class Gateway {
     const prompt = renderTemplate(promptConfig.body, opts.variables(opts.input));
     const temperature = opts.temperature ?? promptConfig.temperature;
 
+    // Native features must never silently not apply (same rule as runStructured).
+    if (opts.anthropic && !this.anthropicCfg && !this.mock) {
+      throw new Error(
+        "runText received `anthropic` native options but GatewayConfig.anthropic is not configured.",
+      );
+    }
+
     let text: string;
     let finishReason: string | undefined;
     let inputTokens: number;
@@ -461,6 +477,29 @@ export class Gateway {
     let provider: string;
     let model: string;
     let durationMs: number;
+    let extras:
+      | { cacheCreateTokens: number; cacheReadTokens: number; webSearches: number }
+      | undefined;
+
+    const attemptNativeText = async (linkModel: string, linkTemp?: number | null) => {
+      const effTemp = linkTemp === null ? undefined : (linkTemp ?? temperature);
+      for (let retry = 0; ; ) {
+        try {
+          return await callNativeAnthropicText(this.anthropicCfg!, {
+            model: linkModel,
+            prompt,
+            system: opts.system,
+            ...(effTemp !== undefined ? { temperature: effTemp } : {}),
+            ...(opts.maxOutputTokens !== undefined ? { maxTokens: opts.maxOutputTokens } : {}),
+            native: opts.anthropic!,
+          });
+        } catch (err) {
+          if (!isRetryable(err) || retry >= 2) throw err;
+          await new Promise<void>((r) => setTimeout(r, backoffMs(retry, err)));
+          retry++;
+        }
+      }
+    };
 
     const attemptText = async (lm: LanguageModel, linkTemp?: number | null) => {
       const effTemp = linkTemp === null ? undefined : (linkTemp ?? temperature);
@@ -535,16 +574,34 @@ export class Gateway {
       model = "";
       durationMs = 0;
       for (const link of links) {
-        if (!link.languageModel) {
-          lastErr = new Error(`No API key for provider "${link.provider}".`);
+        const nativeApplies =
+          opts.anthropic && link.provider === "anthropic" && this.anthropicCfg;
+        if (!link.languageModel && !nativeApplies) {
+          lastErr = new Error(
+            `No API key for provider "${link.provider}" (and native execution does not apply).`,
+          );
           continue;
         }
         try {
-          const res = await attemptText(link.languageModel, (link as ChainLink).temperature);
-          text = res.text;
-          finishReason = res.finishReason;
-          inputTokens = res.usage.inputTokens ?? 0;
-          outputTokens = res.usage.outputTokens ?? 0;
+          if (nativeApplies) {
+            const res = await attemptNativeText(link.model, (link as ChainLink).temperature);
+            text = res.text;
+            finishReason = res.finishReason;
+            inputTokens = res.inputTokens;
+            outputTokens = res.outputTokens;
+            extras = {
+              cacheCreateTokens: res.cacheCreateTokens,
+              cacheReadTokens: res.cacheReadTokens,
+              webSearches: res.webSearches,
+            };
+          } else {
+            const res = await attemptText(link.languageModel!, (link as ChainLink).temperature);
+            text = res.text;
+            finishReason = res.finishReason;
+            inputTokens = res.usage.inputTokens ?? 0;
+            outputTokens = res.usage.outputTokens ?? 0;
+            extras = undefined;
+          }
           provider = link.provider;
           model = link.model;
           durationMs = Date.now() - start;
@@ -571,16 +628,30 @@ export class Gateway {
       model,
       inputTokens,
       outputTokens,
-      estimatedCostCents: this.registry.estimateForLink(provider, model, inputTokens, outputTokens),
+      estimatedCostCents: this.registry.estimateForLink(provider, model, inputTokens, outputTokens, extras),
       cacheHit: false,
       traceId,
       durationMs,
+      cacheCreateTokens: extras?.cacheCreateTokens ?? null,
+      cacheReadTokens: extras?.cacheReadTokens ?? null,
+      webSearches: extras?.webSearches ?? null,
       zdrEnforced: requireZdr ? true : null,
       inputText: prompt,
       outputText: text,
     });
 
-    return { text, finishReason, provider, model, inputTokens, outputTokens, traceId, cacheHit: false, usageLogId };
+    return {
+      text,
+      finishReason,
+      provider,
+      model,
+      inputTokens,
+      outputTokens,
+      traceId,
+      cacheHit: false,
+      usageLogId,
+      ...(extras ? { webSearches: extras.webSearches } : {}),
+    };
   }
 
   // ===========================================================================

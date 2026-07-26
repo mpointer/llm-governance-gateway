@@ -269,6 +269,21 @@ await gw.runStructured({
 
 Only Anthropic links use the native client — other chain providers stay on the AI SDK, and failover still works across the boundary (native link fails → AI SDK fallback link runs). Thinking is gated per model (sending it to Haiku would 400). Cache-write/cache-read tokens and web-search counts are captured in the usage log and included in cost estimates.
 
+The same options work on `runText` for **web-search-grounded text generation** — no schema, no emit tool, the model's text blocks are the answer:
+
+```ts
+const res = await gw.runText({
+  slug: "discovery",
+  input: { town: "Springfield" },
+  variables: (i) => ({ town: i.town }),
+  cache: false,
+  anthropic: { webSearch: { maxUses: 4 } },
+});
+// res.text is the grounded answer; res.webSearches says how many searches it used
+```
+
+One caveat stated plainly: an unsupported-temperature 4xx on a native link is deliberately non-retryable, and a grounded call that fails over to a non-Anthropic link produces an *ungrounded* answer from the fallback model. If grounding is a hard requirement, keep the chain Anthropic-only for that call.
+
 ### Governed embeddings
 
 Embedding spend at document-pipeline volume is real money — it goes through the same front door (rate limit, caps, ZDR, ledger):
