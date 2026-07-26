@@ -27,6 +27,7 @@ export {
   type ProviderModels,
 } from "./discovery.js";
 export { renderTemplate, missingPlaceholders } from "./template.js";
+export { toOtelAttributes } from "./observability.js";
 export {
   isRetryable,
   isSchemaValidationError,
@@ -107,4 +108,5 @@ export type {
   ModelPricing,
   SpendCapConfig,
   GatewayConfig,
+  ObservabilityHooks,
 } from "./types.js";

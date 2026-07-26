@@ -7,6 +7,7 @@ import { JudgeGateError, RateLimitError, SpendCapError, ZdrViolationError } from
 import { ProviderRegistry, parseModelId, type ChainLink } from "./providers.js";
 import {
   callNativeAnthropic,
+  callNativeAnthropicText,
   extractEmitToolInput,
   NativeSchemaError,
   type NativeCallOptions,
@@ -32,8 +33,11 @@ import { missingPlaceholders, renderTemplate } from "./template.js";
 import type {
   GatewayConfig,
   JudgeConfig,
+  ObservabilityHooks,
   PromptDefault,
   ProviderId,
+  SpendCapEvent,
+  JudgeScore,
   UsageEntry,
 } from "./types.js";
 import {
@@ -228,6 +232,12 @@ export interface RunTextOptions<I> {
   anonKey?: string;
   route?: string;
   app?: string;
+  /** Native Anthropic options (web search, thinking, cacheSystem). Applies
+   *  on anthropic chain links when GatewayConfig.anthropic is configured;
+   *  non-anthropic links in the same chain run the plain AI SDK path, so a
+   *  grounded call can still fail over to an ungrounded link rather than
+   *  fail outright. */
+  anthropic?: NativeCallOptions;
 }
 
 export interface RunTextResult {
@@ -241,6 +251,8 @@ export interface RunTextResult {
   traceId: string;
   cacheHit: boolean;
   usageLogId?: string | number;
+  /** Server-side web searches the answer used (native Anthropic path). */
+  webSearches?: number;
 }
 
 const JUDGE_SNIPPET_LIMIT = 4000;
@@ -297,6 +309,8 @@ export class Gateway {
   private readonly anthropicCfg?: GatewayConfig["anthropic"];
   private readonly batchCfg?: GatewayConfig["batch"];
   private readonly mockResponders = new Map<string, MockResponder>();
+  private readonly obs?: ObservabilityHooks;
+  private readonly obsWarned = new Set<string>();
 
   constructor(cfg: GatewayConfig) {
     this.usage = cfg.usage;
@@ -317,6 +331,40 @@ export class Gateway {
     this.judgeDefaults = cfg.judge;
     this.anthropicCfg = cfg.anthropic;
     this.batchCfg = cfg.batch;
+    this.obs = cfg.observability;
+  }
+
+  /** Fire an observability hook without letting it break the request path:
+   *  sync throws and async rejections are swallowed, warned once per hook. */
+  private emitObs<T>(name: string, fn: ((payload: T) => void | Promise<void>) | undefined, payload: T): void {
+    if (!fn) return;
+    const warn = (err: unknown) => {
+      if (this.obsWarned.has(name)) return;
+      this.obsWarned.add(name);
+      console.warn(
+        `[llm-gateway] observability hook ${name} failed (further failures suppressed): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    };
+    try {
+      const r = fn(payload);
+      if (r && typeof (r as Promise<void>).catch === "function") {
+        (r as Promise<void>).catch(warn);
+      }
+    } catch (err) {
+      warn(err);
+    }
+  }
+
+  private async recordCapEvent(event: SpendCapEvent): Promise<void> {
+    await this.usage.recordSpendCapEvent(event);
+    this.emitObs("onSpendCapEvent", this.obs?.onSpendCapEvent, event);
+  }
+
+  private async saveJudge(score: JudgeScore): Promise<void> {
+    await this.usage.saveJudgeScore(score);
+    this.emitObs("onJudgeScore", this.obs?.onJudgeScore, score);
   }
 
   // ===========================================================================
@@ -454,6 +502,13 @@ export class Gateway {
     const prompt = renderTemplate(promptConfig.body, opts.variables(opts.input));
     const temperature = opts.temperature ?? promptConfig.temperature;
 
+    // Native features must never silently not apply (same rule as runStructured).
+    if (opts.anthropic && !this.anthropicCfg && !this.mock) {
+      throw new Error(
+        "runText received `anthropic` native options but GatewayConfig.anthropic is not configured.",
+      );
+    }
+
     let text: string;
     let finishReason: string | undefined;
     let inputTokens: number;
@@ -461,6 +516,29 @@ export class Gateway {
     let provider: string;
     let model: string;
     let durationMs: number;
+    let extras:
+      | { cacheCreateTokens: number; cacheReadTokens: number; webSearches: number }
+      | undefined;
+
+    const attemptNativeText = async (linkModel: string, linkTemp?: number | null) => {
+      const effTemp = linkTemp === null ? undefined : (linkTemp ?? temperature);
+      for (let retry = 0; ; ) {
+        try {
+          return await callNativeAnthropicText(this.anthropicCfg!, {
+            model: linkModel,
+            prompt,
+            system: opts.system,
+            ...(effTemp !== undefined ? { temperature: effTemp } : {}),
+            ...(opts.maxOutputTokens !== undefined ? { maxTokens: opts.maxOutputTokens } : {}),
+            native: opts.anthropic!,
+          });
+        } catch (err) {
+          if (!isRetryable(err) || retry >= 2) throw err;
+          await new Promise<void>((r) => setTimeout(r, backoffMs(retry, err)));
+          retry++;
+        }
+      }
+    };
 
     const attemptText = async (lm: LanguageModel, linkTemp?: number | null) => {
       const effTemp = linkTemp === null ? undefined : (linkTemp ?? temperature);
@@ -535,16 +613,34 @@ export class Gateway {
       model = "";
       durationMs = 0;
       for (const link of links) {
-        if (!link.languageModel) {
-          lastErr = new Error(`No API key for provider "${link.provider}".`);
+        const nativeApplies =
+          opts.anthropic && link.provider === "anthropic" && this.anthropicCfg;
+        if (!link.languageModel && !nativeApplies) {
+          lastErr = new Error(
+            `No API key for provider "${link.provider}" (and native execution does not apply).`,
+          );
           continue;
         }
         try {
-          const res = await attemptText(link.languageModel, (link as ChainLink).temperature);
-          text = res.text;
-          finishReason = res.finishReason;
-          inputTokens = res.usage.inputTokens ?? 0;
-          outputTokens = res.usage.outputTokens ?? 0;
+          if (nativeApplies) {
+            const res = await attemptNativeText(link.model, (link as ChainLink).temperature);
+            text = res.text;
+            finishReason = res.finishReason;
+            inputTokens = res.inputTokens;
+            outputTokens = res.outputTokens;
+            extras = {
+              cacheCreateTokens: res.cacheCreateTokens,
+              cacheReadTokens: res.cacheReadTokens,
+              webSearches: res.webSearches,
+            };
+          } else {
+            const res = await attemptText(link.languageModel!, (link as ChainLink).temperature);
+            text = res.text;
+            finishReason = res.finishReason;
+            inputTokens = res.usage.inputTokens ?? 0;
+            outputTokens = res.usage.outputTokens ?? 0;
+            extras = undefined;
+          }
           provider = link.provider;
           model = link.model;
           durationMs = Date.now() - start;
@@ -571,16 +667,30 @@ export class Gateway {
       model,
       inputTokens,
       outputTokens,
-      estimatedCostCents: this.registry.estimateForLink(provider, model, inputTokens, outputTokens),
+      estimatedCostCents: this.registry.estimateForLink(provider, model, inputTokens, outputTokens, extras),
       cacheHit: false,
       traceId,
       durationMs,
+      cacheCreateTokens: extras?.cacheCreateTokens ?? null,
+      cacheReadTokens: extras?.cacheReadTokens ?? null,
+      webSearches: extras?.webSearches ?? null,
       zdrEnforced: requireZdr ? true : null,
       inputText: prompt,
       outputText: text,
     });
 
-    return { text, finishReason, provider, model, inputTokens, outputTokens, traceId, cacheHit: false, usageLogId };
+    return {
+      text,
+      finishReason,
+      provider,
+      model,
+      inputTokens,
+      outputTokens,
+      traceId,
+      cacheHit: false,
+      usageLogId,
+      ...(extras ? { webSearches: extras.webSearches } : {}),
+    };
   }
 
   // ===========================================================================
@@ -1076,7 +1186,7 @@ export class Gateway {
     if (globalCap) {
       const total = (await this.usage.sumSpendCents(todayUtc)) + projectedCents;
       if (total >= globalCap) {
-        await this.usage.recordSpendCapEvent({
+        await this.recordCapEvent({
           userId: userId ?? null,
           capCents: globalCap,
           spentCents: total,
@@ -1102,7 +1212,7 @@ export class Gateway {
     const spent =
       (await this.usage.sumSpendCents(todayUtc, userId ?? null)) + projectedCents;
     if (spent >= capCents) {
-      await this.usage.recordSpendCapEvent({
+      await this.recordCapEvent({
         userId: userId ?? null,
         capCents,
         spentCents: spent,
@@ -1213,7 +1323,7 @@ export class Gateway {
   private async logUsage(f: Omit<UsageEntry, "createdAt">): Promise<string | number> {
     const enc = (t: string | null) =>
       t != null && this.encrypt ? this.encrypt(t) : t;
-    return this.usage.logUsage({
+    const entry: UsageEntry = {
       ...f,
       app: f.app ?? this.appId,
       // Prompts and outputs can carry user PII. When an encrypt hook is
@@ -1221,7 +1331,10 @@ export class Gateway {
       inputText: enc(truncate(f.inputText)),
       outputText: enc(truncate(f.outputText)),
       createdAt: new Date(),
-    });
+    };
+    const id = await this.usage.logUsage(entry);
+    this.emitObs("onUsage", this.obs?.onUsage, { ...entry, id });
+    return id;
   }
 
   async runStructured<I, O>(
@@ -1483,7 +1596,7 @@ export class Gateway {
       const values = Object.values(rubric);
       const overall =
         values.length > 0 ? values.reduce((a, b) => a + b, 0) / values.length : 0;
-      await this.usage.saveJudgeScore({
+      await this.saveJudge({
         usageLogId,
         rubric,
         overallScore: overall,
@@ -1629,7 +1742,7 @@ export class Gateway {
       traceId: randomUUID(),
       durationMs,
     });
-    await this.usage.saveJudgeScore({
+    await this.saveJudge({
       usageLogId: mainUsageLogId,
       rubric: scores,
       overallScore: overall,

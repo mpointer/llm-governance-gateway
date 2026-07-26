@@ -269,6 +269,21 @@ await gw.runStructured({
 
 Only Anthropic links use the native client — other chain providers stay on the AI SDK, and failover still works across the boundary (native link fails → AI SDK fallback link runs). Thinking is gated per model (sending it to Haiku would 400). Cache-write/cache-read tokens and web-search counts are captured in the usage log and included in cost estimates.
 
+The same options work on `runText` for **web-search-grounded text generation** — no schema, no emit tool, the model's text blocks are the answer:
+
+```ts
+const res = await gw.runText({
+  slug: "discovery",
+  input: { town: "Springfield" },
+  variables: (i) => ({ town: i.town }),
+  cache: false,
+  anthropic: { webSearch: { maxUses: 4 } },
+});
+// res.text is the grounded answer; res.webSearches says how many searches it used
+```
+
+One caveat stated plainly: an unsupported-temperature 4xx on a native link is deliberately non-retryable, and a grounded call that fails over to a non-Anthropic link produces an *ungrounded* answer from the fallback model. If grounding is a hard requirement, keep the chain Anthropic-only for that call.
+
 ### Governed embeddings
 
 Embedding spend at document-pipeline volume is real money — it goes through the same front door (rate limit, caps, ZDR, ledger):
@@ -353,6 +368,25 @@ const final = await res.object; // resolves after usage logging + cache write
 ```
 
 v1 constraints, stated plainly: no mid-stream failover (the first resolvable link is used), no repair retry, no judge, no native-Anthropic options. Cache hits return a single-emission stream.
+
+### Observability export (OTel, Langfuse, metrics)
+
+The gateway is a governance library, not an observability platform — so it exports instead of competing. Three hooks fire after each durable write, fire-and-forget: a throwing or slow exporter can never break or block a governed call.
+
+```ts
+import { toOtelAttributes } from "llm-governance-gateway";
+
+const gw = new Gateway({
+  usage,
+  observability: {
+    onUsage: (entry) => span?.setAttributes(toOtelAttributes(entry)),
+    onSpendCapEvent: (e) => meter.counter("llm_cap_blocks").add(1, { route: e.route ?? "" }),
+    onJudgeScore: (s) => langfuse.score({ traceId: String(s.usageLogId), value: s.overallScore }),
+  },
+});
+```
+
+`toOtelAttributes` maps usage entries onto the OTel GenAI semantic conventions (`gen_ai.*`) plus `llm_gateway.*` extensions for cost, cache hits, web searches, and ZDR enforcement. No OTel or Langfuse dependency is taken; the hooks receive plain objects. One privacy note: when an encrypt hook is configured, `inputText`/`outputText` reach your exporter already encrypted, so the at-rest guarantee extends to telemetry.
 
 ### HTTP service (multi-app deployments)
 

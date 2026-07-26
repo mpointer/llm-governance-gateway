@@ -270,6 +270,23 @@ export interface JudgeDefaults {
   random?: () => number;
 }
 
+/**
+ * Observability export hooks: integrate with OTel/Langfuse/metrics, don't
+ * compete with them. Hooks fire AFTER the durable UsageStore write,
+ * fire-and-forget: a throwing or rejecting hook is swallowed (warned once
+ * per hook) and never breaks or slows the governed call. Note `inputText`/
+ * `outputText` on the entry are already encrypted when an encrypt hook is
+ * configured — the at-rest guarantee extends to whatever your exporter does.
+ */
+export interface ObservabilityHooks {
+  /** Every usage row: generations, embeddings, cache hits, judge calls. */
+  onUsage?: (entry: UsageEntry & { id: string | number }) => void | Promise<void>;
+  /** A spend cap blocked a call. */
+  onSpendCapEvent?: (event: SpendCapEvent) => void | Promise<void>;
+  /** A judge (caller rubric or model-graded) scored a response. */
+  onJudgeScore?: (score: JudgeScore) => void | Promise<void>;
+}
+
 export interface GatewayConfig {
   usage: UsageStore;
   cache?: CacheStore;
@@ -306,4 +323,6 @@ export interface GatewayConfig {
   decrypt?: (ciphertext: string) => string;
   /** Returns true when a stored string is ciphertext from `encrypt`. */
   isEncrypted?: (value: string) => boolean;
+  /** Export hooks for OTel/Langfuse/metrics. See ObservabilityHooks. */
+  observability?: ObservabilityHooks;
 }

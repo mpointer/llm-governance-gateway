@@ -35,6 +35,7 @@ export interface AnthropicMessage {
     cache_read_input_tokens?: number;
     server_tool_use?: { web_search_requests?: number };
   };
+  stop_reason?: string | null;
 }
 
 export interface NativeCallOptions {
@@ -185,6 +186,100 @@ export async function callNativeAnthropic(
   const u = msg.usage ?? {};
   return {
     object: toolUse.input,
+    inputTokens: u.input_tokens ?? 0,
+    outputTokens: u.output_tokens ?? 0,
+    cacheCreateTokens: u.cache_creation_input_tokens ?? 0,
+    cacheReadTokens: u.cache_read_input_tokens ?? 0,
+    webSearches: u.server_tool_use?.web_search_requests ?? 0,
+  };
+}
+
+export interface NativeTextResult {
+  text: string;
+  /** AI-SDK-vocabulary finishReason ("stop", "length", ...) mapped from
+   *  Anthropic's stop_reason, so runText callers see one vocabulary. */
+  finishReason?: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreateTokens: number;
+  cacheReadTokens: number;
+  webSearches: number;
+}
+
+function toFinishReason(stopReason: string | null | undefined): string | undefined {
+  if (stopReason == null) return undefined;
+  if (stopReason === "end_turn") return "stop";
+  if (stopReason === "max_tokens") return "length";
+  return stopReason;
+}
+
+/** Native Anthropic TEXT call: the runText counterpart of
+ *  callNativeAnthropic. No emit tool and no schema — the answer is the
+ *  concatenated text blocks — which is exactly what makes server-side web
+ *  search usable for grounded text: the search results and the prose answer
+ *  interleave freely instead of being forced through a tool call. */
+export async function callNativeAnthropicText(
+  cfg: NativeAnthropicConfig,
+  args: {
+    model: string;
+    prompt: string;
+    system?: string;
+    temperature?: number;
+    maxTokens?: number;
+    native: NativeCallOptions;
+  },
+): Promise<NativeTextResult> {
+  const supports = cfg.supportsThinking ?? defaultSupportsThinking;
+  const wantsThinking = !!args.native.thinking && supports(args.model);
+
+  const thinking =
+    wantsThinking && typeof args.native.thinking === "object"
+      ? { type: "enabled", budget_tokens: args.native.thinking.budgetTokens }
+      : wantsThinking
+        ? { type: "adaptive" }
+        : undefined;
+
+  const tools: Record<string, unknown>[] = [];
+  if (args.native.webSearch) {
+    tools.push({
+      type: "web_search_20250305",
+      name: "web_search",
+      max_uses:
+        typeof args.native.webSearch === "object" ? args.native.webSearch.maxUses : 4,
+    });
+  }
+
+  const system = args.system
+    ? [
+        {
+          type: "text",
+          text: args.system,
+          ...(args.native.cacheSystem ? { cache_control: { type: "ephemeral" } } : {}),
+        },
+      ]
+    : undefined;
+
+  const msg = await cfg.client.messages.create({
+    model: args.model,
+    max_tokens: args.maxTokens ?? cfg.maxTokens ?? 8192,
+    ...(system ? { system } : {}),
+    messages: [{ role: "user", content: args.prompt }],
+    ...(tools.length > 0 ? { tools } : {}),
+    ...(thinking ? { thinking } : {}),
+    ...(args.temperature !== undefined && !wantsThinking
+      ? { temperature: args.temperature } // thinking requires temperature 1
+      : {}),
+  });
+
+  const text = msg.content
+    .filter((b): b is { type: "text"; text: string } => b.type === "text")
+    .map((b) => b.text)
+    .join("");
+
+  const u = msg.usage ?? {};
+  return {
+    text,
+    finishReason: toFinishReason(msg.stop_reason),
     inputTokens: u.input_tokens ?? 0,
     outputTokens: u.output_tokens ?? 0,
     cacheCreateTokens: u.cache_creation_input_tokens ?? 0,

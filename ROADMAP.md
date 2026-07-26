@@ -45,16 +45,16 @@ development model, so it gets recorded alongside the plan:
 
 ## v0.4+
 
-- [ ] OTel / Langfuse export hooks (integrate with observability, don't compete with it)
+- [x] OTel / Langfuse export hooks — shipped: `GatewayConfig.observability` (onUsage / onSpendCapEvent / onJudgeScore, fire-and-forget after durable writes) plus `toOtelAttributes` mapping to the GenAI semantic conventions. No new dependencies.
 - [x] Together.ai + Hugging Face providers (#1) — shipped: first-class ids, discovery, Together pricing sync
 - [x] Local serving (#3) — shipped: custom OpenAI-compatible endpoint registry, ollama/vllm/lmstudio presets, zero-cost cap exclusion, local-first chains
 - [x] Enterprise providers (#2) — shipped: provider-factory registry (BYO cloud SDK, zero new deps), factory: chain links, recipes for all four clouds incl. watsonx IAM refresh. Design: [docs/design/enterprise-providers.md](./docs/design/enterprise-providers.md)
 - [x] ZDR-aware routing (#4) — shipped: caller-asserted retention map (fail closed), task/call constraints, chain skip, zdrEnforced audit field, judge/stream/batch enforcement
 - [x] OpenRouter pricing auto-sync — shipped: discovery registers vendor pricing into the registry
-- [ ] Web-search-grounded `runText` — surfaced by civic-data-adapters v0.2: its discovery callback wants grounded text generation, but native Anthropic web search currently works only through `runStructured`. Extending the native path to `runText` makes the gateway the natural discovery provider (real cross-package demand, not speculation)
-- [ ] Docs: local-bootstrap publish guide — first publish of a new package can't use trusted publishing (config requires an existing package) and `publishConfig.provenance` breaks local publishes; both bit us, both belong in written-down form
-- [ ] Pluggable guardrail hooks (pre/post) — TypeScript-native, no Python sidecar
-- [ ] Admin UI reference (prompt library, task routing, spend dashboards)
+- [x] Web-search-grounded `runText` — shipped: `runText({ anthropic: { webSearch } })` runs the native text path (no emit tool, text blocks concatenated, stop_reason mapped to AI SDK vocabulary), web searches ledgered and priced, failover to plain AI SDK links preserved. Demand source: civic-data-adapters' discovery callback.
+- [x] Docs: local-bootstrap publish guide — shipped: [docs/publishing.md](./docs/publishing.md), the first-publish bootstrap sequence with both traps written down
+- [ ] Pluggable guardrail hooks (pre/post) — TypeScript-native, no Python sidecar. Design: [docs/design/guardrail-hooks.md](./docs/design/guardrail-hooks.md); gated on real adopter demand (FMA crisis pipeline is the likely trigger)
+- [ ] Admin UI reference (prompt library, task routing, spend dashboards) — design: [docs/design/admin-ui-reference.md](./docs/design/admin-ui-reference.md); sequenced after the Show HN wave, informed by external-adopter issues
 
 ## Non-goals
 
