@@ -14,7 +14,7 @@ export interface EmbedOptions {
   dimensions?: number;
   /** BYO AI SDK embedding model (tests, Voyage, custom endpoints). When set,
    *  `model` is used for attribution/pricing only. */
-  embeddingModel?: EmbeddingModel<string>;
+  embeddingModel?: EmbeddingModel;
   requireZdr?: boolean;
   userId?: string;
   anonKey?: string;
@@ -44,7 +44,7 @@ export function buildEmbeddingModel(
   registry: ProviderRegistry,
   provider: string,
   model: string,
-): EmbeddingModel<string> | null {
+): EmbeddingModel | null {
   // v1: OpenAI only — the one provider our adopters embed with today.
   // Voyage (LocalNewsBuddy harvest) and custom endpoints via the
   // `embeddingModel` BYO seam until they earn first-class support.

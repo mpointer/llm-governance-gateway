@@ -116,7 +116,7 @@ describe("governed embeddings", () => {
           usage: { tokens: 42 },
         };
       },
-    } as unknown as EmbeddingModel<string>;
+    } as unknown as EmbeddingModel;
 
     const res = await gw.embed(["a", "b"], {
       model: "openai:text-embedding-3-small",
