@@ -1,6 +1,6 @@
 {
   "name": "llm-governance-gateway",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Governed structured-output LLM pipeline: rate limit → spend caps (per-user + global circuit breaker) → cache → provider-chain failover → Zod validation → usage logging → LLM-judge, with a deterministic mock provider for CI.",
   "license": "MIT",
   "author": "Michael Pointer <mpointer@gmail.com>",
@@ -67,10 +67,10 @@
     "cost-governance"
   ],
   "dependencies": {
-    "@ai-sdk/anthropic": "^2.0.81",
-    "@ai-sdk/google": "^2.0.74",
-    "@ai-sdk/openai": "^2.0.106",
-    "ai": "^5.0.199",
+    "@ai-sdk/anthropic": "^4.0.44",
+    "@ai-sdk/google": "^4.0.56",
+    "@ai-sdk/openai": "^4.0.50",
+    "ai": "^7.0.83",
     "zod": "^4.4.3"
   },
   "peerDependencies": {
