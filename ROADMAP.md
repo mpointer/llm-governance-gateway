@@ -103,6 +103,34 @@ see below; that is a decision, not a backlog.
 
 Design and resolution log: [docs/design/critique-beyond-pr18.md](./docs/design/critique-beyond-pr18.md)
 
+## v0.11 — second-integration harvest
+
+A second real consumer (NewsHound) migrated 0.8.0 → 0.10.0 and filed #28.
+Nothing in it was a type-level SPI break — the store interfaces held — but it
+independently confirmed three gaps already filed from a different adoption.
+Two of those are *shape* gaps in the SPI, which a 1.0 freeze would make
+expensive to fix, so they were closed first:
+
+- [x] **Spend-cap observe mode** (#8, PR #30) — `caps.mode: "observe"` measures
+      what your thresholds would have blocked without blocking. Replaces the
+      zero-cap workaround, which recorded nothing.
+- [x] **Caller-defined usage metadata** (#12, PR #31) — attribution along an
+      axis the gateway has no opinion on, reaching every row a call writes.
+- [x] **Upgrade-note correctness** (#28 item 5, PR #29) — the native-Anthropic
+      `attemptMs` bound supersedes a caller's own client `timeout`, which the
+      0.10.0 changelog's "no breaking changes" framing did not surface.
+
+Still open from #28, unchanged in priority: #9 (pricing lookup falls back
+silently on a key-format mismatch — the fix is the loud-warning-plus-strict-mode
+treatment 0.10.0 already gave the analogous default-provider case).
+
+### On 1.0.0
+
+The freeze is gated on a real integration proving the store interfaces hold,
+not on a date. #28 is that evidence and it came back clean: no type-level
+breaks across a second adopter. What it also showed is that *shape* gaps are
+the real 1.0 risk, which is why #8 and #12 landed first.
+
 ## Non-goals
 
 - Observability breadth (traces, dashboards, analytics) — export to Langfuse/OTel instead.
