@@ -460,11 +460,8 @@ export interface GatewayConfig {
   cacheTtlSeconds?: number;
   /**
    * Bounds on outbound provider calls. See
-   * docs/design/timeouts-and-deadlines.md. Per-call options override these.
-   *
-   * The per-attempt timeout (`attemptMs`) and whole-operation budget
-   * (`deadlineMs`) are stages S3/S4 of that design and are not implemented
-   * yet; the streaming clocks below are.
+   * docs/design/timeouts-and-deadlines.md. Per-call options override these:
+   * per call > this config > built-in default.
    */
   timeouts?: TimeoutConfig;
   /**
