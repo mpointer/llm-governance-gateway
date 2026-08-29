@@ -47,6 +47,8 @@ export const aiUsageLog = pgTable("ai_usage_log", {
   zdrEnforced: boolean("zdr_enforced"),
   inputText: text("input_text"),
   outputText: text("output_text"),
+  /** Caller-defined attribution. NULL before 0.11.0. */
+  metadata: jsonb("metadata").$type<Record<string, unknown>>(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
 });
 
@@ -102,6 +104,7 @@ export class DrizzlePgUsageStore implements UsageStore {
         zdrEnforced: entry.zdrEnforced ?? null,
         inputText: entry.inputText ?? null,
         outputText: entry.outputText ?? null,
+        metadata: entry.metadata ?? null,
         createdAt: entry.createdAt,
       })
       .returning({ id: aiUsageLog.id });

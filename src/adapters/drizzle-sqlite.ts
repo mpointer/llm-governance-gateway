@@ -43,6 +43,8 @@ export const aiUsageLog = sqliteTable("ai_usage_log", {
   zdrEnforced: integer("zdr_enforced", { mode: "boolean" }),
   inputText: text("input_text"),
   outputText: text("output_text"),
+  /** Caller-defined attribution. JSON. NULL before 0.11.0. */
+  metadata: text("metadata", { mode: "json" }).$type<Record<string, unknown>>(),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
 });
 
@@ -98,6 +100,7 @@ export class DrizzleSqliteUsageStore implements UsageStore {
         zdrEnforced: entry.zdrEnforced ?? null,
         inputText: entry.inputText ?? null,
         outputText: entry.outputText ?? null,
+        metadata: entry.metadata ?? null,
         createdAt: entry.createdAt,
       })
       .returning({ id: aiUsageLog.id });
@@ -188,6 +191,7 @@ async function addColumnIfMissing(
  *    ALTER TABLE ai_usage_log     ADD COLUMN org_id TEXT;    -- 0.10.0
  *    ALTER TABLE spend_cap_events ADD COLUMN org_id TEXT;    -- 0.10.0
  *    ALTER TABLE spend_cap_events ADD COLUMN enforced INTEGER; -- 0.11.0
+ *    ALTER TABLE ai_usage_log     ADD COLUMN metadata TEXT;      -- 0.11.0
  *  All nullable — existing rows stay unscoped, every unscoped query keeps its
  *  old plan, and a NULL `enforced` reads as "written before the mode existed",
  *  which is exactly what it means. */
@@ -202,12 +206,13 @@ export async function ensureTables(db: SqliteDb): Promise<void> {
     cache_create_tokens INTEGER, cache_read_tokens INTEGER, web_searches INTEGER,
     zdr_enforced INTEGER,
     input_text TEXT, output_text TEXT, created_at INTEGER NOT NULL,
-    org_id TEXT
+    org_id TEXT, metadata TEXT
   )`);
   // Additive migration for tables created before org scoping existed. SQLite
   // has no ADD COLUMN IF NOT EXISTS, so a duplicate-column error means the
   // migration already ran and is the success case, not a failure.
   await addColumnIfMissing(db, "ai_usage_log", "org_id", "org_id TEXT");
+  await addColumnIfMissing(db, "ai_usage_log", "metadata", "metadata TEXT");
   await db.run(sql`CREATE INDEX IF NOT EXISTS idx_ai_usage_spend
     ON ai_usage_log (created_at, cache_hit, user_id)`);
   // Org-scoped spend sums are the hot path in a multi-tenant deployment.

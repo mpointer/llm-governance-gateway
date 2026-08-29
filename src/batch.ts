@@ -87,6 +87,8 @@ export interface BatchJob {
   cachedCount: number;
   reservedCents: number;
   reconciledCents?: number | null;
+  /** Caller metadata from submit, so the reconcile row is attributed too. */
+  metadata?: Record<string, unknown> | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -156,6 +158,8 @@ export interface SubmitBatchOptions<I> {
   cache?: boolean;
   /** Hard ceiling on the submit-time estimate — fail fast if exceeded. */
   maxCostCents?: number;
+  /** Caller-defined attribution logged on every usage row this call writes. */
+  metadata?: Record<string, unknown>;
   /** Require the batch model to be asserted ZDR in ProviderConfig.retention. */
   requireZdr?: boolean;
   userId?: string;

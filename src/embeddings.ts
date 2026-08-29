@@ -24,6 +24,10 @@ export interface EmbedOptions {
   deadlineMs?: number;
   /** Tenant this call belongs to. Falls back to GatewayConfig.orgId. */
   orgId?: string;
+  /** Caller-defined attribution logged on every usage row this call writes
+   *  (including cache hits and the judge). The gateway never reads it — it is
+   *  not part of the cache key and never affects routing. */
+  metadata?: Record<string, unknown>;
   requireZdr?: boolean;
   userId?: string;
   anonKey?: string;
