@@ -158,3 +158,70 @@ describe("governed embeddings", () => {
     expect(usage.entries).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Embedding cancellation. See docs/design/timeouts-and-deadlines.md (S1).
+// embedMany previously received no abortSignal at all, so a hung embedding
+// call had nothing to end it.
+// ---------------------------------------------------------------------------
+
+describe("embed cancellation", () => {
+  it("forwards the caller's signal to the embedding model", async () => {
+    let observed: AbortSignal | undefined;
+    const fake = {
+      specificationVersion: "v2",
+      provider: "fake",
+      modelId: "text-embedding-3-small",
+      maxEmbeddingsPerCall: 100,
+      supportsParallelCalls: true,
+      async doEmbed({
+        values,
+        abortSignal,
+      }: {
+        values: string[];
+        abortSignal?: AbortSignal;
+      }) {
+        observed = abortSignal;
+        return { embeddings: values.map(() => [1, 0]), usage: { tokens: 3 } };
+      },
+    } as unknown as EmbeddingModel;
+
+    const controller = new AbortController();
+    const gw = new Gateway({
+      usage: new MemoryUsageStore(),
+      caps: { userDailyCents: 0, anonDailyCents: 0, globalDailyCents: 0 },
+    });
+    await gw.embed(["a"], {
+      model: "openai:text-embedding-3-small",
+      embeddingModel: fake,
+      signal: controller.signal,
+    });
+    expect(observed).toBe(controller.signal);
+  });
+
+  it("an already-aborted signal stops the call", async () => {
+    const fake = {
+      specificationVersion: "v2",
+      provider: "fake",
+      modelId: "text-embedding-3-small",
+      maxEmbeddingsPerCall: 100,
+      supportsParallelCalls: true,
+      async doEmbed({ abortSignal }: { abortSignal?: AbortSignal }) {
+        if (abortSignal?.aborted) throw new Error("aborted before send");
+        return { embeddings: [[1, 0]], usage: { tokens: 1 } };
+      },
+    } as unknown as EmbeddingModel;
+
+    const gw = new Gateway({
+      usage: new MemoryUsageStore(),
+      caps: { userDailyCents: 0, anonDailyCents: 0, globalDailyCents: 0 },
+    });
+    await expect(
+      gw.embed(["a"], {
+        model: "openai:text-embedding-3-small",
+        embeddingModel: fake,
+        signal: AbortSignal.abort(),
+      }),
+    ).rejects.toThrow();
+  });
+});

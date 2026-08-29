@@ -37,6 +37,31 @@ export class ZdrViolationError extends Error {
   }
 }
 
+/**
+ * A stream produced no first emission, or fell silent mid-stream, within its
+ * configured window. See docs/design/timeouts-and-deadlines.md.
+ *
+ * The usage row for the aborted attempt is written BEFORE this throws: a
+ * provider call that spent money must leave an audit trail even when it
+ * never finished.
+ */
+export class StreamStallError extends Error {
+  constructor(
+    /** "first-chunk" = nothing ever arrived; "stall" = went silent mid-stream. */
+    public readonly phase: "first-chunk" | "stall",
+    public readonly waitedMs: number,
+    public readonly provider: string,
+    public readonly model: string,
+  ) {
+    super(
+      phase === "first-chunk"
+        ? `Stream from "${provider}/${model}" produced no output within ${waitedMs}ms`
+        : `Stream from "${provider}/${model}" stalled: no output for ${waitedMs}ms`,
+    );
+    this.name = "StreamStallError";
+  }
+}
+
 export class SpendCapError extends Error {
   constructor(
     public readonly spentCents: number,

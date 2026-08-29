@@ -15,10 +15,31 @@
 import type { z } from "zod";
 import { toJSONSchema } from "zod";
 
-/** Structural subset of @anthropic-ai/sdk's Messages API. */
+/**
+ * Per-request options, structurally matching @anthropic-ai/sdk's second
+ * argument. Only `signal` is used; the SDK's own `timeout` is deliberately
+ * NOT set here — two competing clocks would make it ambiguous which one
+ * aborted a call. See docs/design/timeouts-and-deadlines.md.
+ */
+export interface AnthropicRequestOptions {
+  signal?: AbortSignal;
+}
+
+/**
+ * Structural subset of @anthropic-ai/sdk's Messages API.
+ *
+ * The `options` parameter is optional, so a BYO client written against the
+ * older one-argument shape still satisfies this interface (a function of
+ * fewer parameters is assignable to a type declaring more). Such a client
+ * simply ignores the signal and keeps whatever timeout it was constructed
+ * with.
+ */
 export interface AnthropicMessagesClient {
   messages: {
-    create(params: Record<string, unknown>): Promise<AnthropicMessage>;
+    create(
+      params: Record<string, unknown>,
+      options?: AnthropicRequestOptions,
+    ): Promise<AnthropicMessage>;
   };
 }
 
@@ -114,6 +135,8 @@ export async function callNativeAnthropic(
     schema: z.ZodType<any> | { jsonSchema?: unknown };
     temperature?: number;
     native: NativeCallOptions;
+    /** Aborts the request. The gateway always supplies one. */
+    signal?: AbortSignal;
   },
 ): Promise<NativeResult> {
   const supports = cfg.supportsThinking ?? defaultSupportsThinking;
@@ -171,7 +194,7 @@ export async function callNativeAnthropic(
     ...(args.temperature !== undefined && !wantsThinking
       ? { temperature: args.temperature } // thinking requires temperature 1
       : {}),
-  });
+  }, { signal: args.signal });
 
   const toolUse = msg.content.find(
     (b): b is { type: "tool_use"; name: string; input: unknown } =>
@@ -227,6 +250,8 @@ export async function callNativeAnthropicText(
     temperature?: number;
     maxTokens?: number;
     native: NativeCallOptions;
+    /** Aborts the request. The gateway always supplies one. */
+    signal?: AbortSignal;
   },
 ): Promise<NativeTextResult> {
   const supports = cfg.supportsThinking ?? defaultSupportsThinking;
@@ -269,7 +294,7 @@ export async function callNativeAnthropicText(
     ...(args.temperature !== undefined && !wantsThinking
       ? { temperature: args.temperature } // thinking requires temperature 1
       : {}),
-  });
+  }, { signal: args.signal });
 
   const text = msg.content
     .filter((b): b is { type: "text"; text: string } => b.type === "text")
