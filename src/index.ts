@@ -123,6 +123,7 @@ export type {
   ChainLinkConfig,
   ProviderId,
   ProviderConfig,
+  ProviderTiers,
   ModelPricing,
   SpendCapConfig,
   GatewayConfig,

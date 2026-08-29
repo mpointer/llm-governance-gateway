@@ -172,6 +172,17 @@ export interface ModelConfigStore {
    * `orgId` scopes the chain to one tenant; undefined = the global chain.
    */
   getChain(orgId?: string | null): Promise<ChainLinkConfig[]>;
+  /**
+   * Admin-pinned model id for the model-graded judge, e.g.
+   * "openai:gpt-4.1-mini". Optional: a store that does not implement it is
+   * unchanged, and the judge falls back to config then to the default
+   * provider's fast tier.
+   *
+   * This is what lets an operator pin the judge to a cheap, ZDR-compliant
+   * model on a DIFFERENT provider than the default — the coupling finding
+   * 3.4 objected to.
+   */
+  getJudgeModel?(orgId?: string | null): Promise<string | null | undefined>;
 }
 
 export interface ModelPricing {
@@ -190,7 +201,7 @@ export interface ProviderConfig {
   defaultProvider?: ProviderId;
   defaultModel?: string;
   /** fast = cheapest tier, power = most capable; merged over built-ins. */
-  tiers?: Partial<Record<ProviderId, { fast?: string; power?: string }>>;
+  tiers?: Partial<Record<ProviderId, ProviderTiers>>;
   /** Merged over built-in pricing; add entries for models you use. */
   pricing?: Record<string, ModelPricing>;
   /**
@@ -231,6 +242,22 @@ export interface ProviderConfig {
    * pretend to. Missing entry = NOT ZDR (fail closed).
    */
   retention?: Record<string, { zdr: boolean; note?: string }>;
+}
+
+/**
+ * Named model tiers per provider. `judge` is a first-class tier alongside
+ * fast/power: the model-graded judge runs in the request path on every
+ * sampled call, so which model it uses is a governance decision an operator
+ * makes deliberately — not something it should inherit from whichever
+ * provider happens to be the default.
+ *
+ * There is no BUILT-IN judge model for any provider. An unset judge tier
+ * falls back to that provider's `fast` tier, which is the pre-tier behavior.
+ */
+export interface ProviderTiers {
+  fast?: string;
+  power?: string;
+  judge?: string;
 }
 
 export interface SpendCapConfig {

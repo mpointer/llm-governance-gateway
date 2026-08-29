@@ -90,6 +90,18 @@ FMA's chat engine has **streaming failover with degradation** — on a mid-strea
 
 ### 3.4 The judge is not a first-class, admin-configurable tier — **Significant**
 
+> **RESOLVED — PR #24.** `judge` is now a named tier alongside `fast`/`power`
+> in `ProviderConfig.tiers`, and `ModelConfigStore.getJudgeModel?()` (optional,
+> org-scoped) lets an admin pin the judge to a cheap, ZDR-compliant model on a
+> DIFFERENT provider than the generation chain — the implicit coupling this
+> finding objected to. Resolution is `judge.model ?? adminJudgeModel ??
+> judgeDefaults.model ?? default provider's judge tier`, and an unset judge
+> tier falls back to that provider's `fast` model, which is the pre-tier
+> behavior. No built-in judge model is baked in for any provider (that would
+> reintroduce 3.6's bias). The budget-aware and ZDR-aware skips and PR 20's
+> failure isolation are unchanged, with tests pinning each; a throwing
+> judge-model store degrades to config rather than failing the call.
+
 The gateway's model-graded judge resolves its model as `judge.model ?? judgeDefaults.model ?? registry's default-provider fast tier` (gateway.ts:1638-1646). There is **no dedicated judge tier** in the chain model — the judge borrows the default provider's `fast` model. The architecture's objective 2 names **four** tiers: primary, backup, secondary backup, *and judge*. The gateway models three and treats the judge as an afterthought that happens to share the fast tier.
 
 There is a partial mitigation: the judge is **budget-aware** (skipped if it would cross the global cap) and **ZDR-aware** (skipped if the judge model isn't asserted ZDR when the call requires it, gateway.ts:1652-1660) — both genuinely good. But "judge = default provider's fast tier" is exactly the kind of implicit coupling the no-hardcoded-model objective forbids, and it means an admin cannot independently pin the judge to a cheap, ZDR-compliant model on a *different* provider than the default. CareerPointers' judge, notably, is **not an LLM at all** — its `judgeRubric` is a deterministic function scored in-process (run.ts:431-438, 612-619), so CareerPointers has no judge-model cost or ZDR exposure today. Adopting the gateway's LLM judge would be a *new* capability for CareerPointers — which makes getting the judge tier right a CareerPointers concern, not just an FMA one.
