@@ -28,6 +28,8 @@ import type {
 export const aiUsageLog = pgTable("ai_usage_log", {
   id: serial("id").primaryKey(),
   userId: text("user_id"),
+  /** Tenant. NULL for unscoped (single-tenant) rows. */
+  orgId: text("org_id"),
   app: text("app"),
   route: text("route"),
   promptSlug: text("prompt_slug"),
@@ -51,6 +53,8 @@ export const aiUsageLog = pgTable("ai_usage_log", {
 export const spendCapEvents = pgTable("spend_cap_events", {
   id: serial("id").primaryKey(),
   userId: text("user_id"),
+  /** Tenant. NULL for unscoped (single-tenant) rows. */
+  orgId: text("org_id"),
   capCents: doublePrecision("cap_cents").notNull(),
   spentCents: doublePrecision("spent_cents").notNull(),
   route: text("route"),
@@ -78,6 +82,7 @@ export class DrizzlePgUsageStore implements UsageStore {
       .insert(aiUsageLog)
       .values({
         userId: entry.userId ?? null,
+        orgId: entry.orgId ?? null,
         app: entry.app ?? null,
         route: entry.route ?? null,
         promptSlug: entry.promptSlug ?? null,
@@ -101,7 +106,11 @@ export class DrizzlePgUsageStore implements UsageStore {
     return rows[0]!.id;
   }
 
-  async sumSpendCents(since: Date, userId?: string | null): Promise<number> {
+  async sumSpendCents(
+    since: Date,
+    userId?: string | null,
+    orgId?: string | null,
+  ): Promise<number> {
     const conditions = [
       eq(aiUsageLog.cacheHit, false),
       gte(aiUsageLog.createdAt, since),
@@ -109,6 +118,13 @@ export class DrizzlePgUsageStore implements UsageStore {
     if (userId !== undefined) {
       conditions.push(
         userId === null ? isNull(aiUsageLog.userId) : eq(aiUsageLog.userId, userId),
+      );
+    }
+    // undefined = unscoped: no org predicate at all, so the query is byte for
+    // byte what it was before org scoping existed.
+    if (orgId !== undefined) {
+      conditions.push(
+        orgId === null ? isNull(aiUsageLog.orgId) : eq(aiUsageLog.orgId, orgId),
       );
     }
     const rows = await this.db
@@ -123,6 +139,7 @@ export class DrizzlePgUsageStore implements UsageStore {
   async recordSpendCapEvent(event: SpendCapEvent): Promise<void> {
     await this.db.insert(spendCapEvents).values({
       userId: event.userId ?? null,
+      orgId: event.orgId ?? null,
       capCents: event.capCents,
       spentCents: event.spentCents,
       route: event.route ?? null,

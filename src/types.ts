@@ -4,6 +4,8 @@
 
 export interface UsageEntry {
   userId?: string | null;
+  /** Tenant this row belongs to. null/undefined = unscoped (single-tenant). */
+  orgId?: string | null;
   app?: string | null;
   route?: string | null;
   promptSlug?: string | null;
@@ -30,6 +32,8 @@ export interface UsageEntry {
 
 export interface SpendCapEvent {
   userId?: string | null;
+  /** Tenant whose cap was hit. null/undefined = unscoped (single-tenant). */
+  orgId?: string | null;
   capCents: number;
   spentCents: number;
   route?: string | null;
@@ -51,12 +55,26 @@ export interface UsageStore {
    * Sum of estimatedCostCents since `since`, excluding cache hits.
    * userId === undefined → ALL identities (global circuit breaker).
    * userId === null      → anonymous-only spend.
+   *
+   * `orgId` scopes the sum to one tenant. undefined = unscoped, which is
+   * exactly the pre-multi-tenant behavior; a store that ignores the argument
+   * keeps working as a single-tenant store. When set, the "global" circuit
+   * breaker becomes per-org — one tenant's spend must never trip another's.
    */
-  sumSpendCents(since: Date, userId?: string | null): Promise<number>;
+  sumSpendCents(
+    since: Date,
+    userId?: string | null,
+    orgId?: string | null,
+  ): Promise<number>;
   recordSpendCapEvent(event: SpendCapEvent): Promise<void>;
   saveJudgeScore(score: JudgeScore): Promise<void>;
   /** Per-user daily cap override in cents, or undefined to use config default. */
-  getUserDailyCapCents?(userId: string): Promise<number | undefined>;
+  getUserDailyCapCents?(userId: string, orgId?: string | null): Promise<number | undefined>;
+  /**
+   * Per-org daily cap override in cents. Optional; when absent the gateway
+   * falls back to SpendCapConfig.orgDailyCents.
+   */
+  getOrgDailyCapCents?(orgId: string): Promise<number | undefined>;
 }
 
 export interface PromptDefault {
@@ -82,9 +100,10 @@ export interface StoredPrompt {
  * absent, prompt bodies come solely from config.promptDefaults.
  */
 export interface PromptStore {
-  getPrompt(slug: string): Promise<StoredPrompt | undefined>;
+  /** `orgId` scopes the lookup to one tenant; undefined = the global prompt. */
+  getPrompt(slug: string, orgId?: string | null): Promise<StoredPrompt | undefined>;
   /** Seed a code default so it becomes visible/editable in an admin UI. */
-  seedPrompt?(def: PromptDefault): Promise<void>;
+  seedPrompt?(def: PromptDefault, orgId?: string | null): Promise<void>;
 }
 
 export interface CacheStore {
@@ -143,10 +162,16 @@ export interface ChainLinkConfig {
  * the static config/env fallback path is used.
  */
 export interface ModelConfigStore {
-  /** Hard-pin override; bypasses the chain entirely. Null = use the chain. */
-  getOverride(): Promise<{ provider: ProviderId; model: string } | null>;
-  /** Failover chain in priority order (primary → fallback → ...). */
-  getChain(): Promise<ChainLinkConfig[]>;
+  /**
+   * Hard-pin override; bypasses the chain entirely. Null = use the chain.
+   * `orgId` scopes the pin to one tenant; undefined = the global pin.
+   */
+  getOverride(orgId?: string | null): Promise<{ provider: ProviderId; model: string } | null>;
+  /**
+   * Failover chain in priority order (primary → fallback → ...).
+   * `orgId` scopes the chain to one tenant; undefined = the global chain.
+   */
+  getChain(orgId?: string | null): Promise<ChainLinkConfig[]>;
 }
 
 export interface ModelPricing {
@@ -213,16 +238,31 @@ export interface SpendCapConfig {
   userDailyCents?: number;
   /** Anonymous-identity daily cap in cents. 0 disables. Default 100. */
   anonDailyCents?: number;
-  /** App-wide daily circuit breaker in cents. 0 disables. Default 5000. */
+  /**
+   * App-wide daily circuit breaker in cents. 0 disables. Default 5000.
+   *
+   * When a call carries an orgId, this breaker is evaluated against THAT
+   * ORG's spend only — one tenant must never trip another tenant's breaker.
+   * Unscoped calls keep summing everything, exactly as before.
+   */
   globalDailyCents?: number;
+  /**
+   * Per-org daily cap in cents. 0 disables. Unset = no separate org cap
+   * (the org-scoped circuit breaker above still applies). Only consulted for
+   * calls that carry an orgId.
+   */
+  orgDailyCents?: number;
 }
 
 /**
  * Optional dynamic per-task model overrides (e.g. an admin "AI & Cost" table).
  */
 export interface TaskOverrideStore {
-  /** task name → model id ("claude-sonnet-4-6", "openai:gpt-4.1", ...). */
-  getOverrides(): Promise<Record<string, string>>;
+  /**
+   * task name → model id ("claude-sonnet-4-6", "openai:gpt-4.1", ...).
+   * `orgId` scopes the overrides to one tenant; undefined = global.
+   */
+  getOverrides(orgId?: string | null): Promise<Record<string, string>>;
 }
 
 /**
@@ -342,6 +382,14 @@ export interface GatewayConfig {
   mock?: boolean;
   /** Tag written to every usage row (multi-app deployments). */
   appId?: string;
+  /**
+   * Default tenant for every call this instance makes. Per-call `orgId` wins.
+   *
+   * Leave unset for a single-tenant deployment — behavior is then identical to
+   * before org scoping existed. Set it when one gateway instance serves one
+   * tenant; pass per-call `orgId` when one instance serves many.
+   */
+  orgId?: string;
   /** Cache TTL in seconds. Default 24h. */
   cacheTtlSeconds?: number;
   /**

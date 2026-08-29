@@ -22,8 +22,16 @@ type ModelParser = (id: string) => { provider: string; model: string };
 export class TaskRouter {
   private readonly cfg: TaskRoutingConfig;
   private readonly parse: ModelParser;
-  private overrides: Record<string, string> = {};
-  private overridesExpireAt = 0;
+  /**
+   * Overrides cached PER TENANT. A single shared map would serve one org's
+   * task routing to another for the length of the TTL — a cross-tenant config
+   * leak, not merely a stale read. Unscoped callers use the "" bucket and
+   * behave exactly as before.
+   */
+  private readonly overridesByOrg = new Map<
+    string,
+    { overrides: Record<string, string>; expiresAt: number }
+  >();
 
   constructor(cfg: TaskRoutingConfig, parse?: ModelParser) {
     this.cfg = cfg;
@@ -43,28 +51,37 @@ export class TaskRouter {
     return this.cfg.constraints?.[task]?.requireZdr === true;
   }
 
-  /** Test seam / admin write path: force override refresh on next resolve. */
-  invalidateOverrides(): void {
-    this.overridesExpireAt = 0;
+  /**
+   * Test seam / admin write path: force override refresh on next resolve.
+   * Omit `orgId` to invalidate every tenant's cache.
+   */
+  invalidateOverrides(orgId?: string | null): void {
+    if (orgId === undefined) this.overridesByOrg.clear();
+    else this.overridesByOrg.delete(orgId ?? "");
   }
 
-  private async loadOverrides(): Promise<Record<string, string>> {
+  private async loadOverrides(orgId?: string | null): Promise<Record<string, string>> {
     if (!this.cfg.store) return {};
+    const bucket = orgId ?? "";
     const now = Date.now();
-    if (this.overridesExpireAt > now) return this.overrides;
+    const cached = this.overridesByOrg.get(bucket);
+    if (cached && cached.expiresAt > now) return cached.overrides;
+    let overrides: Record<string, string>;
     try {
-      this.overrides = await this.cfg.store.getOverrides();
+      overrides = await this.cfg.store.getOverrides(orgId);
     } catch (err) {
       // Store unreachable — routing must degrade to code defaults, never fail.
       console.warn(
         "[llm-gateway] task override store unreachable, using code defaults:",
         err instanceof Error ? err.message : err,
       );
-      this.overrides = {};
+      overrides = {};
     }
-    this.overridesExpireAt =
-      now + (this.cfg.overrideTtlMs ?? DEFAULT_OVERRIDE_TTL_MS);
-    return this.overrides;
+    this.overridesByOrg.set(bucket, {
+      overrides,
+      expiresAt: now + (this.cfg.overrideTtlMs ?? DEFAULT_OVERRIDE_TTL_MS),
+    });
+    return overrides;
   }
 
   /**
@@ -72,8 +89,8 @@ export class TaskRouter {
    * unknown task — a typo'd task name must fail loudly, not silently route to
    * some global default.
    */
-  async modelForTask(task: string): Promise<ResolvedTaskModel> {
-    const overrides = await this.loadOverrides();
+  async modelForTask(task: string, orgId?: string | null): Promise<ResolvedTaskModel> {
+    const overrides = await this.loadOverrides(orgId);
     const overridden = overrides[task];
     if (overridden) {
       const { provider, model } = this.parse(overridden);

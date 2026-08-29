@@ -22,6 +22,8 @@ export interface EmbedOptions {
   /** Whole-call bound. embed() is single-shot, so this rarely differs from
    *  attemptMs; accepted for symmetry with the generation paths. */
   deadlineMs?: number;
+  /** Tenant this call belongs to. Falls back to GatewayConfig.orgId. */
+  orgId?: string;
   requireZdr?: boolean;
   userId?: string;
   anonKey?: string;

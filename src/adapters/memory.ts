@@ -30,10 +30,17 @@ export class MemoryUsageStore implements UsageStore {
     return id;
   }
 
-  async sumSpendCents(since: Date, userId?: string | null): Promise<number> {
+  async sumSpendCents(
+    since: Date,
+    userId?: string | null,
+    orgId?: string | null,
+  ): Promise<number> {
     return this.entries
       .filter((e) => !e.cacheHit && e.createdAt >= since)
       .filter((e) => (userId === undefined ? true : (e.userId ?? null) === userId))
+      // undefined orgId = unscoped, summing every tenant, which is what a
+      // single-tenant deployment wants and what this did before.
+      .filter((e) => (orgId === undefined ? true : (e.orgId ?? null) === (orgId ?? null)))
       .reduce((sum, e) => sum + e.estimatedCostCents, 0);
   }
 
@@ -53,13 +60,21 @@ export class MemoryUsageStore implements UsageStore {
 export class MemoryPromptStore implements PromptStore {
   private readonly prompts = new Map<string, StoredPrompt>();
 
-  async getPrompt(slug: string): Promise<StoredPrompt | undefined> {
-    return this.prompts.get(slug);
+  /** Tenant-namespaced key; unscoped prompts keep the bare slug. */
+  private key(slug: string, orgId?: string | null): string {
+    return orgId ? `${orgId}\u0000${slug}` : slug;
   }
 
-  async seedPrompt(def: PromptDefault): Promise<void> {
-    if (!this.prompts.has(def.slug)) {
-      this.prompts.set(def.slug, {
+  async getPrompt(slug: string, orgId?: string | null): Promise<StoredPrompt | undefined> {
+    // Org-specific prompt wins; an unscoped prompt is the shared fallback, so
+    // a tenant that has not overridden a slug still gets the global one.
+    return this.prompts.get(this.key(slug, orgId)) ?? this.prompts.get(slug);
+  }
+
+  async seedPrompt(def: PromptDefault, orgId?: string | null): Promise<void> {
+    const k = this.key(def.slug, orgId);
+    if (!this.prompts.has(k)) {
+      this.prompts.set(k, {
         slug: def.slug,
         body: def.body,
         modelHint: def.modelHint ?? null,

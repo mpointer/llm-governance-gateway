@@ -24,6 +24,8 @@ import type {
 export const aiUsageLog = sqliteTable("ai_usage_log", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   userId: text("user_id"),
+  /** Tenant. NULL for unscoped (single-tenant) rows. */
+  orgId: text("org_id"),
   app: text("app"),
   route: text("route"),
   promptSlug: text("prompt_slug"),
@@ -47,6 +49,8 @@ export const aiUsageLog = sqliteTable("ai_usage_log", {
 export const spendCapEvents = sqliteTable("spend_cap_events", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   userId: text("user_id"),
+  /** Tenant. NULL for unscoped (single-tenant) rows. */
+  orgId: text("org_id"),
   capCents: real("cap_cents").notNull(),
   spentCents: real("spent_cents").notNull(),
   route: text("route"),
@@ -74,6 +78,7 @@ export class DrizzleSqliteUsageStore implements UsageStore {
       .insert(aiUsageLog)
       .values({
         userId: entry.userId ?? null,
+        orgId: entry.orgId ?? null,
         app: entry.app ?? null,
         route: entry.route ?? null,
         promptSlug: entry.promptSlug ?? null,
@@ -97,7 +102,11 @@ export class DrizzleSqliteUsageStore implements UsageStore {
     return rows[0]!.id;
   }
 
-  async sumSpendCents(since: Date, userId?: string | null): Promise<number> {
+  async sumSpendCents(
+    since: Date,
+    userId?: string | null,
+    orgId?: string | null,
+  ): Promise<number> {
     const conditions = [
       eq(aiUsageLog.cacheHit, false),
       gte(aiUsageLog.createdAt, since),
@@ -105,6 +114,13 @@ export class DrizzleSqliteUsageStore implements UsageStore {
     if (userId !== undefined) {
       conditions.push(
         userId === null ? isNull(aiUsageLog.userId) : eq(aiUsageLog.userId, userId),
+      );
+    }
+    // undefined = unscoped: no org predicate at all, so the query is byte for
+    // byte what it was before org scoping existed.
+    if (orgId !== undefined) {
+      conditions.push(
+        orgId === null ? isNull(aiUsageLog.orgId) : eq(aiUsageLog.orgId, orgId),
       );
     }
     const rows = await this.db
@@ -119,6 +135,7 @@ export class DrizzleSqliteUsageStore implements UsageStore {
   async recordSpendCapEvent(event: SpendCapEvent): Promise<void> {
     await this.db.insert(spendCapEvents).values({
       userId: event.userId ?? null,
+      orgId: event.orgId ?? null,
       capCents: event.capCents,
       spentCents: event.spentCents,
       route: event.route ?? null,
@@ -137,8 +154,39 @@ export class DrizzleSqliteUsageStore implements UsageStore {
   }
 }
 
+/**
+ * Idempotent ALTER. Asks the schema whether the column is already there
+ * rather than attempting the ALTER and interpreting the failure: Drizzle
+ * wraps driver errors, so the "duplicate column" text is not reliably on the
+ * error we catch, and a real failure would be swallowed along with it.
+ */
+async function addColumnIfMissing(
+  db: SqliteDb,
+  table: string,
+  column: string,
+  columnDdl: string,
+): Promise<void> {
+  const info = (await db.all(
+    sql.raw(`PRAGMA table_info(${table})`),
+  )) as unknown as { name?: string }[];
+  const present = info.some((c) =>
+    // sql.js returns positional arrays for PRAGMA; drizzle drivers return
+    // objects. Handle both rather than assuming one shape.
+    Array.isArray(c) ? c[1] === column : c?.name === column,
+  );
+  if (present) return;
+  await db.run(sql.raw(`ALTER TABLE ${table} ADD COLUMN ${columnDdl}`));
+}
+
 /** Dev/quick-start convenience: create the three tables if absent. For
- *  production, generate proper migrations from the exported tables. */
+ *  production, generate proper migrations from the exported tables.
+ *
+ *  Adopters on a pre-org-scoping schema who generate their own migrations
+ *  need one additive step:
+ *    ALTER TABLE ai_usage_log     ADD COLUMN org_id TEXT;
+ *    ALTER TABLE spend_cap_events ADD COLUMN org_id TEXT;
+ *  Both are nullable — existing rows stay unscoped and every unscoped query
+ *  keeps its old plan. */
 export async function ensureTables(db: SqliteDb): Promise<void> {
   await db.run(sql`CREATE TABLE IF NOT EXISTS ai_usage_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -149,15 +197,25 @@ export async function ensureTables(db: SqliteDb): Promise<void> {
     trace_id TEXT NOT NULL, duration_ms INTEGER,
     cache_create_tokens INTEGER, cache_read_tokens INTEGER, web_searches INTEGER,
     zdr_enforced INTEGER,
-    input_text TEXT, output_text TEXT, created_at INTEGER NOT NULL
+    input_text TEXT, output_text TEXT, created_at INTEGER NOT NULL,
+    org_id TEXT
   )`);
+  // Additive migration for tables created before org scoping existed. SQLite
+  // has no ADD COLUMN IF NOT EXISTS, so a duplicate-column error means the
+  // migration already ran and is the success case, not a failure.
+  await addColumnIfMissing(db, "ai_usage_log", "org_id", "org_id TEXT");
   await db.run(sql`CREATE INDEX IF NOT EXISTS idx_ai_usage_spend
     ON ai_usage_log (created_at, cache_hit, user_id)`);
+  // Org-scoped spend sums are the hot path in a multi-tenant deployment.
+  await db.run(sql`CREATE INDEX IF NOT EXISTS idx_ai_usage_spend_org
+    ON ai_usage_log (created_at, cache_hit, org_id)`);
   await db.run(sql`CREATE TABLE IF NOT EXISTS spend_cap_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT, cap_cents REAL NOT NULL, spent_cents REAL NOT NULL,
-    route TEXT, would_block INTEGER NOT NULL, created_at INTEGER NOT NULL
+    route TEXT, would_block INTEGER NOT NULL, created_at INTEGER NOT NULL,
+    org_id TEXT
   )`);
+  await addColumnIfMissing(db, "spend_cap_events", "org_id", "org_id TEXT");
   await db.run(sql`CREATE TABLE IF NOT EXISTS ai_judge_scores (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     usage_log_id INTEGER NOT NULL, rubric TEXT NOT NULL,
