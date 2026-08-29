@@ -8,6 +8,54 @@ adopters implement, and in practice they have only ever gained capability throug
 *optional* parameters — but they are not yet under a formal semver freeze. 1.0.0
 is gated on a downstream integration proving the SPI holds, not on a date.
 
+## 0.11.0
+
+Two SPI shape gaps closed before a 1.0 freeze would make them expensive to
+fix. Both were reported by adopters and independently confirmed by a second
+integration (#28).
+
+**No breaking changes from 0.10.0.** Both features are opt-in, and omitting
+them behaves exactly as 0.10.0 did.
+
+### Added
+
+- **Spend-cap observe mode** (#8). `caps.mode: "observe"` evaluates every cap
+  and records the breach but never throws — for routing real traffic through
+  the gateway before you trust your thresholds. Default `"enforce"` is
+  unchanged, short-circuit at the first breach included.
+
+  This is not the same as zeroing the caps, which skips the spend sum and the
+  cap event entirely and leaves nothing to measure. Observe does the whole
+  computation and writes the audit row; only the throw is suppressed.
+
+  `SpendCapEvent.enforced` (nullable) distinguishes "blocked" from "would have
+  blocked" — `wouldBlock` is true in both modes, so without it the rows before
+  and after flipping the switch are indistinguishable.
+
+- **Caller-defined usage metadata** (#12). `metadata?: Record<string, unknown>`
+  on `UsageEntry` and on every call surface that writes rows. For attribution
+  the gateway has no opinion on — a background-job run id, a request id — that
+  previously had to be dropped by the store adapter, losing granularity the app
+  had before it adopted the gateway.
+
+  It reaches every row the call writes, including the easily-missed ones: cache
+  hits, the judge's row, and the zero-token row written when an attempt times
+  out. The gateway never reads it — not in the cache key, not in routing, not
+  in caps.
+
+  Not covered by the `encrypt` hook, which is `inputText`/`outputText` only.
+  Keep PII out of it or encrypt it yourself.
+
+### Schema
+
+Additive and nullable, applied in place by `ensureTables` on SQLite and
+exported on the pg table defs for drizzle-kit. No backfill:
+
+```sql
+ALTER TABLE spend_cap_events ADD COLUMN enforced INTEGER;  -- boolean on pg
+ALTER TABLE ai_usage_log     ADD COLUMN metadata TEXT;     -- jsonb on pg
+```
+
 ## 0.10.0
 
 Timeouts and deadlines, multi-tenancy, and the architecture-critique work.

@@ -105,6 +105,25 @@ const gw = new Gateway({
 
 `RedisLike` is a four-method interface (`get/set/incr/expire`) — `@upstash/redis` satisfies it directly; ioredis needs a thin wrapper. The package has no hard Redis dependency.
 
+### Trialling caps before enforcing them
+
+Routing real traffic through the gateway before you trust your thresholds against real spend:
+
+```ts
+caps: { userDailyCents: 200, globalDailyCents: 5000, mode: "observe" }
+```
+
+`"observe"` evaluates every cap and writes the breach to `spend_cap_events`, but never throws. Default `"enforce"` blocks, as always.
+
+This is **not** the same as setting the caps to `0`. A zero cap skips the spend sum and the cap event entirely — there is nothing to look at afterwards, which is the opposite of what you wanted when you set out to measure. Observe mode does the whole computation and writes the audit row; only the throw is suppressed.
+
+Two details that matter when you read the data back:
+
+- **`SpendCapEvent.enforced`** distinguishes "we blocked this" from "we would have". `wouldBlock` is `true` in both modes, so without this flag the rows written before and after you flip the switch are indistinguishable. `NULL` on rows written before 0.11.0.
+- **Observe evaluates every cap** rather than stopping at the first breach, so one call can record a global, an org *and* a per-user breach. Enforce still short-circuits at the first.
+
+Two things observe deliberately does not relax: the judge's budget-aware self-skip (an observe mode that silently costs *more* than enforce would be a bad surprise — raise `globalDailyCents` during a trial if you want full judge coverage), and `batch({ maxCostCents })`, which is a ceiling you passed for one specific call rather than a threshold on trial.
+
 ### Multi-tenancy (optional)
 
 `orgId` scopes a call to one tenant. **It is entirely optional** — omit it everywhere and the gateway behaves exactly as it did before tenancy existed, down to the cache-key bytes. Single-tenant apps can skip this section.
@@ -478,6 +497,22 @@ res.failovers; // links abandoned before this one — read after `object` settle
 Restarting rather than resuming is deliberate: no provider offers mid-object continuation, and stitching two partial JSON objects together produces a document neither model would have written.
 
 Remaining constraints, stated plainly: no repair retry, no judge, no native-Anthropic options on the streaming path. Cache hits return a single-emission stream.
+
+### Attribution beyond userId
+
+`userId`, `orgId`, `app`, `route` and `promptSlug` are the dimensions the gateway itself reasons about — caps, cache scoping, routing. If your cost model has one the gateway has no opinion on, pass it as `metadata`:
+
+```ts
+await gw.runStructured({ ...opts, metadata: { agentRunId, requestId } });
+```
+
+It lands on every usage row the call writes and is handed to your `UsageStore` as-is. The reference Drizzle adapters persist it (SQLite JSON, Postgres `jsonb`).
+
+**The gateway never reads it** — not in the cache key, not in routing, not in caps. Two calls differing only in `metadata` still share a cache entry, so an attribution field can't silently become a cache-busting bug.
+
+It reaches the rows that are easy to forget, which are usually the ones that matter: cache hits (whose share grows exactly as your hit rate improves), the judge's own row, and the zero-token row written when an attempt times out.
+
+One caveat: `metadata` is **not** covered by the `encrypt` hook, which applies to `inputText`/`outputText` only. Keep PII out of it, or encrypt it yourself before passing.
 
 ### Observability export (OTel, Langfuse, metrics)
 
