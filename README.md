@@ -188,6 +188,8 @@ Set `deadlineMs` on any platform with its own function deadline. A three-link ch
 
 **Streaming uses chunk-relative clocks**, not a total-duration cap: a long stream that is actively producing tokens is healthy, and killing it at N seconds would be a regression. Silence is what is never healthy. Note these clocks measure *parsed partial objects*, not raw provider chunks — a model that has emitted `{"ans` has produced no partial yet, which is why the default window is a generous 60s.
 
+**On the native Anthropic path, `attemptMs` is the only knob.** The gateway passes its own `AbortSignal` but deliberately never sets the Anthropic SDK's `timeout` — two competing clocks make it ambiguous which one aborted a call. A `timeout` you set when constructing your own client still exists, but the gateway's signal races it and the shorter one wins, so raise `attemptMs` rather than the client's `timeout` for long-running native calls (extended thinking, large prompt-cached contexts, server-side web search).
+
 **Aborted attempts are ledgered.** Every timeout path writes a zero-token usage row before it throws, so a provider call that spent money but never returned still leaves an audit trail. Three error classes carry the diagnosis: `AttemptTimeoutError`, `DeadlineExceededError`, and `StreamStallError` (with `phase: "first-chunk" | "stall"`). A caller-initiated abort rethrows your own reason unwrapped — the gateway never disguises your cancellation as its own timeout.
 
 ### Task-based routing

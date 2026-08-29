@@ -11,8 +11,41 @@ is gated on a downstream integration proving the SPI holds, not on a date.
 ## 0.10.0
 
 Timeouts and deadlines, multi-tenancy, and the architecture-critique work.
-**No breaking changes from 0.9.0** — every addition below is opt-in or
-default-preserving.
+
+No type-level breaking changes from 0.9.0, and every feature below is opt-in.
+But "opt-in" is not the same as "nothing changes on upgrade" — read the upgrade
+notes first if you use the native Anthropic path or `runText` failover.
+
+### Upgrade notes — behavior changes that need no code change to hit you
+
+- **Native Anthropic calls are now bounded at 60s, and this supersedes a
+  `timeout` you set on your own client.** Before 0.10.0 the native path had no
+  gateway-level bound at all: whatever `timeout` you constructed your
+  `@anthropic-ai/sdk` client with was the only clock. It now also races the
+  gateway's own `attemptMs` signal (default 60_000), and the shorter one wins —
+  so a client built with `timeout: 90_000` and handed to
+  `GatewayConfig.anthropic.client` has an effective ceiling of 60s after
+  upgrading.
+
+  This is invisible to a test suite: it is a live-latency effect, not a logic
+  change, and it surfaces as `AttemptTimeoutError` plus retries under load. If
+  your native-path calls legitimately run long (extended thinking, large
+  prompt-cached contexts, server-side web search), pin the bound to match what
+  you had:
+
+  ```ts
+  new Gateway({ ...cfg, timeouts: { attemptMs: 90_000 } });
+  await gw.runText({ ...opts, attemptMs: 180_000 }); // or per call
+  ```
+
+  The gateway deliberately does not pass the Anthropic SDK's own `timeout`
+  (two competing clocks make it ambiguous which aborted a call), so `attemptMs`
+  is the single knob for this path.
+
+- **`runText` failover now walks the chain.** See "Changed" below. Failing calls
+  that previously threw at the first link now fall through to later ones, which
+  costs more and takes longer in the failure case but succeeds where it used to
+  throw.
 
 ### Added
 
@@ -25,6 +58,12 @@ default-preserving.
 - **Multi-tenancy.** Optional `orgId` on `GatewayConfig` and per call, scoping
   cache keys, the global circuit breaker, and every store lookup. New
   `caps.orgDailyCents`.
+
+  This closes a gap adopters were already working around rather than adding a
+  speculative feature: with no first-class tenant field, integrations were
+  repurposing `UsageEntry.userId` to carry a tenant id. If you did that, `orgId`
+  is where that value belongs now, and it gets you cache and circuit-breaker
+  isolation that a stringified `userId` never provided.
 - **Per-task failover chains.** A task's model may now be an ordered chain
   (`TaskModelSpec = string | string[]`) rather than a single id.
 - **Mid-stream failover.** `streamStructured` abandons a stalled or retryably
