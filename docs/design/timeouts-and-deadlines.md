@@ -1,6 +1,7 @@
 # Design: timeouts and deadlines
 
-Status: S1 and S2 landed; S3 and S4 proposed — target v0.10. Derived from a review of the shipped
+Status: S1-S4 all landed (v0.10). Kept as the record of why the
+mechanism looks the way it does. Derived from a review of the shipped
 failover machinery (v0.9.0), not from an outage: the failover design is
 sound, but the clock around it is incomplete, and the gaps are all in the
 paths a serverless adopter actually runs.
@@ -309,8 +310,8 @@ Four changes, deliberately ordered so each ships independently:
 |---|---|---|---|
 | S1 ✅ | `abortSignal` on `streamObject` + `embedMany`; stream first-chunk/stall clocks | S | Closes the two indefinite-hang cases, including the un-ledgered stream |
 | S2 ✅ | Widen `AnthropicMessagesClient`, thread signal through both native calls | S | Gateway's guarantee stops depending on how the consumer built their client |
-| S3 | `src/deadline.ts` (`AttemptBudget`, abortable `sleep`); `timeouts.attemptMs` config + per-call override; `AttemptTimeoutError` | M | Makes the existing 60s configurable; no behavior change at defaults |
-| S4 | `deadlineMs` enforced across chain links, retries, and backoff; `DeadlineExceededError` | M | The one that actually protects a serverless caller |
+| S3 ✅ | `src/deadline.ts` (`AttemptBudget`, abortable `sleep`); `timeouts.attemptMs` config + per-call override; `AttemptTimeoutError` | M | Makes the existing 60s configurable; no behavior change at defaults |
+| S4 ✅ | `deadlineMs` enforced across chain links, retries, and backoff; `DeadlineExceededError` | M | The one that actually protects a serverless caller |
 
 S1+S2 are one PR. S3 is the prerequisite for S4; S4 is where Rules 1–4
 earn their keep.
@@ -346,9 +347,11 @@ schema-invalid errors. The asymmetry is defensible (text has no schema
 concept, so there is no second reason to advance) but is more likely an
 oversight than a decision.
 
-Recommendation: align `runText` to `callWithChain` — advance on retryable
-only. It is a behavior change for anyone relying on a 400 failing over, so
-it ships in the same minor, called out in the release notes.
+**Resolved in S4: aligned.** `runText` now advances only on a retryable
+error or an attempt timeout, matching `callWithChain`. A 400 on link 1 no
+longer burns a call on link 2. This is a behavior change for anyone who
+relied on a non-retryable error failing over, and is called out in the
+release notes; a test pins both halves (a 400 stops, a 503 advances).
 
 ## Explicitly out of scope
 
@@ -394,6 +397,21 @@ changed the design:
    bytes — and the 60s default is sized with that slack in mind. A test
    asserting the opposite is what surfaced it.
 
+3. **A caller abort must surface the caller's own reason.** Rule 4 said to
+   rethrow it unwrapped; in practice that meant checking
+   `budget.callerSignal?.aborted` *before* interpreting the SDK's abort
+   error, otherwise the caller sees the SDK's internal "request aborted"
+   instead of the reason they passed. An existing S2 test asserting the
+   old behavior had to be updated — the new behavior is what lets a caller
+   tell "I cancelled this" from "the provider timed out".
+4. **The judge needed an explicit skip, not just its own budget.** Giving
+   it a separate `AttemptBudget` was not enough: a judge timeout would
+   still have propagated out of `runJudge` and failed the main response,
+   making a governance check the thing that breaks the request it was
+   watching. `runJudge` now catches `AttemptTimeoutError` /
+   `DeadlineExceededError` and skips with a warning, which matches its
+   established failure mode under spend pressure.
+
 A third, smaller finding: vitest's fake clock does not reliably propagate
 chunks through the AI SDK's internal `TransformStream` pipeline before
 jumping to the next timer, so a drip-fed stream looks stalled when it is
@@ -401,20 +419,21 @@ not. The one test that must distinguish "slow but alive" from "stalled"
 runs on the real clock at ~300ms, exactly the carve-out the testing
 section anticipated.
 
-## Still open (for S3/S4)
+## Still open
 
-- Should `RunTextResult` / `RunStructuredResult` surface which link timed
-  out, for adopters tuning `attemptMs` per provider? The ledger's
-  `durationMs` gets close, and S1 now writes zero-token rows for stalled
-  streams, but unary attempt timeouts are not yet ledgered the same way.
-- Does `AttemptTimeoutError` need to be distinguishable from a caller
-  abort in the public API, or is the `AttemptTimeoutReason` abort reason
-  (already shipped in `src/deadline.ts`) enough?
-- **A caller abort mid-stream writes no ledger row, while a stall does.**
-  Deliberate for now: the zero-token-row decision was about making a
-  chronically slow *provider* visible, and a client disconnect is the
-  caller's own choice rather than evidence about the provider — so
-  ledgering every disconnect would add rows that carry no cost signal.
-  But tokens may genuinely have been spent before the abort, which is the
-  same argument that motivated Rule 1. Worth settling alongside S4, when
-  attempt timeouts on the unary paths face the identical question.
+- Should `RunTextResult` / `RunStructuredResult` surface *which* link timed
+  out, for adopters tuning `attemptMs` per provider? S4 ledgers unary
+  attempt timeouts as zero-token rows, so the data is now queryable — but
+  it is not on the result object, so a caller cannot react in-process.
+- Does `AttemptTimeoutError` need to be distinguishable from a caller abort
+  in the public API beyond the error class itself? A caller abort now
+  rethrows the caller's own reason unwrapped, so the two are already
+  distinct in practice.
+- **A caller abort still writes no ledger row, while timeouts and deadlines
+  do.** Settled deliberately in S4 rather than left unexamined: the
+  zero-token row exists to make a chronically slow *provider* visible, and
+  a client disconnect is the caller's own choice carrying no signal about
+  the provider — so ledgering every disconnect would add rows with no cost
+  information to every dashboard. The counter-argument stands: tokens may
+  genuinely have been spent before the abort. Revisit if an adopter's
+  reconciliation actually comes up short.

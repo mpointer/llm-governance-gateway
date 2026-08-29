@@ -15,8 +15,17 @@ export {
   JudgeGateError,
   ZdrViolationError,
   StreamStallError,
+  AttemptTimeoutError,
+  DeadlineExceededError,
 } from "./errors.js";
-export { attemptSignal, AttemptTimeoutReason, type AttemptSignal } from "./deadline.js";
+export {
+  attemptSignal,
+  AttemptBudget,
+  AttemptTimeoutReason,
+  sleep,
+  MIN_ATTEMPT_MS,
+  type AttemptSignal,
+} from "./deadline.js";
 export {
   ProviderRegistry,
   parseModelId,

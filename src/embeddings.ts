@@ -17,6 +17,11 @@ export interface EmbedOptions {
   embeddingModel?: EmbeddingModel;
   /** Aborts the embedding request (caller cancellation, request teardown). */
   signal?: AbortSignal;
+  /** Bound on the embedding call. Overrides GatewayConfig.timeouts. */
+  attemptMs?: number;
+  /** Whole-call bound. embed() is single-shot, so this rarely differs from
+   *  attemptMs; accepted for symmetry with the generation paths. */
+  deadlineMs?: number;
   requireZdr?: boolean;
   userId?: string;
   anonKey?: string;
