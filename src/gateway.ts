@@ -1673,6 +1673,24 @@ export class Gateway {
     const todayUtc = new Date();
     todayUtc.setUTCHours(0, 0, 0, 0);
 
+    // Observe mode records the breach and lets the call through, so an adopter
+    // can measure what their thresholds would have blocked before trusting
+    // them. It deliberately keeps evaluating the remaining caps rather than
+    // returning at the first breach: the whole point is complete data.
+    const enforced = this.caps.mode !== "observe";
+    const breach = async (
+      event: Omit<SpendCapEvent, "createdAt" | "wouldBlock" | "enforced">,
+      err: SpendCapError,
+    ): Promise<void> => {
+      await this.recordCapEvent({
+        ...event,
+        wouldBlock: true,
+        enforced,
+        createdAt: new Date(),
+      });
+      if (enforced) throw err;
+    };
+
     // The circuit breaker. Scoped to the org when there is one: summing every
     // tenant's spend would let a busy tenant trip a quiet tenant's breaker,
     // which is the isolation failure org scoping exists to prevent.
@@ -1681,16 +1699,16 @@ export class Gateway {
       const total =
         (await this.usage.sumSpendCents(todayUtc, undefined, orgId)) + projectedCents;
       if (total >= globalCap) {
-        await this.recordCapEvent({
-          userId: userId ?? null,
-          orgId: orgId ?? null,
-          capCents: globalCap,
-          spentCents: total,
-          route: route ? `global:${route}` : "global",
-          wouldBlock: true,
-          createdAt: new Date(),
-        });
-        throw new SpendCapError(total, globalCap, "global");
+        await breach(
+          {
+            userId: userId ?? null,
+            orgId: orgId ?? null,
+            capCents: globalCap,
+            spentCents: total,
+            route: route ? `global:${route}` : "global",
+          },
+          new SpendCapError(total, globalCap, "global"),
+        );
       }
     }
 
@@ -1702,16 +1720,16 @@ export class Gateway {
         const orgSpent =
           (await this.usage.sumSpendCents(todayUtc, undefined, orgId)) + projectedCents;
         if (orgSpent >= orgCap) {
-          await this.recordCapEvent({
-            userId: userId ?? null,
-            orgId,
-            capCents: orgCap,
-            spentCents: orgSpent,
-            route: route ? `org:${route}` : "org",
-            wouldBlock: true,
-            createdAt: new Date(),
-          });
-          throw new SpendCapError(orgSpent, orgCap, "global");
+          await breach(
+            {
+              userId: userId ?? null,
+              orgId,
+              capCents: orgCap,
+              spentCents: orgSpent,
+              route: route ? `org:${route}` : "org",
+            },
+            new SpendCapError(orgSpent, orgCap, "global"),
+          );
         }
       }
     }
@@ -1730,16 +1748,16 @@ export class Gateway {
     const spent =
       (await this.usage.sumSpendCents(todayUtc, userId ?? null, orgId)) + projectedCents;
     if (spent >= capCents) {
-      await this.recordCapEvent({
-        userId: userId ?? null,
-        orgId: orgId ?? null,
-        capCents,
-        spentCents: spent,
-        route: route ?? null,
-        wouldBlock: true,
-        createdAt: new Date(),
-      });
-      throw new SpendCapError(spent, capCents);
+      await breach(
+        {
+          userId: userId ?? null,
+          orgId: orgId ?? null,
+          capCents,
+          spentCents: spent,
+          route: route ?? null,
+        },
+        new SpendCapError(spent, capCents),
+      );
     }
   }
 

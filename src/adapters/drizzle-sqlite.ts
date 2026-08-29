@@ -55,6 +55,8 @@ export const spendCapEvents = sqliteTable("spend_cap_events", {
   spentCents: real("spent_cents").notNull(),
   route: text("route"),
   wouldBlock: integer("would_block", { mode: "boolean" }).notNull(),
+  /** Did this breach actually throw? NULL on rows written before 0.11.0. */
+  enforced: integer("enforced", { mode: "boolean" }),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
 });
 
@@ -140,6 +142,7 @@ export class DrizzleSqliteUsageStore implements UsageStore {
       spentCents: event.spentCents,
       route: event.route ?? null,
       wouldBlock: event.wouldBlock,
+      enforced: event.enforced ?? null,
       createdAt: event.createdAt,
     });
   }
@@ -181,12 +184,13 @@ async function addColumnIfMissing(
 /** Dev/quick-start convenience: create the three tables if absent. For
  *  production, generate proper migrations from the exported tables.
  *
- *  Adopters on a pre-org-scoping schema who generate their own migrations
- *  need one additive step:
- *    ALTER TABLE ai_usage_log     ADD COLUMN org_id TEXT;
- *    ALTER TABLE spend_cap_events ADD COLUMN org_id TEXT;
- *  Both are nullable — existing rows stay unscoped and every unscoped query
- *  keeps its old plan. */
+ *  Adopters who generate their own migrations need these additive steps:
+ *    ALTER TABLE ai_usage_log     ADD COLUMN org_id TEXT;    -- 0.10.0
+ *    ALTER TABLE spend_cap_events ADD COLUMN org_id TEXT;    -- 0.10.0
+ *    ALTER TABLE spend_cap_events ADD COLUMN enforced INTEGER; -- 0.11.0
+ *  All nullable — existing rows stay unscoped, every unscoped query keeps its
+ *  old plan, and a NULL `enforced` reads as "written before the mode existed",
+ *  which is exactly what it means. */
 export async function ensureTables(db: SqliteDb): Promise<void> {
   await db.run(sql`CREATE TABLE IF NOT EXISTS ai_usage_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -213,9 +217,10 @@ export async function ensureTables(db: SqliteDb): Promise<void> {
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT, cap_cents REAL NOT NULL, spent_cents REAL NOT NULL,
     route TEXT, would_block INTEGER NOT NULL, created_at INTEGER NOT NULL,
-    org_id TEXT
+    org_id TEXT, enforced INTEGER
   )`);
   await addColumnIfMissing(db, "spend_cap_events", "org_id", "org_id TEXT");
+  await addColumnIfMissing(db, "spend_cap_events", "enforced", "enforced INTEGER");
   await db.run(sql`CREATE TABLE IF NOT EXISTS ai_judge_scores (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     usage_log_id INTEGER NOT NULL, rubric TEXT NOT NULL,
