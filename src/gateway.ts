@@ -35,6 +35,8 @@ import {
   mockEmbedding,
   DEFAULT_EMBEDDING_MODEL,
   DEFAULT_EMBEDDING_DIMENSIONS,
+  EMBEDDING_PROVIDER_IDS,
+  parseEmbeddingModelId,
   type EmbedOptions,
   type EmbedResult,
 } from "./embeddings.js";
@@ -581,7 +583,9 @@ export class Gateway {
     await this.checkSpendCap(opts.userId, opts.route, 0, orgId);
 
     const modelId = opts.model ?? DEFAULT_EMBEDDING_MODEL;
-    const { provider, model } = this.registry.parseAny(modelId);
+    const { provider, model } = parseEmbeddingModelId(modelId, (id) =>
+      this.registry.parseAny(id),
+    );
     if (opts.requireZdr && !this.mock && !this.registry.isZdr(provider, model)) {
       throw new ZdrViolationError(provider, model, "embed");
     }
@@ -602,7 +606,9 @@ export class Gateway {
         opts.embeddingModel ?? buildEmbeddingModel(this.registry, provider, model);
       if (!em) {
         throw new Error(
-          `embed: no embedding model for "${provider}/${model}". v1 supports openai:* natively; pass opts.embeddingModel for anything else.`,
+          `embed: no embedding model for "${provider}/${model}". Natively supported: ` +
+            `${EMBEDDING_PROVIDER_IDS.map((p) => `${p}:*`).join(", ")} ` +
+            `(each needs its API key in config or env). Pass opts.embeddingModel for anything else.`,
         );
       }
       // Bounded like every other provider call, rather than relying on the

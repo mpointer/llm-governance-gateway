@@ -197,11 +197,24 @@ export interface ModelPricing {
 }
 
 export interface ProviderConfig {
-  apiKeys?: Partial<Record<ProviderId, string>>;
+  /**
+   * Keys for the built-in chat providers, and for embedding-only providers
+   * such as `voyage`. Widened from the ProviderId-only map so an
+   * embeddings provider does not have to masquerade as a chat provider to
+   * carry a key; the narrower shape is still assignable.
+   */
+  apiKeys?: Partial<Record<ProviderId, string>> & Record<string, string | undefined>;
   defaultProvider?: ProviderId;
   defaultModel?: string;
   /** fast = cheapest tier, power = most capable; merged over built-ins. */
   tiers?: Partial<Record<ProviderId, ProviderTiers>>;
+  /**
+   * Throw instead of warning when a call falls through to the library's
+   * last-resort default provider/model. Off by default so existing callers
+   * are unaffected; on for deployments that want an inherited provider bias
+   * to be impossible rather than merely discouraged.
+   */
+  requireExplicitDefault?: boolean;
   /** Merged over built-in pricing; add entries for models you use. */
   pricing?: Record<string, ModelPricing>;
   /**
