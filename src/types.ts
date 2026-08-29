@@ -38,6 +38,16 @@ export interface SpendCapEvent {
   spentCents: number;
   route?: string | null;
   wouldBlock: boolean;
+  /**
+   * Whether this breach actually threw. true under `caps.mode: "enforce"`,
+   * false under "observe".
+   *
+   * `wouldBlock` alone cannot answer "did we block, or only measure?" — it is
+   * true in both modes. Without this flag, rows written before and after an
+   * operator flips from observe to enforce are indistinguishable, which defeats
+   * the point of measuring first. undefined on rows written before 0.11.0.
+   */
+  enforced?: boolean | null;
   createdAt: Date;
 }
 
@@ -292,6 +302,35 @@ export interface SpendCapConfig {
    * calls that carry an orgId.
    */
   orgDailyCents?: number;
+  /**
+   * What a breached cap does. Default "enforce" — the pre-0.11 behavior.
+   *
+   * "observe" evaluates every cap and records the breach (with
+   * `wouldBlock: true`, and `enforced: false`) but never throws. It exists for
+   * the incremental adoption path: route real traffic through the gateway and
+   * measure what your thresholds WOULD have blocked before trusting them
+   * against real spend.
+   *
+   * This is not the same as setting the caps to 0. A zero cap skips the spend
+   * sum and the cap event entirely — there is nothing to look at afterwards.
+   * Observe mode does the whole computation and writes the audit row; only the
+   * throw is suppressed.
+   *
+   * In observe mode every cap is evaluated rather than stopping at the first
+   * breach, so one call can record a global, an org and a per-user breach. In
+   * enforce mode the first one throws, exactly as before.
+   *
+   * Two things this deliberately does NOT relax:
+   *   - The judge's budget-aware self-skip still declines to run when its
+   *     estimated cost would cross the global cap. Observe mode suppresses
+   *     blocking the CALLER's request, not the gateway's own thrift with
+   *     optional spend — an observe mode that silently costs MORE than enforce
+   *     would be a bad surprise. Raise `globalDailyCents` (or set it to 0)
+   *     during a trial if you want full judge coverage.
+   *   - `batch({ maxCostCents })` still throws. That is a ceiling the caller
+   *     passed for one specific call, not a governance threshold on trial.
+   */
+  mode?: "observe" | "enforce";
 }
 
 /**

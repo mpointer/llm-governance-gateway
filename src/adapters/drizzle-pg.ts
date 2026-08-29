@@ -59,6 +59,8 @@ export const spendCapEvents = pgTable("spend_cap_events", {
   spentCents: doublePrecision("spent_cents").notNull(),
   route: text("route"),
   wouldBlock: boolean("would_block").notNull(),
+  /** Did this breach actually throw? NULL on rows written before 0.11.0. */
+  enforced: boolean("enforced"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
 });
 
@@ -144,6 +146,7 @@ export class DrizzlePgUsageStore implements UsageStore {
       spentCents: event.spentCents,
       route: event.route ?? null,
       wouldBlock: event.wouldBlock,
+      enforced: event.enforced ?? null,
       createdAt: event.createdAt,
     });
   }
