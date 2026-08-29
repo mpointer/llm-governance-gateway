@@ -246,6 +246,12 @@ export interface RunStructuredOptions<I, O> {
    * bound; whichever fires first wins.
    */
   signal?: AbortSignal;
+  /**
+   * Tenant this call belongs to. Scopes the ledger, spend caps, cache key,
+   * chain, prompt and task overrides. Falls back to GatewayConfig.orgId;
+   * unset on both = unscoped, i.e. single-tenant behavior.
+   */
+  orgId?: string;
   /** Bound on one provider attempt. Overrides GatewayConfig.timeouts. */
   attemptMs?: number;
   /**
@@ -306,6 +312,12 @@ export interface RunTextOptions<I> {
    * bound; whichever fires first wins.
    */
   signal?: AbortSignal;
+  /**
+   * Tenant this call belongs to. Scopes the ledger, spend caps, cache key,
+   * chain, prompt and task overrides. Falls back to GatewayConfig.orgId;
+   * unset on both = unscoped, i.e. single-tenant behavior.
+   */
+  orgId?: string;
   /** Bound on one provider attempt. Overrides GatewayConfig.timeouts. */
   attemptMs?: number;
   /**
@@ -366,12 +378,20 @@ function buildJudgePrompt(
   ].join("\n");
 }
 
-export function cacheKey(slug: string, parts: string[]): string {
+/**
+ * Cache key. `orgId` namespaces the entry so two tenants asking the same
+ * question never see each other's cached answer — a cache hit across a tenant
+ * boundary would be a data leak, not just a governance slip.
+ *
+ * Unscoped keys keep their exact pre-multi-tenant shape, so an existing cache
+ * survives the upgrade rather than silently missing on every read.
+ */
+export function cacheKey(slug: string, parts: string[], orgId?: string | null): string {
   const hash = createHash("sha256")
     .update(parts.join(" "))
     .digest("hex")
     .slice(0, 32);
-  return `aicache:${slug}:${hash}`;
+  return orgId ? `aicache:org:${orgId}:${slug}:${hash}` : `aicache:${slug}:${hash}`;
 }
 
 export class Gateway {
@@ -388,6 +408,7 @@ export class Gateway {
   private readonly appId: string | null;
   private readonly cacheTtlSeconds: number;
   private readonly timeouts: GatewayConfig["timeouts"];
+  private readonly orgId: string | undefined;
   private readonly encrypt?: (t: string) => string;
   private readonly judgeDefaults?: GatewayConfig["judge"];
   private readonly anthropicCfg?: GatewayConfig["anthropic"];
@@ -412,6 +433,7 @@ export class Gateway {
     this.appId = cfg.appId ?? null;
     this.cacheTtlSeconds = cfg.cacheTtlSeconds ?? DEFAULT_CACHE_TTL_SECONDS;
     this.timeouts = cfg.timeouts;
+    this.orgId = cfg.orgId;
     this.encrypt = cfg.encrypt;
     this.judgeDefaults = cfg.judge;
     this.anthropicCfg = cfg.anthropic;
@@ -440,6 +462,11 @@ export class Gateway {
     } catch (err) {
       warn(err);
     }
+  }
+
+  /** Per call > gateway config > unscoped. */
+  private org(opts?: { orgId?: string }): string | undefined {
+    return opts?.orgId ?? this.orgId;
   }
 
   /**
@@ -472,7 +499,7 @@ export class Gateway {
    * add rows with no cost information to every dashboard.
    */
   private async logAbortedAttempt(
-    opts: { app?: string; userId?: string; route?: string; slug: string },
+    opts: { app?: string; userId?: string; route?: string; slug: string; orgId?: string },
     provider: string,
     model: string,
     traceId: string,
@@ -480,6 +507,7 @@ export class Gateway {
     prompt: string,
   ): Promise<void> {
     await this.logUsage({
+      orgId: opts.orgId,
       app: opts.app,
       userId: opts.userId ?? null,
       route: opts.route ?? null,
@@ -515,6 +543,7 @@ export class Gateway {
 
   async embed(texts: string[], opts: EmbedOptions = {}): Promise<EmbedResult> {
     const traceId = randomUUID();
+    const orgId = this.org(opts);
     if (texts.length === 0) {
       return {
         embeddings: [],
@@ -527,7 +556,7 @@ export class Gateway {
     const identifier = opts.userId ?? (opts.anonKey ? `anon:${opts.anonKey}` : "anon");
     const rl = await this.rateLimiter.limit(identifier);
     if (!rl.success) throw new RateLimitError(rl.limit, rl.remaining);
-    await this.checkSpendCap(opts.userId, opts.route);
+    await this.checkSpendCap(opts.userId, opts.route, 0, orgId);
 
     const modelId = opts.model ?? DEFAULT_EMBEDDING_MODEL;
     const { provider, model } = this.registry.parseAny(modelId);
@@ -590,6 +619,7 @@ export class Gateway {
     }
 
     const usageLogId = await this.logUsage({
+      orgId,
       app: opts.app,
       userId: opts.userId ?? null,
       route: opts.route ?? null,
@@ -616,6 +646,7 @@ export class Gateway {
 
   async runText<I>(opts: RunTextOptions<I>): Promise<RunTextResult> {
     const traceId = randomUUID();
+    const orgId = this.org(opts);
     const identifier = opts.userId ?? (opts.anonKey ? `anon:${opts.anonKey}` : "anon");
     const requireZdr =
       opts.requireZdr === true ||
@@ -623,17 +654,18 @@ export class Gateway {
 
     const rl = await this.rateLimiter.limit(identifier);
     if (!rl.success) throw new RateLimitError(rl.limit, rl.remaining);
-    await this.checkSpendCap(opts.userId, opts.route);
+    await this.checkSpendCap(opts.userId, opts.route, 0, orgId);
 
     const useCache = opts.cache !== false;
     if (useCache && !opts.cacheParts) {
       throw new Error("runText: cacheParts is required unless cache:false is set.");
     }
-    const key = useCache ? cacheKey(opts.slug, opts.cacheParts!) : null;
+    const key = useCache ? cacheKey(opts.slug, opts.cacheParts!, orgId) : null;
     if (key) {
       const cached = await this.cache.get<string>(key);
       if (cached !== undefined) {
         const usageLogId = await this.logUsage({
+          orgId,
           app: opts.app,
           userId: opts.userId ?? null,
           route: opts.route ?? null,
@@ -662,7 +694,7 @@ export class Gateway {
 
     const promptConfig: PromptConfig = opts.promptBody
       ? { body: opts.promptBody }
-      : await this.loadPrompt(opts.slug);
+      : await this.loadPrompt(opts.slug, orgId);
     const prompt = renderTemplate(promptConfig.body, opts.variables(opts.input));
     const temperature = opts.temperature ?? promptConfig.temperature;
 
@@ -768,12 +800,12 @@ export class Gateway {
       durationMs = 0;
     } else {
       // Single-link resolution + ZDR-filtered chain (parallel to runStructured).
-      const adminOverride = (await this.modelConfig?.getOverride()) ?? null;
+      const adminOverride = (await this.modelConfig?.getOverride(orgId)) ?? null;
       let links: { provider: string; model: string; languageModel?: LanguageModel }[];
       if (adminOverride) {
         links = [this.registry.resolveDefault(adminOverride)];
       } else if (opts.task && this.tasks) {
-        const t = await this.tasks.modelForTask(opts.task);
+        const t = await this.tasks.modelForTask(opts.task, orgId);
         links = [
           {
             provider: t.provider,
@@ -782,7 +814,7 @@ export class Gateway {
           },
         ];
       } else {
-        const chainCfg = (await this.modelConfig?.getChain()) ?? [];
+        const chainCfg = (await this.modelConfig?.getChain(orgId)) ?? [];
         const full = this.registry.buildChain(chainCfg, opts.tier);
         links = full.length > 0 ? full : [this.registry.resolveDefault()];
         if (requireZdr) {
@@ -879,6 +911,7 @@ export class Gateway {
 
     if (key) await this.cache.set(key, text, this.cacheTtlSeconds);
     const usageLogId = await this.logUsage({
+      orgId,
       app: opts.app,
       userId: opts.userId ?? null,
       route: opts.route ?? null,
@@ -936,21 +969,23 @@ export class Gateway {
     },
   ): Promise<StreamStructuredResult<O>> {
     const traceId = randomUUID();
+    const orgId = this.org(opts);
     const identifier = opts.userId ?? (opts.anonKey ? `anon:${opts.anonKey}` : "anon");
 
     const rl = await this.rateLimiter.limit(identifier);
     if (!rl.success) throw new RateLimitError(rl.limit, rl.remaining);
-    await this.checkSpendCap(opts.userId, opts.route);
+    await this.checkSpendCap(opts.userId, opts.route, 0, orgId);
 
     const useCache = opts.cache !== false;
     if (useCache && !opts.cacheParts) {
       throw new Error("streamStructured: cacheParts is required unless cache:false is set.");
     }
-    const key = useCache ? cacheKey(opts.slug, opts.cacheParts!) : null;
+    const key = useCache ? cacheKey(opts.slug, opts.cacheParts!, orgId) : null;
     if (key) {
       const cached = await this.cache.get<O>(key);
       if (cached !== undefined) {
         await this.logUsage({
+          orgId,
           app: opts.app,
           userId: opts.userId ?? null,
           route: opts.route ?? null,
@@ -974,13 +1009,14 @@ export class Gateway {
 
     const promptConfig: PromptConfig = opts.promptBody
       ? { body: opts.promptBody }
-      : await this.loadPrompt(opts.slug);
+      : await this.loadPrompt(opts.slug, orgId);
     const prompt = renderTemplate(promptConfig.body, opts.variables(opts.input));
     const temperature = opts.temperature ?? promptConfig.temperature;
 
     const finalize = async (object: O, inTok: number, outTok: number, provider: string, model: string, durationMs: number) => {
       if (key) await this.cache.set(key, object, this.cacheTtlSeconds);
       await this.logUsage({
+        orgId,
         app: opts.app,
         userId: opts.userId ?? null,
         route: opts.route ?? null,
@@ -1014,19 +1050,19 @@ export class Gateway {
     }
 
     // Single-link resolution: adminOverride > task > chain[0] > default.
-    const adminOverride = (await this.modelConfig?.getOverride()) ?? null;
+    const adminOverride = (await this.modelConfig?.getOverride(orgId)) ?? null;
     let resolved: { provider: string; model: string; languageModel?: LanguageModel };
     if (adminOverride) {
       resolved = this.registry.resolveDefault(adminOverride);
     } else if (opts.task && this.tasks) {
-      const t = await this.tasks.modelForTask(opts.task);
+      const t = await this.tasks.modelForTask(opts.task, orgId);
       resolved = {
         provider: t.provider,
         model: t.model,
         languageModel: this.registry.buildAny(t.provider, t.model) ?? undefined,
       };
     } else {
-      const chainCfg = (await this.modelConfig?.getChain()) ?? [];
+      const chainCfg = (await this.modelConfig?.getChain(orgId)) ?? [];
       const chain = this.registry.buildChain(chainCfg, opts.tier);
       resolved = chain[0] ?? this.registry.resolveDefault();
     }
@@ -1106,6 +1142,7 @@ export class Gateway {
         // Zero-token row — nothing usable came back, but the attempt is real.
         if (err instanceof StreamStallError) {
           await this.logUsage({
+            orgId,
             app: opts.app,
             userId: opts.userId ?? null,
             route: opts.route ?? null,
@@ -1155,6 +1192,7 @@ export class Gateway {
     opts: SubmitBatchOptions<I>,
   ): Promise<SubmitBatchResult> {
     const cfg = this.requireBatch();
+    const orgId = this.org(opts);
     const discount = cfg.discount ?? 0.5;
     const allowance = cfg.outputAllowanceTokens ?? 1024;
 
@@ -1169,7 +1207,7 @@ export class Gateway {
     if (opts.model) {
       ({ provider, model } = parseModelId(opts.model));
     } else if (opts.task && this.tasks) {
-      const t = await this.tasks.modelForTask(opts.task);
+      const t = await this.tasks.modelForTask(opts.task, orgId);
       provider = t.provider;
       model = t.model;
     } else {
@@ -1186,7 +1224,7 @@ export class Gateway {
       throw new ZdrViolationError(provider, model, "batch submit");
     }
 
-    const promptConfig = await this.loadPrompt(opts.slug);
+    const promptConfig = await this.loadPrompt(opts.slug, orgId);
     const jsonSchema = batchSchemaToJson(schema);
     const useCache = opts.cache !== false;
 
@@ -1195,7 +1233,7 @@ export class Gateway {
     const misses: { id: string; prompt: string; cacheK: string | null }[] = [];
     for (const item of opts.items) {
       const prompt = renderTemplate(promptConfig.body, item.variables);
-      const k = useCache ? cacheKey(opts.slug, [JSON.stringify(item.variables)]) : null;
+      const k = useCache ? cacheKey(opts.slug, [JSON.stringify(item.variables)], orgId) : null;
       if (k) {
         const hit = await this.cache.get<O>(k);
         if (hit !== undefined) {
@@ -1222,7 +1260,12 @@ export class Gateway {
         `Batch estimate ${estimateCents.toFixed(2)}¢ exceeds maxCostCents ${opts.maxCostCents}¢ (${misses.length} items). Split the batch or raise the ceiling.`,
       );
     }
-    await this.checkSpendCap(opts.userId, opts.route ?? `batch:${opts.slug}`, estimateCents);
+    await this.checkSpendCap(
+      opts.userId,
+      opts.route ?? `batch:${opts.slug}`,
+      estimateCents,
+      orgId,
+    );
 
     const requests = misses.map((m) => ({
       customId: m.id,
@@ -1240,6 +1283,7 @@ export class Gateway {
 
     // Reservation row: committed money counts against caps immediately.
     await this.logUsage({
+      orgId,
       app: opts.app,
       userId: opts.userId ?? null,
       route: `batch:reserve:${opts.slug}`,
@@ -1498,16 +1542,23 @@ export class Gateway {
     route: string | undefined,
     /** Projected additional spend (batch reservations) counted against caps. */
     projectedCents = 0,
+    /** Tenant scope. undefined = unscoped, i.e. today's behavior exactly. */
+    orgId?: string | null,
   ) {
     const todayUtc = new Date();
     todayUtc.setUTCHours(0, 0, 0, 0);
 
+    // The circuit breaker. Scoped to the org when there is one: summing every
+    // tenant's spend would let a busy tenant trip a quiet tenant's breaker,
+    // which is the isolation failure org scoping exists to prevent.
     const globalCap = this.caps.globalDailyCents ?? DEFAULT_GLOBAL_CAP_CENTS;
     if (globalCap) {
-      const total = (await this.usage.sumSpendCents(todayUtc)) + projectedCents;
+      const total =
+        (await this.usage.sumSpendCents(todayUtc, undefined, orgId)) + projectedCents;
       if (total >= globalCap) {
         await this.recordCapEvent({
           userId: userId ?? null,
+          orgId: orgId ?? null,
           capCents: globalCap,
           spentCents: total,
           route: route ? `global:${route}` : "global",
@@ -1518,10 +1569,32 @@ export class Gateway {
       }
     }
 
+    // Optional explicit per-org cap, on top of the org-scoped breaker.
+    if (orgId) {
+      const orgCap =
+        (await this.usage.getOrgDailyCapCents?.(orgId)) ?? this.caps.orgDailyCents;
+      if (orgCap) {
+        const orgSpent =
+          (await this.usage.sumSpendCents(todayUtc, undefined, orgId)) + projectedCents;
+        if (orgSpent >= orgCap) {
+          await this.recordCapEvent({
+            userId: userId ?? null,
+            orgId,
+            capCents: orgCap,
+            spentCents: orgSpent,
+            route: route ? `org:${route}` : "org",
+            wouldBlock: true,
+            createdAt: new Date(),
+          });
+          throw new SpendCapError(orgSpent, orgCap, "global");
+        }
+      }
+    }
+
     let capCents: number;
     if (userId) {
       capCents =
-        (await this.usage.getUserDailyCapCents?.(userId)) ??
+        (await this.usage.getUserDailyCapCents?.(userId, orgId)) ??
         this.caps.userDailyCents ??
         DEFAULT_USER_CAP_CENTS;
     } else {
@@ -1530,10 +1603,11 @@ export class Gateway {
     if (!capCents) return; // explicit 0 = deliberate opt-out
 
     const spent =
-      (await this.usage.sumSpendCents(todayUtc, userId ?? null)) + projectedCents;
+      (await this.usage.sumSpendCents(todayUtc, userId ?? null, orgId)) + projectedCents;
     if (spent >= capCents) {
       await this.recordCapEvent({
         userId: userId ?? null,
+        orgId: orgId ?? null,
         capCents,
         spentCents: spent,
         route: route ?? null,
@@ -1553,12 +1627,12 @@ export class Gateway {
   //   - Store unreachable but slug known → warn, use default.
   //   - Slug unknown to both → throw.
   // -------------------------------------------------------------------------
-  private async loadPrompt(slug: string): Promise<PromptConfig> {
+  private async loadPrompt(slug: string, orgId?: string | null): Promise<PromptConfig> {
     const def = this.promptDefaults.find((d) => d.slug === slug);
 
     let row;
     try {
-      row = await this.prompts.getPrompt(slug);
+      row = await this.prompts.getPrompt(slug, orgId);
     } catch (err) {
       if (!def) throw err;
       console.warn(
@@ -1575,7 +1649,7 @@ export class Gateway {
         );
       }
       await this.prompts
-        .seedPrompt?.(def)
+        .seedPrompt?.(def, orgId)
         ?.catch((err: unknown) =>
           console.warn(`[llm-gateway] auto-seed of "${slug}" failed:`, err),
         );
@@ -1674,6 +1748,9 @@ export class Gateway {
     const entry: UsageEntry = {
       ...f,
       app: f.app ?? this.appId,
+      // Stamped like appId: a row without a tenant is unscoped, which is what
+      // a single-tenant deployment produces and what it produced before.
+      orgId: f.orgId ?? this.orgId ?? null,
       // Prompts and outputs can carry user PII. When an encrypt hook is
       // configured, the encrypted-at-rest guarantee holds for telemetry too.
       inputText: enc(truncate(f.inputText)),
@@ -1689,6 +1766,7 @@ export class Gateway {
     opts: RunStructuredOptions<I, O>,
   ): Promise<RunStructuredResult<O>> {
     const traceId = randomUUID();
+    const orgId = this.org(opts);
     const identifier =
       opts.userId ?? (opts.anonKey ? `anon:${opts.anonKey}` : "anon");
     const requireZdr =
@@ -1705,7 +1783,7 @@ export class Gateway {
     if (!rl.success) throw new RateLimitError(rl.limit, rl.remaining);
 
     // 2. Spend cap
-    await this.checkSpendCap(opts.userId, opts.route);
+    await this.checkSpendCap(opts.userId, opts.route, 0, orgId);
 
     // 3. Cache read
     const useCache = opts.cache !== false;
@@ -1714,11 +1792,12 @@ export class Gateway {
         "runStructured: cacheParts is required unless cache:false is set.",
       );
     }
-    const key = useCache ? cacheKey(opts.slug, opts.cacheParts!) : null;
+    const key = useCache ? cacheKey(opts.slug, opts.cacheParts!, orgId) : null;
     if (key) {
       const cached = await this.cache.get<O>(key);
       if (cached !== undefined) {
         const usageLogId = await this.logUsage({
+          orgId,
           app: opts.app,
           userId: opts.userId ?? null,
           route: opts.route ?? null,
@@ -1738,7 +1817,7 @@ export class Gateway {
     // 4. Load prompt (inline promptBody skips the store/defaults lookup)
     const promptConfig: PromptConfig = opts.promptBody
       ? { body: opts.promptBody }
-      : await this.loadPrompt(opts.slug);
+      : await this.loadPrompt(opts.slug, orgId);
     const prompt = renderTemplate(promptConfig.body, opts.variables(opts.input));
     const temperature = opts.temperature ?? promptConfig.temperature;
 
@@ -1752,7 +1831,7 @@ export class Gateway {
     const { budget, attemptMs } = this.newBudget(opts);
     const ledgerAbortedAttempt = (p: string, m: string, ms: number) =>
       this.logAbortedAttempt(
-        { app: opts.app, userId: opts.userId, route: opts.route, slug: opts.slug },
+        { app: opts.app, userId: opts.userId, route: opts.route, slug: opts.slug, orgId },
         p,
         m,
         traceId,
@@ -1810,7 +1889,7 @@ export class Gateway {
       //   b. task routing              — per-task override/default
       //   c. modelConfig.getChain()    — primary → fallback → ...
       //   d. Static/env default        — no dynamic config present
-      const adminOverride = (await this.modelConfig?.getOverride()) ?? null;
+      const adminOverride = (await this.modelConfig?.getOverride(orgId)) ?? null;
 
       if (!adminOverride && opts.task) {
         if (!this.tasks) {
@@ -1818,7 +1897,7 @@ export class Gateway {
             `runStructured received task "${opts.task}" but GatewayConfig.tasks is not configured.`,
           );
         }
-        const resolved = await this.tasks.modelForTask(opts.task);
+        const resolved = await this.tasks.modelForTask(opts.task, orgId);
         assertZdr(resolved.provider, resolved.model, `task "${opts.task}"`);
         const lm = this.registry.buildAny(resolved.provider, resolved.model);
         const nativeApplies =
@@ -1886,7 +1965,7 @@ export class Gateway {
         durationMs = Date.now() - start;
         extras = result.extras;
       } else {
-        const chainCfg = (await this.modelConfig?.getChain()) ?? [];
+        const chainCfg = (await this.modelConfig?.getChain(orgId)) ?? [];
         const fullChain = this.registry.buildChain(
           chainCfg,
           opts.tier,
@@ -1975,6 +2054,7 @@ export class Gateway {
 
     // 7. Usage log
     const usageLogId = await this.logUsage({
+      orgId,
       app: opts.app,
       userId: opts.userId ?? null,
       route: opts.route ?? null,
@@ -2203,6 +2283,7 @@ export class Gateway {
    * Bypasses rate limit and spend caps too — it's an admin tool.
    */
   async runPromptTest(opts: PromptTestOptions): Promise<PromptTestResult> {
+    const orgId = this.org(opts);
     const traceId = randomUUID();
     const prompt = renderTemplate(opts.body, opts.variables);
 
@@ -2231,7 +2312,7 @@ export class Gateway {
         resolvedModel = parsed.model;
         lm = this.registry.buildAny(parsed.provider, parsed.model) ?? undefined;
       } else if (opts.task && this.tasks) {
-        const t = await this.tasks.modelForTask(opts.task);
+        const t = await this.tasks.modelForTask(opts.task, orgId);
         resolvedProvider = t.provider;
         resolvedModel = t.model;
         lm = this.registry.buildAny(t.provider, t.model) ?? undefined;
@@ -2273,6 +2354,7 @@ export class Gateway {
 
     const costCents = this.registry.estimateCostCents(model, inputTokens, outputTokens);
     const usageLogId = await this.logUsage({
+      orgId,
       userId: opts.userId ?? null,
       route: "admin:prompt-test",
       promptSlug: opts.slug ?? null,
@@ -2313,6 +2395,8 @@ export interface PromptTestOptions {
   model?: string;
   /** Route via task registry when no explicit model is given. */
   task?: string;
+  /** Tenant whose task routing / prompts to test against. */
+  orgId?: string;
   temperature?: number;
   /** Admin running the test — attributed in the usage log. */
   userId?: string;

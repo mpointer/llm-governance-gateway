@@ -161,6 +161,8 @@ export interface SubmitBatchOptions<I> {
   userId?: string;
   route?: string;
   app?: string;
+  /** Tenant this batch belongs to. Falls back to GatewayConfig.orgId. */
+  orgId?: string;
 }
 
 export interface SubmitBatchResult {
