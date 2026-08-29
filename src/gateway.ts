@@ -2254,6 +2254,7 @@ export class Gateway {
     requireZdr = false,
   ): Promise<void> {
     const judge = opts.judge!;
+    const orgId = this.org(opts);
     const criteria = Object.keys(judge.criteria);
     if (criteria.length === 0) return;
 
@@ -2261,13 +2262,33 @@ export class Gateway {
     const rng = this.judgeDefaults?.random ?? Math.random;
     if (sampleRate <= 0 || rng() >= sampleRate) return;
 
+    // Resolution: per-call > admin-pinned judge tier > gateway judge default
+    // > the default provider's judge tier (which falls back to its fast tier).
+    //
+    // The admin pin is what makes the judge a first-class tier rather than
+    // something coupled to the default provider: an operator can put the
+    // judge on a cheap, ZDR-compliant model from a DIFFERENT provider without
+    // touching the generation chain. Store failures degrade to config rather
+    // than failing the call — a judge is never the thing that breaks a
+    // response (the same rule PR 20 established for judge timeouts).
+    let adminJudgeModel: string | null | undefined;
+    try {
+      adminJudgeModel = await this.modelConfig?.getJudgeModel?.(orgId);
+    } catch (err) {
+      console.warn(
+        "[llm-gateway] judge model store unreachable, using configured default:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+
     const modelId =
       judge.model ??
+      adminJudgeModel ??
       this.judgeDefaults?.model ??
       (() => {
         const d = this.registry.resolveDefault();
-        const fast = this.registry.tierModel(d.provider, "fast");
-        return fast ? `${d.provider === "anthropic" ? "" : d.provider + ":"}${fast}` : null;
+        const t = this.registry.tierModel(d.provider, "judge");
+        return t ? `${d.provider === "anthropic" ? "" : d.provider + ":"}${t}` : null;
       })();
     if (!modelId) {
       console.warn("[llm-gateway] judge skipped: no judge model resolvable");

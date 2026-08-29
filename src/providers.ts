@@ -225,8 +225,21 @@ export class ProviderRegistry {
     return Array.from(new Set([...fromTiers, ...fromPricing]));
   }
 
-  tierModel(provider: ProviderId, tier: "fast" | "power"): string | undefined {
-    return this.cfg.tiers?.[provider]?.[tier] ?? BUILTIN_TIERS[provider]?.[tier];
+  /**
+   * Resolve a named tier for a provider.
+   *
+   * `judge` has no built-in per-provider model — deliberately, since baking
+   * one in would be the same out-of-box provider bias finding 3.6 objects to.
+   * An unset judge tier falls back to that provider's `fast` model, which is
+   * exactly what the judge used before the tier existed.
+   */
+  tierModel(provider: ProviderId, tier: "fast" | "power" | "judge"): string | undefined {
+    const configured = this.cfg.tiers?.[provider]?.[tier];
+    if (configured) return configured;
+    if (tier === "judge") {
+      return this.cfg.tiers?.[provider]?.fast ?? BUILTIN_TIERS[provider]?.fast;
+    }
+    return BUILTIN_TIERS[provider]?.[tier];
   }
 
   buildLanguageModel(
