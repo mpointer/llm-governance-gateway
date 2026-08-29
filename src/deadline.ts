@@ -83,3 +83,94 @@ export function attemptSignal(
     dispose,
   };
 }
+
+/**
+ * Sleep that a signal can cut short. The bare
+ * `new Promise(r => setTimeout(r, ms))` this replaces made a caller abort
+ * wait out the full backoff delay before anyone noticed.
+ *
+ * Rejects with the signal's reason when aborted, so a cancelled backoff
+ * unwinds the retry loop instead of resuming it.
+ */
+export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(signal.reason);
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    function onAbort() {
+      clearTimeout(timer);
+      reject(signal?.reason);
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/**
+ * An attempt shorter than this is not worth opening a connection for: it is
+ * guaranteed to abort mid-flight, and a half-open provider call may still
+ * bill. See Rule 2 in docs/design/timeouts-and-deadlines.md.
+ */
+export const MIN_ATTEMPT_MS = 1_000;
+
+/**
+ * The whole-operation clock: one per governed call, shared across every chain
+ * link, retry, and backoff sleep within it.
+ *
+ * Deliberately NOT a single long-lived AbortSignal — each attempt gets its own
+ * short-lived signal derived from `min(attemptMs, remaining budget)`, so a
+ * per-attempt timeout and a blown deadline stay distinguishable (Rule 5). A
+ * budget with no `deadlineMs` is unbounded, which is the default and preserves
+ * the library's pre-S4 behavior exactly.
+ */
+export class AttemptBudget {
+  private readonly startedAt = Date.now();
+
+  constructor(
+    /** Whole-operation budget. undefined = unbounded. */
+    readonly deadlineMs?: number,
+    /** The caller's own signal, composed into every attempt. */
+    readonly callerSignal?: AbortSignal,
+  ) {}
+
+  elapsedMs(): number {
+    return Date.now() - this.startedAt;
+  }
+
+  /** undefined when unbounded. Never negative. */
+  remainingMs(): number | undefined {
+    if (this.deadlineMs === undefined) return undefined;
+    return Math.max(0, this.deadlineMs - this.elapsedMs());
+  }
+
+  expired(): boolean {
+    const r = this.remainingMs();
+    return r !== undefined && r <= 0;
+  }
+
+  /**
+   * Is there enough budget left to be worth starting another attempt?
+   * Unbounded budgets always are.
+   */
+  canStartAttempt(minMs = MIN_ATTEMPT_MS): boolean {
+    const r = this.remainingMs();
+    return r === undefined || r >= minMs;
+  }
+
+  /**
+   * One attempt's signal: fires at `min(attemptMs, remaining budget)`, or when
+   * the caller aborts. Dispose it when the attempt settles.
+   */
+  attempt(attemptMs: number): AttemptSignal {
+    const remaining = this.remainingMs();
+    const ms = remaining === undefined ? attemptMs : Math.min(attemptMs, remaining);
+    return attemptSignal(ms, this.callerSignal);
+  }
+
+  /** Clamp a backoff delay so a sleep cannot outlive the budget. */
+  clampDelay(ms: number): number {
+    const r = this.remainingMs();
+    return r === undefined ? ms : Math.min(ms, r);
+  }
+}

@@ -4,6 +4,8 @@ import type { LanguageModel, Schema } from "ai";
 import { z } from "zod";
 import { backoffMs, isRetryable, isSchemaValidationError } from "./backoff.js";
 import {
+  AttemptTimeoutError,
+  DeadlineExceededError,
   JudgeGateError,
   RateLimitError,
   SpendCapError,
@@ -11,7 +13,7 @@ import {
   ZdrViolationError,
 } from "./errors.js";
 import { guardStream } from "./stream-guard.js";
-import { attemptSignal } from "./deadline.js";
+import { AttemptBudget, sleep } from "./deadline.js";
 import { ProviderRegistry, parseModelId, type ChainLink } from "./providers.js";
 import {
   callNativeAnthropic,
@@ -63,7 +65,7 @@ const DEFAULT_STREAM_STALL_MS = 60_000;
 // Per-attempt bound on a unary provider call. Making this configurable is
 // stage S3 of docs/design/timeouts-and-deadlines.md; today it matches the
 // value the AI SDK paths have always used, now applied to the native path too.
-const ATTEMPT_TIMEOUT_MS = 60_000;
+const DEFAULT_ATTEMPT_MS = 60_000;
 const DEFAULT_USER_CAP_CENTS = 200; // unset = conservative default, NOT uncapped
 const DEFAULT_ANON_CAP_CENTS = 100;
 const DEFAULT_GLOBAL_CAP_CENTS = 5000; // app-wide circuit breaker
@@ -99,16 +101,20 @@ async function attemptGenerate<O>(
   prompt: string,
   temperature?: number,
   system?: string,
-  /** Caller cancellation, composed with this call's own per-attempt bound. */
-  callerSignal?: AbortSignal,
+  /** Whole-operation clock; supplies each attempt's signal. */
+  budget: AttemptBudget = new AttemptBudget(),
+  attemptMs = DEFAULT_ATTEMPT_MS,
+  /** For error messages only. */
+  who: { provider: string; model: string } = { provider: "unknown", model: "unknown" },
 ): Promise<AttemptResult<O>> {
   let currentPrompt = prompt;
   let repaired = false;
   let transientRetries = 0;
   for (;;) {
+    throwIfOutOfBudget(budget, "before-retry");
     // Fresh window per attempt: a retry deserves a full one, not the remains
     // of the previous attempt's.
-    const attempt = attemptSignal(ATTEMPT_TIMEOUT_MS, callerSignal);
+    const attempt = budget.attempt(attemptMs);
     try {
       const res = await generateObject({
         model,
@@ -126,6 +132,15 @@ async function attemptGenerate<O>(
         },
       };
     } catch (err) {
+      // Our own clock fired. Distinguish by construction, never by sniffing
+      // the SDK's abort error (Rule 5).
+      if (attempt.timedOut()) {
+        // A blown deadline is terminal; a merely slow link is the chain's
+        // problem, and is never retried on the same link (Rule 4).
+        throwIfOutOfBudget(budget, "in-flight");
+        throw new AttemptTimeoutError(who.provider, who.model, attemptMs);
+      }
+      if (budget.callerSignal?.aborted) throw budget.callerSignal.reason;
       if (isSchemaValidationError(err) && !repaired) {
         repaired = true;
         const detail =
@@ -138,11 +153,27 @@ async function attemptGenerate<O>(
         continue;
       }
       if (!isRetryable(err) || transientRetries >= 2) throw err;
-      await new Promise<void>((r) => setTimeout(r, backoffMs(transientRetries, err)));
+      await sleep(
+        budget.clampDelay(backoffMs(transientRetries, err)),
+        budget.callerSignal,
+      );
       transientRetries++;
     } finally {
       attempt.dispose();
     }
+  }
+}
+
+/** Throws DeadlineExceededError when the budget is spent. No-op if unbounded. */
+function throwIfOutOfBudget(
+  budget: AttemptBudget,
+  phase: "before-link" | "before-retry" | "in-flight",
+): void {
+  if (budget.deadlineMs === undefined) return;
+  // Rule 2: refuse to open a connection the budget cannot see through, since
+  // a half-open provider call may still bill.
+  if (!budget.canStartAttempt() || budget.expired()) {
+    throw new DeadlineExceededError(budget.deadlineMs, budget.elapsedMs(), phase);
   }
 }
 
@@ -215,6 +246,13 @@ export interface RunStructuredOptions<I, O> {
    * bound; whichever fires first wins.
    */
   signal?: AbortSignal;
+  /** Bound on one provider attempt. Overrides GatewayConfig.timeouts. */
+  attemptMs?: number;
+  /**
+   * Bound on this whole call: every chain link, retry and backoff sleep.
+   * Overrides GatewayConfig.timeouts. Unbounded when neither is set.
+   */
+  deadlineMs?: number;
   /** Free, caller-computed rubric (no tokens spent). Kept for simple cases. */
   judgeRubric?: (object: O) => Record<string, number>;
   /** Model-graded judge: sampled, budget-aware, runs in the request path. */
@@ -268,6 +306,13 @@ export interface RunTextOptions<I> {
    * bound; whichever fires first wins.
    */
   signal?: AbortSignal;
+  /** Bound on one provider attempt. Overrides GatewayConfig.timeouts. */
+  attemptMs?: number;
+  /**
+   * Bound on this whole call: every chain link, retry and backoff sleep.
+   * Overrides GatewayConfig.timeouts. Unbounded when neither is set.
+   */
+  deadlineMs?: number;
   /** Native Anthropic options (web search, thinking, cacheSystem). Applies
    *  on anthropic chain links when GatewayConfig.anthropic is configured;
    *  non-anthropic links in the same chain run the plain AI SDK path, so a
@@ -292,6 +337,8 @@ export interface RunTextResult {
 }
 
 const JUDGE_SNIPPET_LIMIT = 4000;
+// The judge runs in the request path, so its clock is short and its own.
+const JUDGE_DEADLINE_MS = 15_000;
 
 function buildJudgePrompt(
   criteria: Record<string, string>,
@@ -395,6 +442,61 @@ export class Gateway {
     }
   }
 
+  /**
+   * One whole-operation clock per governed call. Precedence matches every
+   * other knob: per call > config > built-in default. `deadlineMs` has no
+   * built-in default — unbounded is the pre-S4 behavior and stays the default.
+   */
+  private newBudget(opts: {
+    signal?: AbortSignal;
+    attemptMs?: number;
+    deadlineMs?: number;
+  }): { budget: AttemptBudget; attemptMs: number } {
+    const deadlineMs = opts.deadlineMs ?? this.timeouts?.deadlineMs;
+    return {
+      budget: new AttemptBudget(deadlineMs, opts.signal),
+      attemptMs: opts.attemptMs ?? this.timeouts?.attemptMs ?? DEFAULT_ATTEMPT_MS,
+    };
+  }
+
+  /**
+   * Ledger an attempt that was cut short by our own clock.
+   *
+   * Rule 1 in spirit: a provider call that may have spent money leaves an
+   * audit trail even though nothing usable came back. Zero tokens, zero cost —
+   * the row exists so a chronically slow provider shows up in the data the
+   * cost page already reads, not only in logs.
+   *
+   * Deliberately NOT called for a caller abort: a client disconnect is the
+   * caller's own choice and carries no signal about the provider, so it would
+   * add rows with no cost information to every dashboard.
+   */
+  private async logAbortedAttempt(
+    opts: { app?: string; userId?: string; route?: string; slug: string },
+    provider: string,
+    model: string,
+    traceId: string,
+    durationMs: number,
+    prompt: string,
+  ): Promise<void> {
+    await this.logUsage({
+      app: opts.app,
+      userId: opts.userId ?? null,
+      route: opts.route ?? null,
+      promptSlug: opts.slug,
+      provider,
+      model,
+      inputTokens: 0,
+      outputTokens: 0,
+      estimatedCostCents: 0,
+      cacheHit: false,
+      traceId,
+      durationMs,
+      inputText: prompt,
+      outputText: null,
+    });
+  }
+
   private async recordCapEvent(event: SpendCapEvent): Promise<void> {
     await this.usage.recordSpendCapEvent(event);
     this.emitObs("onSpendCapEvent", this.obs?.onSpendCapEvent, event);
@@ -452,16 +554,37 @@ export class Gateway {
           `embed: no embedding model for "${provider}/${model}". v1 supports openai:* natively; pass opts.embeddingModel for anything else.`,
         );
       }
-      const res = await embedMany({
+      // Bounded like every other provider call, rather than relying on the
+      // caller to pass a signal. embed() is single-shot, so the attempt bound
+      // is the whole bound.
+      const embedAttempt = new AttemptBudget(
+        opts.deadlineMs ?? this.timeouts?.deadlineMs,
+        opts.signal,
+      ).attempt(opts.attemptMs ?? this.timeouts?.attemptMs ?? DEFAULT_ATTEMPT_MS);
+      let res;
+      try {
+        res = await embedMany({
         model: em,
         values: texts,
         // The AI SDK's own maxRetries (default 2) is left alone: embed() has
         // no gateway-level retry loop, so it is the only one there is.
-        ...(opts.signal ? { abortSignal: opts.signal } : {}),
+        abortSignal: embedAttempt.signal,
         ...(opts.dimensions !== undefined
           ? { providerOptions: { openai: { dimensions: opts.dimensions } } }
           : {}),
-      });
+        });
+      } catch (err) {
+        if (embedAttempt.timedOut()) {
+          throw new AttemptTimeoutError(
+            usedProvider,
+            usedModel,
+            opts.attemptMs ?? this.timeouts?.attemptMs ?? DEFAULT_ATTEMPT_MS,
+          );
+        }
+        throw err;
+      } finally {
+        embedAttempt.dispose();
+      }
       embeddings = res.embeddings as number[][];
       inputTokens = res.usage?.tokens ?? texts.reduce((s, t) => s + Math.ceil(t.length / 4), 0);
     }
@@ -550,6 +673,8 @@ export class Gateway {
       );
     }
 
+    const { budget, attemptMs } = this.newBudget(opts);
+
     let text: string;
     let finishReason: string | undefined;
     let inputTokens: number;
@@ -561,13 +686,15 @@ export class Gateway {
       | { cacheCreateTokens: number; cacheReadTokens: number; webSearches: number }
       | undefined;
 
-    const attemptNativeText = async (linkModel: string, linkTemp?: number | null) => {
+    const attemptNativeText = async (
+      linkProvider: string,
+      linkModel: string,
+      linkTemp?: number | null,
+    ) => {
       const effTemp = linkTemp === null ? undefined : (linkTemp ?? temperature);
       for (let retry = 0; ; ) {
-        // Previously unbounded: the native path inherited whatever timeout the
-        // BYO client happened to be constructed with. Same bound as the AI SDK
-        // path below now applies here.
-        const attempt = attemptSignal(ATTEMPT_TIMEOUT_MS, opts.signal);
+        throwIfOutOfBudget(budget, "before-retry");
+        const attempt = budget.attempt(attemptMs);
         try {
           return await callNativeAnthropicText(this.anthropicCfg!, {
             model: linkModel,
@@ -579,8 +706,13 @@ export class Gateway {
             signal: attempt.signal,
           });
         } catch (err) {
+          if (attempt.timedOut()) {
+            throwIfOutOfBudget(budget, "in-flight");
+            throw new AttemptTimeoutError(linkProvider, linkModel, attemptMs);
+          }
+          if (budget.callerSignal?.aborted) throw budget.callerSignal.reason;
           if (!isRetryable(err) || retry >= 2) throw err;
-          await new Promise<void>((r) => setTimeout(r, backoffMs(retry, err)));
+          await sleep(budget.clampDelay(backoffMs(retry, err)), budget.callerSignal);
           retry++;
         } finally {
           attempt.dispose();
@@ -588,10 +720,16 @@ export class Gateway {
       }
     };
 
-    const attemptText = async (lm: LanguageModel, linkTemp?: number | null) => {
+    const attemptText = async (
+      linkProvider: string,
+      linkModel: string,
+      lm: LanguageModel,
+      linkTemp?: number | null,
+    ) => {
       const effTemp = linkTemp === null ? undefined : (linkTemp ?? temperature);
       for (let retry = 0; ; ) {
-        const attempt = attemptSignal(ATTEMPT_TIMEOUT_MS, opts.signal);
+        throwIfOutOfBudget(budget, "before-retry");
+        const attempt = budget.attempt(attemptMs);
         try {
           const res = await generateText({
             model: lm,
@@ -603,8 +741,13 @@ export class Gateway {
           });
           return res;
         } catch (err) {
+          if (attempt.timedOut()) {
+            throwIfOutOfBudget(budget, "in-flight");
+            throw new AttemptTimeoutError(linkProvider, linkModel, attemptMs);
+          }
+          if (budget.callerSignal?.aborted) throw budget.callerSignal.reason;
           if (!isRetryable(err) || retry >= 2) throw err;
-          await new Promise<void>((r) => setTimeout(r, backoffMs(retry, err)));
+          await sleep(budget.clampDelay(backoffMs(retry, err)), budget.callerSignal);
           retry++;
         } finally {
           attempt.dispose();
@@ -657,6 +800,7 @@ export class Gateway {
       const start = Date.now();
       let lastErr: unknown;
       let done = false;
+      let attemptTimedOut = false;
       text = "";
       inputTokens = 0;
       outputTokens = 0;
@@ -672,9 +816,15 @@ export class Gateway {
           );
           continue;
         }
+        // Rule 2: do not open a connection the budget cannot see through.
+        throwIfOutOfBudget(budget, "before-link");
         try {
           if (nativeApplies) {
-            const res = await attemptNativeText(link.model, (link as ChainLink).temperature);
+            const res = await attemptNativeText(
+              link.provider,
+              link.model,
+              (link as ChainLink).temperature,
+            );
             text = res.text;
             finishReason = res.finishReason;
             inputTokens = res.inputTokens;
@@ -685,7 +835,12 @@ export class Gateway {
               webSearches: res.webSearches,
             };
           } else {
-            const res = await attemptText(link.languageModel!, (link as ChainLink).temperature);
+            const res = await attemptText(
+              link.provider,
+              link.model,
+              link.languageModel!,
+              (link as ChainLink).temperature,
+            );
             text = res.text;
             finishReason = res.finishReason;
             inputTokens = res.usage.inputTokens ?? 0;
@@ -699,9 +854,23 @@ export class Gateway {
           break;
         } catch (err) {
           lastErr = err;
-          if (!isRetryable(err) && links.length === 1) throw err;
+          // A blown deadline and a caller abort are terminal — no further
+          // links, no "trying next" (Rule 4).
+          if (err instanceof DeadlineExceededError) throw err;
+          if (budget.callerSignal?.aborted) throw err;
+          // Aligned with callWithChain as of S4: advance only on a retryable
+          // error or an attempt timeout. Previously runText also fell through
+          // on NON-retryable errors whenever the chain had more than one link,
+          // so a 400 burned a call on the next provider too.
+          const advance = isRetryable(err) || err instanceof AttemptTimeoutError;
+          if (!advance) throw err;
+          if (err instanceof AttemptTimeoutError) {
+            attemptTimedOut = true;
+          }
           console.warn(
-            `[llm-gateway] runText "${link.provider}/${link.model}" failed, trying next link`,
+            `[llm-gateway] runText "${link.provider}/${link.model}" failed (${
+              err instanceof AttemptTimeoutError ? "attempt-timeout" : "retryable"
+            }), trying next link`,
           );
         }
       }
@@ -1221,8 +1390,9 @@ export class Gateway {
     system: string | undefined,
     callTemperature: number | undefined,
     native: NativeCallOptions | undefined,
-    /** Caller cancellation, composed with each attempt's own bound. */
-    callerSignal?: AbortSignal,
+    /** Whole-operation clock; supplies each attempt's signal. */
+    budget: AttemptBudget = new AttemptBudget(),
+    attemptMs = DEFAULT_ATTEMPT_MS,
   ): Promise<AttemptResult<O> & { extras?: { cacheCreateTokens: number; cacheReadTokens: number; webSearches: number } }> {
     // Per-link temperature: link (incl. null = never send) > call > prompt.
     const temperature =
@@ -1232,9 +1402,8 @@ export class Gateway {
       let repaired = false;
       let transientRetries = 0;
       for (;;) {
-        // Previously unbounded: the native path inherited whatever timeout the
-        // BYO client happened to be constructed with.
-        const attempt = attemptSignal(ATTEMPT_TIMEOUT_MS, callerSignal);
+        throwIfOutOfBudget(budget, "before-retry");
+        const attempt = budget.attempt(attemptMs);
         try {
           const res = await callNativeAnthropic(this.anthropicCfg, {
             model: link.model,
@@ -1269,6 +1438,11 @@ export class Gateway {
             },
           };
         } catch (err) {
+          if (attempt.timedOut()) {
+            throwIfOutOfBudget(budget, "in-flight");
+            throw new AttemptTimeoutError(link.provider, link.model, attemptMs);
+          }
+          if (budget.callerSignal?.aborted) throw budget.callerSignal.reason;
           if (isSchemaValidationError(err) && !repaired) {
             repaired = true;
             const detail =
@@ -1281,7 +1455,10 @@ export class Gateway {
             continue;
           }
           if (!isRetryable(err) || transientRetries >= 2) throw err;
-          await new Promise<void>((r) => setTimeout(r, backoffMs(transientRetries, err)));
+          await sleep(
+            budget.clampDelay(backoffMs(transientRetries, err)),
+            budget.callerSignal,
+          );
           transientRetries++;
         } finally {
           attempt.dispose();
@@ -1300,7 +1477,9 @@ export class Gateway {
       prompt,
       temperature,
       system,
-      callerSignal,
+      budget,
+      attemptMs,
+      { provider: link.provider, model: link.model },
     );
     return result;
   }
@@ -1431,11 +1610,17 @@ export class Gateway {
     temperature?: number,
     system?: string,
     native?: NativeCallOptions,
-    callerSignal?: AbortSignal,
+    budget: AttemptBudget = new AttemptBudget(),
+    attemptMs = DEFAULT_ATTEMPT_MS,
+    /** Called for each link cut short by our own clock, so it is ledgered. */
+    onAttemptTimeout?: (provider: string, model: string, durationMs: number) => Promise<void>,
   ) {
     const start = Date.now();
     let lastErr: unknown;
     for (const link of chain) {
+      // Rule 2: do not open a connection the budget cannot see through.
+      throwIfOutOfBudget(budget, "before-link");
+      const linkStart = Date.now();
       try {
         const result = await this.execLink(
           link,
@@ -1444,7 +1629,8 @@ export class Gateway {
           system,
           temperature,
           native,
-          callerSignal,
+          budget,
+          attemptMs,
         );
         return {
           object: result.object,
@@ -1457,11 +1643,23 @@ export class Gateway {
         };
       } catch (err) {
         lastErr = err;
-        // Fall to the next link on transient errors AND on persistent schema
-        // invalidity — a different model may satisfy the schema where this
-        // one couldn't (post-repair). Anything else is a caller error.
-        if (!isRetryable(err) && !isSchemaValidationError(err)) throw err;
-        const reason = isSchemaValidationError(err) ? "schema-invalid" : "retryable";
+        // A blown deadline and a caller abort are terminal (Rule 4).
+        if (err instanceof DeadlineExceededError) throw err;
+        if (budget.callerSignal?.aborted) throw err;
+        // Fall to the next link on transient errors, on persistent schema
+        // invalidity (a different model may satisfy the schema where this one
+        // couldn't, post-repair), and on an attempt timeout — but never retry
+        // a link that just proved it is slow. Anything else is a caller error.
+        const timedOut = err instanceof AttemptTimeoutError;
+        if (timedOut) {
+          await onAttemptTimeout?.(link.provider, link.model, Date.now() - linkStart);
+        }
+        if (!timedOut && !isRetryable(err) && !isSchemaValidationError(err)) throw err;
+        const reason = timedOut
+          ? "attempt-timeout"
+          : isSchemaValidationError(err)
+            ? "schema-invalid"
+            : "retryable";
         console.warn(
           `[llm-gateway] "${link.provider}/${link.model}" failed (${reason}), trying next in chain`,
         );
@@ -1551,6 +1749,39 @@ export class Gateway {
       );
     }
 
+    const { budget, attemptMs } = this.newBudget(opts);
+    const ledgerAbortedAttempt = (p: string, m: string, ms: number) =>
+      this.logAbortedAttempt(
+        { app: opts.app, userId: opts.userId, route: opts.route, slug: opts.slug },
+        p,
+        m,
+        traceId,
+        ms,
+        prompt,
+      ).then(() => undefined);
+
+    /**
+     * Single-link paths (task routing, admin override, static default) have no
+     * chain loop to catch a timeout, so they ledger here. Without this a
+     * task-routed call — the shape the first adopter uses for everything —
+     * would be the one path where a timed-out attempt left no audit trail.
+     */
+    const ledgerOnAttemptTimeout = async <T>(
+      p: string,
+      m: string,
+      run: () => Promise<T>,
+    ): Promise<T> => {
+      const linkStart = Date.now();
+      try {
+        return await run();
+      } catch (err) {
+        if (err instanceof AttemptTimeoutError) {
+          await ledgerAbortedAttempt(p, m, Date.now() - linkStart);
+        }
+        throw err;
+      }
+    };
+
     // 5. Generate
     let object: O;
     let inputTokens: number;
@@ -1598,14 +1829,20 @@ export class Gateway {
           );
         }
         const start = Date.now();
-        const result = await this.execLink(
-          { provider: resolved.provider, model: resolved.model, languageModel: lm ?? undefined },
-          opts.schema,
-          prompt,
-          opts.system,
-          temperature,
-          opts.anthropic,
-          opts.signal,
+        const result = await ledgerOnAttemptTimeout(
+          resolved.provider,
+          resolved.model,
+          () =>
+            this.execLink(
+              { provider: resolved.provider, model: resolved.model, languageModel: lm ?? undefined },
+              opts.schema,
+              prompt,
+              opts.system,
+              temperature,
+              opts.anthropic,
+              budget,
+              attemptMs,
+            ),
         );
         object = result.object;
         inputTokens = result.usage.inputTokens;
@@ -1626,14 +1863,20 @@ export class Gateway {
           throw new Error(`No API key for provider "${resolved.provider}".`);
         }
         const start = Date.now();
-        const result = await this.execLink(
-          resolved,
-          opts.schema,
-          prompt,
-          opts.system,
-          temperature,
-          opts.anthropic,
-          opts.signal,
+        const result = await ledgerOnAttemptTimeout(
+          resolved.provider,
+          resolved.model,
+          () =>
+            this.execLink(
+              resolved,
+              opts.schema,
+              prompt,
+              opts.system,
+              temperature,
+              opts.anthropic,
+              budget,
+              attemptMs,
+            ),
         );
         object = result.object;
         inputTokens = result.usage.inputTokens;
@@ -1682,14 +1925,20 @@ export class Gateway {
             );
           }
           const start = Date.now();
-          const result = await this.execLink(
-            resolved,
-            opts.schema,
-            prompt,
-            opts.system,
-            temperature,
-            opts.anthropic,
-            opts.signal,
+          const result = await ledgerOnAttemptTimeout(
+            resolved.provider,
+            resolved.model,
+            () =>
+              this.execLink(
+                resolved,
+                opts.schema,
+                prompt,
+                opts.system,
+                temperature,
+                opts.anthropic,
+                budget,
+                attemptMs,
+              ),
           );
           object = result.object;
           inputTokens = result.usage.inputTokens ?? 0;
@@ -1706,7 +1955,9 @@ export class Gateway {
             temperature,
             opts.system,
             opts.anthropic,
-            opts.signal,
+            budget,
+            attemptMs,
+            ledgerAbortedAttempt,
           );
           object = gen.object;
           inputTokens = gen.inputTokens;
@@ -1869,7 +2120,39 @@ export class Gateway {
         return;
       }
       const start = Date.now();
-      const result = await attemptGenerate(lm, scoreSchema, judgePrompt);
+      // The judge gets its OWN small budget rather than sharing the main
+      // call's: sharing means a slow main call starves the judge into a
+      // timeout, so judge coverage would silently drop exactly when calls are
+      // slow — the moment the scoring data is most wanted. Skipping is the
+      // judge's established failure mode (it already self-skips under spend
+      // pressure), so a judge that runs out of clock must never fail the main
+      // response. Consequence, accepted: total wall-clock can exceed the
+      // caller's deadlineMs by up to this budget.
+      const judgeBudget = new AttemptBudget(JUDGE_DEADLINE_MS);
+      let result;
+      try {
+        result = await attemptGenerate(
+          lm,
+          scoreSchema,
+          judgePrompt,
+          undefined,
+          undefined,
+          judgeBudget,
+          Math.min(JUDGE_DEADLINE_MS, this.timeouts?.attemptMs ?? DEFAULT_ATTEMPT_MS),
+          { provider, model },
+        );
+      } catch (err) {
+        // A judge that ran out of clock SKIPS. It must never be the reason a
+        // main response fails — that would make a governance check the thing
+        // that breaks the request it was watching.
+        if (err instanceof AttemptTimeoutError || err instanceof DeadlineExceededError) {
+          console.warn(
+            `[llm-gateway] judge skipped for "${opts.slug}": ${err.message}`,
+          );
+          return;
+        }
+        throw err;
+      }
       scores = result.object;
       inputTokens = result.usage.inputTokens;
       outputTokens = result.usage.outputTokens;
@@ -1966,7 +2249,9 @@ export class Gateway {
       const start = Date.now();
       // One composition mechanism across the codebase, so nobody later wires
       // this one into an AbortSignal.any (see src/deadline.ts for why).
-      const attempt = attemptSignal(ATTEMPT_TIMEOUT_MS);
+      const attempt = new AttemptBudget().attempt(
+        this.timeouts?.attemptMs ?? DEFAULT_ATTEMPT_MS,
+      );
       let res;
       try {
         res = await generateText({

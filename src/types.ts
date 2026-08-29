@@ -295,6 +295,21 @@ export interface ObservabilityHooks {
  * long stream that is actively producing tokens is healthy, silence is not.
  */
 export interface TimeoutConfig {
+  /**
+   * Bound on ONE provider attempt. Default 60_000 — the value the AI SDK
+   * paths have always used. Each retry gets a fresh window.
+   */
+  attemptMs?: number;
+  /**
+   * Bound on the WHOLE governed operation: every chain link, retry, and
+   * backoff sleep within one runStructured/runText call.
+   *
+   * Default undefined = unbounded, which is the pre-S4 behavior. Worth
+   * setting on a platform with its own function deadline (a 3-link chain can
+   * otherwise run for minutes), since the usage row is written after
+   * generation returns and a platform kill loses it.
+   */
+  deadlineMs?: number;
   /** Time allowed to a stream's FIRST emission. Default 60_000. 0 disables. */
   streamFirstChunkMs?: number;
   /** Time allowed since a stream's LAST emission. Default 60_000. 0 disables. */

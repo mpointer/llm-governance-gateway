@@ -196,7 +196,42 @@ describe("embed cancellation", () => {
       embeddingModel: fake,
       signal: controller.signal,
     });
-    expect(observed).toBe(controller.signal);
+    // Not identity: the model receives a signal DERIVED from the caller's,
+    // composed with embed's own attempt bound (S3). It is live during the
+    // call and detached afterwards, so propagation is asserted mid-flight in
+    // the next test rather than here.
+    expect(observed).toBeInstanceOf(AbortSignal);
+    expect(observed).not.toBe(controller.signal);
+  });
+
+  it("a mid-flight caller abort reaches the embedding model", async () => {
+    const controller = new AbortController();
+    const fake = {
+      specificationVersion: "v2",
+      provider: "fake",
+      modelId: "text-embedding-3-small",
+      maxEmbeddingsPerCall: 100,
+      supportsParallelCalls: true,
+      async doEmbed({ abortSignal }: { abortSignal?: AbortSignal }) {
+        // Hangs until something aborts it.
+        return await new Promise((_res, rej) => {
+          abortSignal?.addEventListener("abort", () => rej(new Error("embed aborted")));
+        });
+      },
+    } as unknown as EmbeddingModel;
+
+    const gw = new Gateway({
+      usage: new MemoryUsageStore(),
+      caps: { userDailyCents: 0, anonDailyCents: 0, globalDailyCents: 0 },
+    });
+    const pending = gw.embed(["a"], {
+      model: "openai:text-embedding-3-small",
+      embeddingModel: fake,
+      signal: controller.signal,
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    controller.abort(new Error("caller went away"));
+    await expect(pending).rejects.toThrow(/aborted/);
   });
 
   it("an already-aborted signal stops the call", async () => {

@@ -120,3 +120,109 @@ describe("runText", () => {
     expect(res.provider).toBe("mock");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Failover alignment (S4). runText previously fell through to the next link on
+// NON-retryable errors whenever the chain had more than one link, so a caller
+// error like a 400 burned a call on the next provider too. It now advances
+// only on retryable errors and attempt timeouts, matching callWithChain.
+// ---------------------------------------------------------------------------
+
+describe("runText failover alignment", () => {
+  function failingLm(status: number | undefined, id: string): {
+    lm: LanguageModel;
+    calls: () => number;
+  } {
+    let calls = 0;
+    return {
+      calls: () => calls,
+      lm: {
+        specificationVersion: "v2",
+        provider: "fake",
+        modelId: id,
+        supportedUrls: {},
+        async doGenerate() {
+          calls++;
+          const err = new Error(`boom ${status ?? "none"}`) as Error & {
+            statusCode?: number;
+          };
+          if (status !== undefined) err.statusCode = status;
+          throw err;
+        },
+        async doStream() {
+          throw new Error("not used");
+        },
+      } as unknown as LanguageModel,
+    };
+  }
+
+  function okTextLm(text: string, id: string): { lm: LanguageModel; calls: () => number } {
+    let calls = 0;
+    return {
+      calls: () => calls,
+      lm: {
+        specificationVersion: "v2",
+        provider: "fake",
+        modelId: id,
+        supportedUrls: {},
+        async doGenerate() {
+          calls++;
+          return {
+            content: [{ type: "text", text }],
+            finishReason: "stop",
+            usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+            warnings: [],
+          };
+        },
+        async doStream() {
+          throw new Error("not used");
+        },
+      } as unknown as LanguageModel,
+    };
+  }
+
+  const mk = (links: { model: string; languageModel: LanguageModel }[]) =>
+    new Gateway({
+      usage: new MemoryUsageStore(),
+      promptDefaults: [{ slug: "t", body: "Say {{w}}", variables: ["w"] }],
+      modelConfig: {
+        getOverride: async () => null,
+        getChain: async () => links.map((l) => ({ provider: "anthropic" as const, ...l })),
+      },
+      caps: { userDailyCents: 0, anonDailyCents: 0, globalDailyCents: 0 },
+    });
+
+  const textOpts = {
+    slug: "t",
+    input: { w: "hi" },
+    variables: (i: { w: string }) => ({ w: i.w }),
+    cache: false as const,
+  };
+
+  it("a 400 no longer burns a call on the next link", async () => {
+    const first = failingLm(400, "bad");
+    const second = okTextLm("should not be reached", "next");
+    const gw = mk([
+      { model: "bad", languageModel: first.lm },
+      { model: "next", languageModel: second.lm },
+    ]);
+
+    await expect(gw.runText(textOpts)).rejects.toThrow(/boom 400/);
+    expect(first.calls()).toBe(1);
+    expect(second.calls()).toBe(0); // previously would have been 1
+  });
+
+  it("a 503 still advances to the next link", async () => {
+    const first = failingLm(503, "flaky");
+    const second = okTextLm("recovered", "next");
+    const gw = mk([
+      { model: "flaky", languageModel: first.lm },
+      { model: "next", languageModel: second.lm },
+    ]);
+
+    const res = await gw.runText(textOpts);
+    expect(res.text).toBe("recovered");
+    expect(res.model).toBe("next");
+    expect(second.calls()).toBe(1);
+  });
+});

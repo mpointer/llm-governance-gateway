@@ -281,7 +281,10 @@ describe("native Anthropic abort signal", () => {
     expect(observed?.aborted).toBe(false);
     controller.abort(new Error("caller went away"));
 
-    await expect(pending).rejects.toThrow(/aborted/);
+    // The CALLER's own reason surfaces, unwrapped — not the SDK's internal
+    // abort error and not one of ours. Standard AbortSignal semantics, and
+    // what lets a caller tell "I cancelled this" from "the provider timed out".
+    await expect(pending).rejects.toThrow("caller went away");
     expect(observed?.aborted).toBe(true);
   });
 

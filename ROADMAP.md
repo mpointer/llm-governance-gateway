@@ -55,7 +55,7 @@ development model, so it gets recorded alongside the plan:
 - [x] Docs: local-bootstrap publish guide — shipped: [docs/publishing.md](./docs/publishing.md), the first-publish bootstrap sequence with both traps written down
 - [ ] Pluggable guardrail hooks (pre/post) — TypeScript-native, no Python sidecar. Design: [docs/design/guardrail-hooks.md](./docs/design/guardrail-hooks.md); gated on real adopter demand (FMA crisis pipeline is the likely trigger)
 - [ ] Admin UI reference (prompt library, task routing, spend dashboards) — design: [docs/design/admin-ui-reference.md](./docs/design/admin-ui-reference.md); sequenced after the Show HN wave, informed by external-adopter issues
-- [ ] Timeouts and deadlines — configurable per-attempt timeout, whole-operation deadline, and the three unguarded call sites (native Anthropic, `streamObject`, `embedMany`). A stalled stream currently hangs forever AND never writes its usage row, which makes this a ledger-correctness item, not just latency. Design: [docs/design/timeouts-and-deadlines.md](./docs/design/timeouts-and-deadlines.md)
+- [x] Timeouts and deadlines — shipped S1–S4: chunk-relative stream stall clocks, `abortSignal` on every provider path, native-Anthropic parity, configurable `attemptMs`, whole-operation `deadlineMs` (unbounded by default) across links/retries/backoff, aborted attempts ledgered as zero-token rows, and `runText` failover aligned to `callWithChain`. Framed as ledger correctness, not latency: the usage row is written after generation, so anything that kills a call mid-flight loses the audit trail for money already spent. Design: [docs/design/timeouts-and-deadlines.md](./docs/design/timeouts-and-deadlines.md)
 
 ## Non-goals
 
