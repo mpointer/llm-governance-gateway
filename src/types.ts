@@ -27,6 +27,23 @@ export interface UsageEntry {
   /** Already passed through the configured encrypt hook (if any). */
   inputText?: string | null;
   outputText?: string | null;
+  /**
+   * Caller-defined attribution, passed to the store as-is.
+   *
+   * `userId`, `orgId`, `app`, `route` and `promptSlug` are the dimensions the
+   * gateway itself reasons about (caps, cache scoping, routing). An adopter's
+   * cost model routinely has one more that the gateway has no opinion on — a
+   * background-job run id, a request id, a campaign — and with no home for it,
+   * a store adapter has to drop it, losing attribution granularity the app had
+   * before it routed through the gateway.
+   *
+   * The gateway never reads this. It is not part of the cache key, never
+   * affects routing, and is not used for caps. It rides along to the ledger.
+   *
+   * Not encrypted by the `encrypt` hook, which covers `inputText`/`outputText`
+   * only — so keep PII out of it, or encrypt it yourself before passing.
+   */
+  metadata?: Record<string, unknown> | null;
   createdAt: Date;
 }
 

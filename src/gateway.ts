@@ -187,6 +187,10 @@ interface PromptConfig {
 }
 
 export interface RunStructuredOptions<I, O> {
+  /** Caller-defined attribution logged on every usage row this call writes
+   *  (including cache hits and the judge). The gateway never reads it — it is
+   *  not part of the cache key and never affects routing. */
+  metadata?: Record<string, unknown>;
   slug: string;
   schema: OutputSchema<O>;
   input: I;
@@ -313,6 +317,10 @@ async function* singleEmission<T>(value: T): AsyncGenerator<T> {
 }
 
 export interface RunTextOptions<I> {
+  /** Caller-defined attribution logged on every usage row this call writes
+   *  (including cache hits and the judge). The gateway never reads it — it is
+   *  not part of the cache key and never affects routing. */
+  metadata?: Record<string, unknown>;
   slug: string;
   input: I;
   variables: (input: I) => Record<string, string>;
@@ -523,7 +531,14 @@ export class Gateway {
    * add rows with no cost information to every dashboard.
    */
   private async logAbortedAttempt(
-    opts: { app?: string; userId?: string; route?: string; slug: string; orgId?: string },
+    opts: {
+      app?: string;
+      userId?: string;
+      route?: string;
+      slug: string;
+      orgId?: string;
+      metadata?: Record<string, unknown>;
+    },
     provider: string,
     model: string,
     traceId: string,
@@ -531,6 +546,7 @@ export class Gateway {
     prompt: string,
   ): Promise<void> {
     await this.logUsage({
+      metadata: opts.metadata,
       orgId: opts.orgId,
       app: opts.app,
       userId: opts.userId ?? null,
@@ -647,6 +663,7 @@ export class Gateway {
     }
 
     const usageLogId = await this.logUsage({
+      metadata: opts.metadata,
       orgId,
       app: opts.app,
       userId: opts.userId ?? null,
@@ -693,6 +710,7 @@ export class Gateway {
       const cached = await this.cache.get<string>(key);
       if (cached !== undefined) {
         const usageLogId = await this.logUsage({
+          metadata: opts.metadata,
           orgId,
           app: opts.app,
           userId: opts.userId ?? null,
@@ -954,6 +972,7 @@ export class Gateway {
 
     if (key) await this.cache.set(key, text, this.cacheTtlSeconds);
     const usageLogId = await this.logUsage({
+      metadata: opts.metadata,
       orgId,
       app: opts.app,
       userId: opts.userId ?? null,
@@ -1040,6 +1059,7 @@ export class Gateway {
       const cached = await this.cache.get<O>(key);
       if (cached !== undefined) {
         await this.logUsage({
+          metadata: opts.metadata,
           orgId,
           app: opts.app,
           userId: opts.userId ?? null,
@@ -1072,6 +1092,7 @@ export class Gateway {
     const finalize = async (object: O, inTok: number, outTok: number, provider: string, model: string, durationMs: number) => {
       if (key) await this.cache.set(key, object, this.cacheTtlSeconds);
       await this.logUsage({
+        metadata: opts.metadata,
         orgId,
         app: opts.app,
         userId: opts.userId ?? null,
@@ -1169,6 +1190,7 @@ export class Gateway {
     // unary paths (see logAbortedAttempt).
     const ledgerFailedLink = async (provider: string, model: string, ms: number) => {
       await this.logUsage({
+        metadata: opts.metadata,
         orgId,
         app: opts.app,
         userId: opts.userId ?? null,
@@ -1408,6 +1430,7 @@ export class Gateway {
 
     // Reservation row: committed money counts against caps immediately.
     await this.logUsage({
+      metadata: opts.metadata,
       orgId,
       app: opts.app,
       userId: opts.userId ?? null,
@@ -1430,6 +1453,7 @@ export class Gateway {
       itemCount: misses.length,
       cachedCount: cached.length,
       reservedCents: estimateCents,
+      metadata: opts.metadata,
       createdAt: new Date(),
       updatedAt: new Date(),
     });
@@ -1530,6 +1554,7 @@ export class Gateway {
     // Phase 2: side effects — per-item actuals, then reservation release.
     for (const row of usageRows) await this.logUsage(row);
     await this.logUsage({
+      metadata: job.metadata,
       userId: null,
       route: `batch:release:${job.slug}`,
       promptSlug: job.slug,
@@ -1940,6 +1965,7 @@ export class Gateway {
       const cached = await this.cache.get<O>(key);
       if (cached !== undefined) {
         const usageLogId = await this.logUsage({
+          metadata: opts.metadata,
           orgId,
           app: opts.app,
           userId: opts.userId ?? null,
@@ -1974,7 +2000,14 @@ export class Gateway {
     const { budget, attemptMs } = this.newBudget(opts);
     const ledgerAbortedAttempt = (p: string, m: string, ms: number) =>
       this.logAbortedAttempt(
-        { app: opts.app, userId: opts.userId, route: opts.route, slug: opts.slug, orgId },
+        {
+          app: opts.app,
+          userId: opts.userId,
+          route: opts.route,
+          slug: opts.slug,
+          orgId,
+          metadata: opts.metadata,
+        },
         p,
         m,
         traceId,
@@ -2218,6 +2251,7 @@ export class Gateway {
 
     // 7. Usage log
     const usageLogId = await this.logUsage({
+      metadata: opts.metadata,
       orgId,
       app: opts.app,
       userId: opts.userId ?? null,
@@ -2431,6 +2465,7 @@ export class Gateway {
 
     // Persist BEFORE gating: rejected responses must still leave an audit trail.
     await this.logUsage({
+      metadata: opts.metadata,
       app: opts.app,
       userId: opts.userId ?? null,
       route: `judge:${opts.route ?? opts.slug}`,
@@ -2539,6 +2574,7 @@ export class Gateway {
 
     const costCents = this.registry.estimateCostCents(model, inputTokens, outputTokens);
     const usageLogId = await this.logUsage({
+      metadata: opts.metadata,
       orgId,
       userId: opts.userId ?? null,
       route: "admin:prompt-test",
@@ -2570,6 +2606,10 @@ export class Gateway {
 }
 
 export interface PromptTestOptions {
+  /** Caller-defined attribution logged on every usage row this call writes
+   *  (including cache hits and the judge). The gateway never reads it — it is
+   *  not part of the cache key and never affects routing. */
+  metadata?: Record<string, unknown>;
   /** Library slug being tested (usage-log attribution only). */
   slug?: string;
   /** Template body to test — may include unsaved editor changes. */
