@@ -112,9 +112,38 @@ The gateway's admin surface is `src/http/app.ts`: `/health`, `/run`, `/models`, 
 
 ### 3.6 The default provider/model is still hardcoded — **Minor, but symbolically important**
 
+> **RESOLVED — PR #25.** Falling through to the library's last-resort
+> `anthropic`/`claude-sonnet-4-6` now emits a loud one-time warning naming the
+> assumption and the exact config/env keys that fix it, and
+> `ProviderConfig.requireExplicitDefault: true` upgrades that to a throw for
+> deployments that want the bias to be impossible rather than merely
+> discouraged. The fallback constants are named rather than inlined so they
+> read as "the thing to override", not a recommendation.
+>
+> **Deliberately NOT a hard failure by default.** The finding asks for "fail
+> loudly when unset", but a caller relying on today's silent fallback is
+> exactly the default-config caller the backward-compatibility constraint
+> protects, and the failure would surface at call time in production. The
+> finding's real complaint is that the bias is *silent*; a loud warning plus
+> an opt-in strict mode removes the silence without breaking anyone. Flagged
+> for the maintainer rather than decided quietly.
+
 `resolveDefault` falls back to `"anthropic"` / `"claude-sonnet-4-6"` (providers.ts:266-278), and `BUILTIN_TIERS` hardcodes per-provider fast/power models (providers.ts:82-88). These are *defaults*, overridable by config and env — so they are not the hardcoded-favoritism bug FMA closed. But they are the same *shape*: an out-of-box bias toward one provider that a careless adopter inherits silently. The deep-dive flagged that wrapping the gateway without neutralizing these defaults would re-open FMA's hardcoded-model bug class. For CareerPointers, which already defaults to Anthropic in its own `MODEL_TIERS`, this changes nothing; for the shared package, the defaults should be **explicitly required config, not silent fallbacks** — fail loudly when no default is configured rather than assume Anthropic.
 
 ### 3.7 Embeddings are governed but OpenAI-only — **Minor for CareerPointers, relevant to the shared package**
+
+> **RESOLVED — PR #25.** Voyage is now first-class alongside OpenAI
+> (`voyage:voyage-3-lite` etc., keyed by `apiKeys.voyage` or `VOYAGE_API_KEY`),
+> implemented through Voyage's OpenAI-compatible embeddings endpoint so it
+> adds no dependency — the same base-URL pattern the registry already uses for
+> its aggregator chat providers. Voyage models are priced so embedding spend
+> is not silently free. The BYO `embeddingModel` seam is unchanged and remains
+> the escape hatch for anything else.
+>
+> Fixed while implementing: `embed()` parsed model ids with the registry's
+> chat-provider parser, so `voyage:voyage-3` resolved to `anthropic` and
+> mis-attributed the call. Embedding-provider prefixes are now recognised
+> first.
 
 The gateway's `embed()` runs the full governance front door (rate limit, caps, ZDR, ledger — gateway.ts:371-376), which is correct and matches the principle that "embedding spend is real money." But `buildEmbeddingModel` is **OpenAI-only** (embeddings.ts:50-56): *"v1: OpenAI only — the one provider our adopters embed with today."* Voyage and custom endpoints are deferred to a BYO `embeddingModel` seam. This is the same provider-neutrality gap the deep-dive flagged in FMA (the last hardcoded `text-embedding-3-small`), now present in the shared plumbing. CareerPointers does not currently embed (no vector/RAG pipeline in `packages/ai`), so this is latent for CareerPointers — but the Scout-extraction track's knowledge layer (`scout-knowledge`) needs embeddings, and if CareerPointers adopts Scout's RAG, it inherits the OpenAI-only constraint unless the BYO seam is exercised.
 
@@ -128,14 +157,14 @@ FMA's `openai.ts` has **hedged** fallback (a parallel `Promise.any`-style race a
 
 | # | Gap | Type | CareerPointers impact |
 |---|---|---|---|
-| 3.1 | No multi-tenant org scoping | Architectural | **Latent** — single-tenant today; blocks the shared multi-app vision |
-| 3.2 | Streaming single-link, no mid-stream failover | Resilience | **Arrives with Scout** — PortfolioChat is non-streaming now |
-| 3.3 | Task-routed calls single-link | Resilience | **Significant** — CP has chains; gateway won't walk them per-task |
-| 3.4 | Judge not a first-class admin tier | Config | **New capability** — CP's judge is deterministic today |
-| 3.5 | No control plane (thin HTTP skeleton) | Boundary | **Hold the boundary** — CP should adopt FMA-style admin, gateway as SPI |
-| 3.6 | Hardcoded default provider/model | Config hygiene | **None** — CP already defaults to Anthropic; fix for the shared package |
-| 3.7 | Embeddings OpenAI-only | Provider neutrality | **Latent** — CP doesn't embed; Scout's RAG would inherit it |
-| 3.8 | No hedged fallback | Latency | **Minor** — CP has no hedging need; an FMA harvest candidate |
+| 3.1 | ~~No multi-tenant org scoping~~ **RESOLVED #21** | Architectural | **Latent** — single-tenant today; blocks the shared multi-app vision |
+| 3.2 | ~~Streaming single-link, no mid-stream failover~~ **RESOLVED #23** | Resilience | **Arrives with Scout** — PortfolioChat is non-streaming now |
+| 3.3 | ~~Task-routed calls single-link~~ **RESOLVED #22** | Resilience | **Significant** — CP has chains; gateway now walks them per-task |
+| 3.4 | ~~Judge not a first-class admin tier~~ **RESOLVED #24** | Config | **New capability** — CP's judge is deterministic today |
+| 3.5 | No control plane (thin HTTP skeleton) | Boundary | **BY DESIGN — boundary held.** No admin surface was added; the widened store interfaces are the SPI |
+| 3.6 | ~~Hardcoded default provider/model~~ **RESOLVED #25** | Config hygiene | **None** — CP already defaults to Anthropic; fix for the shared package |
+| 3.7 | ~~Embeddings OpenAI-only~~ **RESOLVED #25** | Provider neutrality | **Latent** — CP doesn't embed; Scout's RAG would inherit it |
+| 3.8 | No hedged fallback | Latency | **DEFERRED** — Minor; not in the ordered priorities of §5. See §9 |
 
 ---
 
@@ -197,3 +226,43 @@ PRs 19 & 20 are **exactly the timeout/deadline hardening this critique scoped ou
 4. Gateway PR 18 (in flight) — the timeout/deadline hardening this critique explicitly scopes out
 5. *The Pointer AI Component Architecture* (Manus AI, 2026-08-29) — the two-track strategy and the control-plane/data-plane split
 6. *FMA LLM Architecture Deep-Dive* (Manus AI, 2026-08-29) — the 10-objective assessment establishing the four-tier model and the hardcoded-model bug class
+
+---
+
+## 9. Resolution log (2026-08-29)
+
+The five ordered priorities from §5 are closed, one PR each, against the
+tree at `86dc2ba`. Suite: **153 → 209 tests**, `typecheck`/`build`/
+`pack --dry-run` clean after each.
+
+| Finding | PR | Note |
+|---|---|---|
+| 3.1 org scoping | #21 | Optional `orgId` through the SPI, caps, cache key, ledger |
+| 3.3 per-task chains | #22 | Ordered chain walked by `callWithChain`; ZDR now filters |
+| 3.2 streaming failover | #23 | Mid-stream failover + documented degradation contract |
+| 3.4 judge tier | #24 | Named tier + optional admin SPI pin |
+| 3.6 + 3.7 defaults/embeddings | #25 | Loud warning + opt-in strict; Voyage first-class |
+
+**3.5 (no control plane) was not "fixed" — the boundary was held.** No admin
+UI or prompt-management surface was added. Every new capability landed as an
+optional method or argument on the existing `UsageStore` / `PromptStore` /
+`ModelConfigStore` / `TaskOverrideStore` SPI, which is where the critique says
+the application's control plane belongs.
+
+**3.8 (hedged/parallel fallback) is deferred**, with justification: it is the
+one finding §5 leaves out of the ordered priorities, the critique rates it
+Minor for the proof point, and hedging is a cost-for-latency trade that
+deserves an explicit governance decision (it multiplies spend per call by the
+hedge width) rather than arriving as a side effect of a resilience pass. The
+sequential chain now walks per-task and mid-stream, which was the resilience
+gap that actually blocked adoption.
+
+**One deviation from the letter of a finding**, flagged rather than decided
+quietly: 3.6 asks the default to "fail loudly when unset". Shipped as a loud
+warning plus opt-in `requireExplicitDefault`, because a hard failure would
+break exactly the default-config callers the backward-compatibility
+constraint protects, and would surface at call time in production. See the
+note under 3.6.
+
+**One migration** for adopters using the bundled drizzle adapters: a nullable
+`org_id` column (#21). Adopters with their own `UsageStore` are unaffected.

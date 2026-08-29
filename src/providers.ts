@@ -106,9 +106,16 @@ const BUILTIN_PRICING: Record<string, ModelPricing> = {
 
 const DEFAULT_FALLBACK_PRICING: ModelPricing = { in: 0.3, out: 1.5 };
 
+// The library's last-resort default. Deliberately named rather than inlined,
+// so it is greppable as "the thing an adopter should override" instead of
+// looking like a recommendation. See resolveDefault.
+const FALLBACK_PROVIDER: ProviderId = "anthropic";
+const FALLBACK_MODEL = "claude-sonnet-4-6";
+
 export class ProviderRegistry {
   private readonly cfg: ProviderConfig;
   private readonly pricing: Record<string, ModelPricing>;
+  private warnedMissingDefault = false;
 
   constructor(cfg: ProviderConfig = {}) {
     this.cfg = cfg;
@@ -117,6 +124,14 @@ export class ProviderRegistry {
 
   apiKey(provider: ProviderId): string | undefined {
     return this.cfg.apiKeys?.[provider] ?? process.env[ENV_KEYS[provider]] ?? undefined;
+  }
+
+  /**
+   * Key for a provider that is not one of the built-in chat providers —
+   * today, the embedding-only ones. Config wins over env, same as apiKey().
+   */
+  namedApiKey(name: string, envVar: string): string | undefined {
+    return this.cfg.apiKeys?.[name] ?? process.env[envVar] ?? undefined;
   }
 
   /** Providers that currently have an API key resolvable (config or env). */
@@ -276,17 +291,52 @@ export class ProviderRegistry {
     return { provider, model, languageModel: lm ?? undefined };
   }
 
+  /**
+   * Resolve the fallback provider/model when nothing else routed the call.
+   *
+   * The built-in `anthropic`/`claude-sonnet-4-6` is a LAST RESORT, not a
+   * recommendation. Inheriting it silently is how an adopter ends up with an
+   * out-of-box bias toward one provider without ever deciding to — the bug
+   * class the hardcoded-model objective exists to close. So reaching it warns
+   * loudly (once), naming the assumption and how to configure it, and
+   * `ProviderConfig.requireExplicitDefault` upgrades that warning to a throw
+   * for deployments that want the bias to be impossible rather than merely
+   * discouraged.
+   *
+   * Config and env overrides are unchanged and silence the warning entirely.
+   */
   resolveDefault(override?: { provider?: ProviderId; model?: string }): ResolvedModel {
-    const provider =
+    const configuredProvider =
       override?.provider ??
       this.cfg.defaultProvider ??
-      (process.env.AI_DEFAULT_PROVIDER as ProviderId | undefined) ??
-      "anthropic";
-    const model =
-      override?.model ??
-      this.cfg.defaultModel ??
-      process.env.AI_DEFAULT_MODEL ??
-      "claude-sonnet-4-6";
+      (process.env.AI_DEFAULT_PROVIDER as ProviderId | undefined);
+    const configuredModel =
+      override?.model ?? this.cfg.defaultModel ?? process.env.AI_DEFAULT_MODEL;
+
+    if (configuredProvider === undefined || configuredModel === undefined) {
+      const missing = [
+        configuredProvider === undefined ? "provider" : null,
+        configuredModel === undefined ? "model" : null,
+      ]
+        .filter(Boolean)
+        .join(" and ");
+      const detail =
+        `No default ${missing} configured, falling back to ` +
+        `"${FALLBACK_PROVIDER}/${FALLBACK_MODEL}". Set ProviderConfig.defaultProvider/` +
+        `defaultModel (or AI_DEFAULT_PROVIDER/AI_DEFAULT_MODEL) so this deployment ` +
+        `picks its own model rather than inheriting the library's.`;
+      if (this.cfg.requireExplicitDefault) {
+        throw new Error(`[llm-gateway] ${detail}`);
+      }
+      // Once per registry: a per-call warning would be noise on a hot path.
+      if (!this.warnedMissingDefault) {
+        this.warnedMissingDefault = true;
+        console.warn(`[llm-gateway] ${detail}`);
+      }
+    }
+
+    const provider = configuredProvider ?? FALLBACK_PROVIDER;
+    const model = configuredModel ?? FALLBACK_MODEL;
     const lm = this.buildLanguageModel(provider, model);
     return { provider, model, languageModel: lm ?? undefined };
   }

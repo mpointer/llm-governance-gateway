@@ -60,6 +60,7 @@ export {
   DEFAULT_EMBEDDING_MODEL,
   DEFAULT_EMBEDDING_DIMENSIONS,
   EMBEDDING_PRICING,
+  EMBEDDING_PROVIDER_IDS,
   type EmbedOptions,
   type EmbedResult,
 } from "./embeddings.js";

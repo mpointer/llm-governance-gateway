@@ -47,22 +47,68 @@ export const DEFAULT_EMBEDDING_DIMENSIONS = 1536;
 export const EMBEDDING_PRICING: Record<string, { in: number; out: number }> = {
   "text-embedding-3-small": { in: 0.002, out: 0 },
   "text-embedding-3-large": { in: 0.013, out: 0 },
+  // Voyage list pricing, cents per 1K tokens.
+  "voyage-3-lite": { in: 0.002, out: 0 },
+  "voyage-3": { in: 0.006, out: 0 },
+  "voyage-3-large": { in: 0.018, out: 0 },
+  "voyage-code-3": { in: 0.006, out: 0 },
 };
+
+/**
+ * Embedding providers with first-class support. Voyage speaks the same
+ * OpenAI-compatible embeddings shape, so it needs a base URL rather than a
+ * new dependency — the pattern the registry already uses for its aggregator
+ * chat providers (openrouter/venice/together/huggingface).
+ */
+const EMBEDDING_PROVIDERS: Record<
+  string,
+  { baseURL?: string; envVar: string }
+> = {
+  openai: { envVar: "OPENAI_API_KEY" },
+  voyage: { baseURL: "https://api.voyageai.com/v1", envVar: "VOYAGE_API_KEY" },
+};
+
+/** Embedding provider ids the gateway can build without a BYO model. */
+export const EMBEDDING_PROVIDER_IDS = Object.keys(EMBEDDING_PROVIDERS);
+
+/**
+ * Parse an embedding model id.
+ *
+ * Embedding-only providers are NOT in the registry's chat PROVIDER_IDS, so
+ * `parseAny` would treat "voyage:voyage-3" as a bare Anthropic model id and
+ * silently mis-attribute the call. Recognise them here first, then defer to
+ * the registry for chat providers, endpoints and factories.
+ */
+export function parseEmbeddingModelId(
+  id: string,
+  fallback: (id: string) => { provider: string; model: string },
+): { provider: string; model: string } {
+  const idx = id.indexOf(":");
+  if (idx > 0) {
+    const prefix = id.slice(0, idx);
+    if (prefix in EMBEDDING_PROVIDERS) {
+      return { provider: prefix, model: id.slice(idx + 1) };
+    }
+  }
+  return fallback(id);
+}
 
 export function buildEmbeddingModel(
   registry: ProviderRegistry,
   provider: string,
   model: string,
 ): EmbeddingModel | null {
-  // v1: OpenAI only — the one provider our adopters embed with today.
-  // Voyage (LocalNewsBuddy harvest) and custom endpoints via the
-  // `embeddingModel` BYO seam until they earn first-class support.
-  if (provider === "openai") {
-    const key = registry.apiKey("openai");
-    if (!key) return null;
-    return createOpenAI({ apiKey: key }).embedding(model);
-  }
-  return null;
+  // First-class: OpenAI and Voyage. Anything else — a self-hosted encoder, a
+  // provider we do not model — still goes through the `embeddingModel` BYO
+  // seam, which stays the escape hatch rather than the only option.
+  const cfg = EMBEDDING_PROVIDERS[provider];
+  if (!cfg) return null;
+  const key = registry.namedApiKey(provider, cfg.envVar);
+  if (!key) return null;
+  return createOpenAI({
+    apiKey: key,
+    ...(cfg.baseURL ? { baseURL: cfg.baseURL } : {}),
+  }).embedding(model);
 }
 
 /**
