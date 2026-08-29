@@ -805,14 +805,29 @@ export class Gateway {
       if (adminOverride) {
         links = [this.registry.resolveDefault(adminOverride)];
       } else if (opts.task && this.tasks) {
-        const t = await this.tasks.modelForTask(opts.task, orgId);
-        links = [
-          {
-            provider: t.provider,
-            model: t.model,
-            languageModel: this.registry.buildAny(t.provider, t.model) ?? undefined,
-          },
-        ];
+        // Per-task failover chain. A single-model task yields one link, which
+        // is the pre-chain behavior; a task configured with an ordered chain
+        // is walked by the same loop below that the main chain uses.
+        const taskChain = await this.tasks.chainForTask(opts.task, orgId);
+        links = taskChain.map((t) => ({
+          provider: t.provider,
+          model: t.model,
+          languageModel: this.registry.buildAny(t.provider, t.model) ?? undefined,
+        }));
+        // ZDR filtering now applies to task chains too. Previously task
+        // routing collapsed to one link BEFORE this filter ran, so an
+        // ineligible task model errored instead of skipping to an eligible one.
+        if (requireZdr) {
+          const eligible = links.filter((l) => this.registry.isZdr(l.provider, l.model));
+          if (links.length > 0 && eligible.length === 0) {
+            throw new ZdrViolationError(
+              links[0]!.provider,
+              links[0]!.model,
+              `task "${opts.task}" chain`,
+            );
+          }
+          links = eligible;
+        }
       } else {
         const chainCfg = (await this.modelConfig?.getChain(orgId)) ?? [];
         const full = this.registry.buildChain(chainCfg, opts.tier);
@@ -1897,39 +1912,60 @@ export class Gateway {
             `runStructured received task "${opts.task}" but GatewayConfig.tasks is not configured.`,
           );
         }
-        const resolved = await this.tasks.modelForTask(opts.task, orgId);
-        assertZdr(resolved.provider, resolved.model, `task "${opts.task}"`);
-        const lm = this.registry.buildAny(resolved.provider, resolved.model);
-        const nativeApplies =
-          opts.anthropic && resolved.provider === "anthropic" && this.anthropicCfg;
-        if (!lm && !nativeApplies) {
+        // Per-task failover chain, walked by the same callWithChain loop the
+        // main chain uses — so a task gets repair retries, transient retries,
+        // schema-invalid fall-through and timeout ledgering identically.
+        const taskChain = await this.tasks.chainForTask(opts.task, orgId);
+        let taskLinks: ChainLink[] = taskChain.map((t) => ({
+          provider: t.provider,
+          model: t.model,
+          languageModel: this.registry.buildAny(t.provider, t.model) ?? undefined,
+        }));
+
+        // ZDR now filters the chain rather than hard-failing the first link:
+        // task routing used to collapse to one link BEFORE this ran, so an
+        // ineligible task model errored instead of skipping to an eligible one.
+        if (requireZdr) {
+          const eligible = taskLinks.filter((l) => this.registry.isZdr(l.provider, l.model));
+          if (eligible.length === 0) {
+            throw new ZdrViolationError(
+              taskLinks[0]!.provider,
+              taskLinks[0]!.model,
+              `task "${opts.task}" chain`,
+            );
+          }
+          taskLinks = eligible;
+        }
+
+        const usable = taskLinks.filter(
+          (l) =>
+            l.languageModel ||
+            (opts.anthropic && l.provider === "anthropic" && this.anthropicCfg),
+        );
+        if (usable.length === 0) {
           throw new Error(
-            `Task "${opts.task}" routes to "${resolved.provider}/${resolved.model}" but that provider has no API key.`,
+            `Task "${opts.task}" routes to "${taskLinks[0]!.provider}/${taskLinks[0]!.model}" but that provider has no API key.`,
           );
         }
-        const start = Date.now();
-        const result = await ledgerOnAttemptTimeout(
-          resolved.provider,
-          resolved.model,
-          () =>
-            this.execLink(
-              { provider: resolved.provider, model: resolved.model, languageModel: lm ?? undefined },
-              opts.schema,
-              prompt,
-              opts.system,
-              temperature,
-              opts.anthropic,
-              budget,
-              attemptMs,
-            ),
+
+        const gen = await this.callWithChain(
+          usable,
+          opts.schema,
+          prompt,
+          temperature,
+          opts.system,
+          opts.anthropic,
+          budget,
+          attemptMs,
+          ledgerAbortedAttempt,
         );
-        object = result.object;
-        inputTokens = result.usage.inputTokens;
-        outputTokens = result.usage.outputTokens;
-        provider = resolved.provider;
-        model = resolved.model;
-        durationMs = Date.now() - start;
-        extras = result.extras;
+        object = gen.object;
+        inputTokens = gen.inputTokens;
+        outputTokens = gen.outputTokens;
+        provider = gen.provider;
+        model = gen.model;
+        durationMs = gen.durationMs;
+        extras = gen.extras;
       } else if (adminOverride) {
         const resolved = this.registry.resolveDefault({
           provider: adminOverride.provider,

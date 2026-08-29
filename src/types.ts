@@ -259,10 +259,12 @@ export interface SpendCapConfig {
  */
 export interface TaskOverrideStore {
   /**
-   * task name → model id ("claude-sonnet-4-6", "openai:gpt-4.1", ...).
+   * task name → model id ("claude-sonnet-4-6", "openai:gpt-4.1", ...), or an
+   * ordered chain. A store returning the single-id form is unchanged and
+   * still assignable.
    * `orgId` scopes the overrides to one tenant; undefined = global.
    */
-  getOverrides(orgId?: string | null): Promise<Record<string, string>>;
+  getOverrides(orgId?: string | null): Promise<Record<string, TaskModelSpec>>;
 }
 
 /**
@@ -270,9 +272,21 @@ export interface TaskOverrideStore {
  * assign each a default model in code, and optionally let an admin store
  * override models per task at runtime.
  */
+/**
+ * A task's model: a single id, or an ordered failover chain the gateway walks
+ * on retryable errors and attempt timeouts.
+ *
+ * The array form IS the role chain FMA and CareerPointers already model as
+ * primary/fallback/backup2 — the roles are positions, so the gateway needs no
+ * separate role vocabulary to express them:
+ *   ["claude-sonnet-4-6", "openai:gpt-4.1", "google:gemini-2.5-pro"]
+ *      primary             fallback          backup2
+ */
+export type TaskModelSpec = string | string[];
+
 export interface TaskRoutingConfig {
-  /** task name → default model id. Bare ids are Anthropic; prefix others ("openai:", "google:", "openrouter:", "venice:"). */
-  defaults: Record<string, string>;
+  /** task name → default model id, or an ordered chain. Bare ids are Anthropic; prefix others ("openai:", "google:", "openrouter:", "venice:"). */
+  defaults: Record<string, TaskModelSpec>;
   /** Human labels for admin UIs. */
   labels?: Record<string, string>;
   /** Per-task governance constraints (e.g. { intake: { requireZdr: true } }). */
