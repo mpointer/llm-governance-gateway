@@ -59,6 +59,19 @@ FMA's chat engine has **streaming failover with degradation** — on a mid-strea
 
 ### 3.3 Task-routed calls are single-link — **Significant, and PR 18's own admission**
 
+> **RESOLVED — PR #22.** A task's model may now be a single id (unchanged) or
+> an ordered chain (`["claude-sonnet-4-6", "openai:gpt-4.1", "google:..."]`),
+> walked by the same `callWithChain` loop `runStructured`'s main chain uses —
+> so a task gets repair retries, transient retries, schema-invalid
+> fall-through and timeout ledgering identically. `primary`/`fallback`/
+> `backup2` are positions in that array, so the gateway needs no separate
+> role vocabulary to express FMA's and CareerPointers' role chains. The
+> override store may return a chain too. ZDR now FILTERS the task chain
+> rather than hard-failing its first link — previously task routing collapsed
+> to one link before the ZDR filter ran. `modelForTask` still returns the head
+> of the chain, so adopters comparing the gateway's resolution to their own
+> are unaffected.
+
 `runText` resolves a task to **one link** (gateway.ts:581-590): admin override → task model → `chain[0]` → default. Even when a chain is configured, task routing collapses to a single link before the ZDR filter runs. PR 18 flags this as out of scope. The fix the architecture needs is **per-task fallback chains** — a task names an ordered set of models, and the gateway walks it — with FMA's `primary`/`fallback`/`backup2` chain as the walked chain. CareerPointers *does* have a three-role chain (`ROLE_ORDER: primary/fallback/backup2` in its `model.ts`), so it has the chain concept; what it lacks is the gateway walking that chain *per task*. This is a convergence point: the gateway's task routing and FMA's/CareerPointers' role chains should merge into one per-task chain model.
 
 ### 3.4 The judge is not a first-class, admin-configurable tier — **Significant**

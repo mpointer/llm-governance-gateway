@@ -4,7 +4,7 @@
 // Code defaults are the fallback; the store — when present — wins.
 
 import { parseModelId } from "./providers.js";
-import type { ProviderId, TaskRoutingConfig } from "./types.js";
+import type { ProviderId, TaskModelSpec, TaskRoutingConfig } from "./types.js";
 
 const DEFAULT_OVERRIDE_TTL_MS = 30_000;
 
@@ -30,7 +30,7 @@ export class TaskRouter {
    */
   private readonly overridesByOrg = new Map<
     string,
-    { overrides: Record<string, string>; expiresAt: number }
+    { overrides: Record<string, TaskModelSpec>; expiresAt: number }
   >();
 
   constructor(cfg: TaskRoutingConfig, parse?: ModelParser) {
@@ -60,13 +60,13 @@ export class TaskRouter {
     else this.overridesByOrg.delete(orgId ?? "");
   }
 
-  private async loadOverrides(orgId?: string | null): Promise<Record<string, string>> {
+  private async loadOverrides(orgId?: string | null): Promise<Record<string, TaskModelSpec>> {
     if (!this.cfg.store) return {};
     const bucket = orgId ?? "";
     const now = Date.now();
     const cached = this.overridesByOrg.get(bucket);
     if (cached && cached.expiresAt > now) return cached.overrides;
-    let overrides: Record<string, string>;
+    let overrides: Record<string, TaskModelSpec>;
     try {
       overrides = await this.cfg.store.getOverrides(orgId);
     } catch (err) {
@@ -90,19 +90,43 @@ export class TaskRouter {
    * some global default.
    */
   async modelForTask(task: string, orgId?: string | null): Promise<ResolvedTaskModel> {
+    // The head of the task's chain. Kept as the single-model accessor so
+    // callers that only want "which model would this task use?" — including
+    // adopters comparing the gateway's resolution against their own — are
+    // unaffected by chains existing.
+    const chain = await this.chainForTask(task, orgId);
+    return chain[0]!;
+  }
+
+  /**
+   * Resolve a task to its ordered failover chain: store override → code
+   * default. A single-id configuration yields a one-link chain, which is
+   * exactly the pre-chain behavior.
+   *
+   * Throws on an unknown task — a typo'd task name must fail loudly, not
+   * silently route to some global default — and on a task configured with an
+   * empty chain, which is a config error rather than an empty result.
+   */
+  async chainForTask(task: string, orgId?: string | null): Promise<ResolvedTaskModel[]> {
     const overrides = await this.loadOverrides(orgId);
     const overridden = overrides[task];
-    if (overridden) {
-      const { provider, model } = this.parse(overridden);
-      return { task, provider, model, source: "override" };
-    }
-    const def = this.cfg.defaults[task];
-    if (!def) {
+    const spec = overridden ?? this.cfg.defaults[task];
+    const source: ResolvedTaskModel["source"] = overridden ? "override" : "default";
+    if (spec === undefined) {
       throw new Error(
         `Unknown AI task "${task}". Known tasks: ${this.tasks().join(", ")}`,
       );
     }
-    const { provider, model } = this.parse(def);
-    return { task, provider, model, source: "default" };
+    const ids = (Array.isArray(spec) ? spec : [spec]).filter((id) => !!id);
+    if (ids.length === 0) {
+      throw new Error(
+        `AI task "${task}" resolves to an empty model chain (${source}). ` +
+          `Configure at least one model id.`,
+      );
+    }
+    return ids.map((id) => {
+      const { provider, model } = this.parse(id);
+      return { task, provider, model, source };
+    });
   }
 }
