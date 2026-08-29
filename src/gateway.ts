@@ -12,7 +12,7 @@ import {
   StreamStallError,
   ZdrViolationError,
 } from "./errors.js";
-import { guardStream } from "./stream-guard.js";
+import { createConflatedCell, guardStream } from "./stream-guard.js";
 import { AttemptBudget, sleep } from "./deadline.js";
 import { ProviderRegistry, parseModelId, type ChainLink } from "./providers.js";
 import {
@@ -274,6 +274,22 @@ export interface RunStructuredResult<O> {
 
 type MockResponder = (input: unknown) => unknown;
 
+/** One link abandoned mid-stream, in the order it was abandoned. */
+export interface StreamFailover {
+  provider: string;
+  model: string;
+  /** Why the link was abandoned. */
+  reason: "stall" | "retryable";
+  /**
+   * True when this link had already emitted partials before it failed.
+   * The degradation contract that matters to a UI: the next link restarts
+   * the object, so a consumer rendering partials will see the object rebuild
+   * rather than continue. Each partial is a complete snapshot, so no
+   * information is lost — but the sequence is not monotonic across a failover.
+   */
+  hadPartialOutput: boolean;
+}
+
 export interface StreamStructuredResult<O> {
   /** true = served from cache; the stream emits the full object once. */
   cached: boolean;
@@ -282,6 +298,12 @@ export interface StreamStructuredResult<O> {
   partialObjectStream: AsyncIterable<Partial<O>>;
   /** Resolves AFTER usage logging and cache write complete. */
   object: Promise<O>;
+  /**
+   * Links abandoned before the one that produced this stream, in order.
+   * Populated as failover happens, so read it after `object` settles.
+   * Empty on the cache and mock paths.
+   */
+  failovers: StreamFailover[];
 }
 
 async function* singleEmission<T>(value: T): AsyncGenerator<T> {
@@ -963,9 +985,21 @@ export class Gateway {
 
   // ===========================================================================
   // Streaming — same governance front door, streamObject body.
-  // v1 constraints (documented): no mid-stream failover (the first resolvable
-  // link is used; a mid-stream provider error surfaces to the consumer), no
-  // repair retry, no judge, no native-Anthropic options.
+  //
+  // Failover: on a stall or a retryable mid-stream error the driver advances
+  // to the next eligible link and continues. DEGRADATION CONTRACT:
+  //   - Each link restarts the object, so a consumer rendering partials sees
+  //     the object rebuild rather than continue. Every partial is a complete
+  //     snapshot, so no information is lost, but the sequence is NOT monotonic
+  //     across a failover. `result.failovers[].hadPartialOutput` says whether
+  //     a given failover was visible to the consumer that way.
+  //   - When the chain is exhausted, the LAST link's error surfaces on both
+  //     the iterator and the object promise.
+  //   - Every attempted link leaves a zero-token ledger row before the driver
+  //     moves on, so an abandoned attempt is still audited.
+  //   - A caller abort and a non-retryable error are terminal: no failover.
+  // Remaining v1 constraints: no repair retry, no judge, no native-Anthropic
+  // options on the streaming path.
   // ===========================================================================
 
   async streamStructured<I, O>(
@@ -1018,6 +1052,7 @@ export class Gateway {
           traceId,
           partialObjectStream: singleEmission(cached as Partial<O>),
           object: Promise.resolve(cached),
+          failovers: [],
         };
       }
     }
@@ -1061,130 +1096,199 @@ export class Gateway {
         traceId,
         partialObjectStream: singleEmission(object as Partial<O>),
         object: Promise.resolve(object),
+        failovers: [],
       };
     }
 
-    // Single-link resolution: adminOverride > task > chain[0] > default.
+    // Resolution: adminOverride (single, hard pin) > task chain > config
+    // chain > default. Everything but the admin pin can be multi-link.
     const adminOverride = (await this.modelConfig?.getOverride(orgId)) ?? null;
-    let resolved: { provider: string; model: string; languageModel?: LanguageModel };
+    let links: { provider: string; model: string; languageModel?: LanguageModel }[];
     if (adminOverride) {
-      resolved = this.registry.resolveDefault(adminOverride);
+      links = [this.registry.resolveDefault(adminOverride)];
     } else if (opts.task && this.tasks) {
-      const t = await this.tasks.modelForTask(opts.task, orgId);
-      resolved = {
+      const taskChain = await this.tasks.chainForTask(opts.task, orgId);
+      links = taskChain.map((t) => ({
         provider: t.provider,
         model: t.model,
         languageModel: this.registry.buildAny(t.provider, t.model) ?? undefined,
-      };
+      }));
     } else {
       const chainCfg = (await this.modelConfig?.getChain(orgId)) ?? [];
-      const chain = this.registry.buildChain(chainCfg, opts.tier);
-      resolved = chain[0] ?? this.registry.resolveDefault();
+      const built = this.registry.buildChain(chainCfg, opts.tier);
+      links = built.length > 0 ? built : [this.registry.resolveDefault()];
     }
+
     const streamRequireZdr =
       opts.requireZdr === true ||
       (opts.task !== undefined && (this.tasks?.requiresZdr(opts.task) ?? false));
-    if (streamRequireZdr && !this.registry.isZdr(resolved.provider, resolved.model)) {
-      throw new ZdrViolationError(resolved.provider, resolved.model, "streaming link");
+    if (streamRequireZdr) {
+      const eligible = links.filter((l) => this.registry.isZdr(l.provider, l.model));
+      if (eligible.length === 0) {
+        throw new ZdrViolationError(
+          links[0]!.provider,
+          links[0]!.model,
+          "streaming chain",
+        );
+      }
+      links = eligible;
     }
-    if (!resolved.languageModel) {
-      throw new Error(`No API key for provider "${resolved.provider}".`);
+    links = links.filter((l) => l.languageModel);
+    if (links.length === 0) {
+      throw new Error("No API key for any streaming link.");
     }
 
     const start = Date.now();
+    const firstChunkMs =
+      opts.streamFirstChunkMs ??
+      this.timeouts?.streamFirstChunkMs ??
+      DEFAULT_STREAM_FIRST_CHUNK_MS;
+    const stallMs =
+      opts.streamStallMs ?? this.timeouts?.streamStallMs ?? DEFAULT_STREAM_STALL_MS;
 
-    // Chunk-relative clocks. The controller is created first so the same
-    // signal reaches streamObject before the source stream exists.
-    const controller = new AbortController();
-    const stream = streamObject({
-      model: resolved.languageModel,
-      schema: opts.schema,
-      prompt,
-      abortSignal: controller.signal,
-      ...(opts.system ? { system: opts.system } : {}),
-      ...(temperature !== undefined ? { temperature } : {}),
+    // The consumer-facing channel. The driver below owns iteration for the
+    // same reason guardStream does: streamObject runs eagerly, so a consumer
+    // that only awaits `object` would otherwise never advance the loop.
+    const out = createConflatedCell<Partial<O>>();
+    let resolveObject!: (o: O) => void;
+    let rejectObject!: (e: unknown) => void;
+    const objectPromise = new Promise<O>((res, rej) => {
+      resolveObject = res;
+      rejectObject = rej;
     });
+    const failovers: StreamFailover[] = [];
 
-    const guard = guardStream<Partial<O>>(
-      stream.partialObjectStream as AsyncIterable<Partial<O>>,
-      {
-        controller,
-        // Per call > config > default. `0` is a real value (disables the
-        // clock), so `??` is correct here and `||` would not be.
-        firstChunkMs:
-          opts.streamFirstChunkMs ??
-          this.timeouts?.streamFirstChunkMs ??
-          DEFAULT_STREAM_FIRST_CHUNK_MS,
-        stallMs:
-          opts.streamStallMs ?? this.timeouts?.streamStallMs ?? DEFAULT_STREAM_STALL_MS,
-        ...(opts.signal ? { callerSignal: opts.signal } : {}),
-        onTrip: (phase, waitedMs) =>
-          new StreamStallError(phase, waitedMs, resolved.provider, resolved.model),
-        onCallerAbort: (reason) =>
-          reason instanceof Error ? reason : new Error("Stream aborted by caller"),
-      },
-    );
+    // Ledger-first: an attempt that produced nothing usable still spent money,
+    // so it leaves a zero-token row before we move on. Same rule as the
+    // unary paths (see logAbortedAttempt).
+    const ledgerFailedLink = async (provider: string, model: string, ms: number) => {
+      await this.logUsage({
+        orgId,
+        app: opts.app,
+        userId: opts.userId ?? null,
+        route: opts.route ?? null,
+        promptSlug: opts.slug,
+        provider,
+        model,
+        inputTokens: 0,
+        outputTokens: 0,
+        estimatedCostCents: 0,
+        cacheHit: false,
+        traceId,
+        durationMs: ms,
+        inputText: prompt,
+        outputText: null,
+      });
+    };
 
-    // A stalled stream makes these reject; the race below surfaces the stall
-    // error instead, so mark them handled to avoid an unhandled rejection.
-    void stream.object.catch(() => {});
-    void stream.usage.catch(() => {});
-
-    const objectPromise = (async () => {
-      try {
-        const completed = await Promise.race([
-          (async () => {
-            const object = await stream.object; // schema-validated by the AI SDK
-            const usage = await stream.usage;
-            return { object, usage };
-          })(),
-          guard.tripped.then((err) => {
-            throw err;
-          }),
-        ]);
-        await finalize(
-          completed.object,
-          completed.usage.inputTokens ?? 0,
-          completed.usage.outputTokens ?? 0,
-          resolved.provider,
-          resolved.model,
-          Date.now() - start,
+    void (async () => {
+      let lastErr: unknown;
+      for (let i = 0; i < links.length; i++) {
+        const link = links[i]!;
+        const linkStart = Date.now();
+        const controller = new AbortController();
+        const stream = streamObject({
+          model: link.languageModel!,
+          schema: opts.schema,
+          prompt,
+          abortSignal: controller.signal,
+          ...(opts.system ? { system: opts.system } : {}),
+          ...(temperature !== undefined ? { temperature } : {}),
+        });
+        const guard = guardStream<Partial<O>>(
+          stream.partialObjectStream as AsyncIterable<Partial<O>>,
+          {
+            controller,
+            firstChunkMs,
+            stallMs,
+            ...(opts.signal ? { callerSignal: opts.signal } : {}),
+            onTrip: (phase, waitedMs) =>
+              new StreamStallError(phase, waitedMs, link.provider, link.model),
+            onCallerAbort: (reason) =>
+              reason instanceof Error ? reason : new Error("Stream aborted by caller"),
+          },
         );
-        return completed.object;
-      } catch (err) {
-        // The whole point of the stall clock: a provider call that spent
-        // money must leave an audit trail even when it never finished.
-        // Zero-token row — nothing usable came back, but the attempt is real.
-        if (err instanceof StreamStallError) {
-          await this.logUsage({
-            orgId,
-            app: opts.app,
-            userId: opts.userId ?? null,
-            route: opts.route ?? null,
-            promptSlug: opts.slug,
-            provider: resolved.provider,
-            model: resolved.model,
-            inputTokens: 0,
-            outputTokens: 0,
-            estimatedCostCents: 0,
-            cacheHit: false,
-            traceId,
-            durationMs: Date.now() - start,
-            inputText: prompt,
-            outputText: null,
-          });
+        // These reject when a link is abandoned; the race below surfaces the
+        // real reason, so mark them handled to avoid unhandled rejections.
+        void stream.object.catch(() => {});
+        void stream.usage.catch(() => {});
+
+        let emittedThisLink = false;
+        try {
+          const completed = await Promise.race([
+            (async () => {
+              for await (const partial of guard.stream) {
+                emittedThisLink = true;
+                out.publish(partial);
+              }
+              const object = await stream.object; // schema-validated by the SDK
+              const usage = await stream.usage;
+              return { object, usage };
+            })(),
+            guard.tripped.then((err) => {
+              throw err;
+            }),
+          ]);
+          await finalize(
+            completed.object,
+            completed.usage.inputTokens ?? 0,
+            completed.usage.outputTokens ?? 0,
+            link.provider,
+            link.model,
+            Date.now() - start,
+          );
+          out.close();
+          resolveObject(completed.object);
+          return;
+        } catch (err) {
+          lastErr = err;
+          await ledgerFailedLink(link.provider, link.model, Date.now() - linkStart);
+
+          // A caller abort is terminal: they asked to stop, not to retry
+          // somewhere else.
+          const callerAborted = opts.signal?.aborted === true;
+          const advanceable =
+            !callerAborted && (err instanceof StreamStallError || isRetryable(err));
+          const hasNext = i < links.length - 1;
+          if (advanceable && hasNext) {
+            const failover: StreamFailover = {
+              provider: link.provider,
+              model: link.model,
+              reason: err instanceof StreamStallError ? "stall" : "retryable",
+              hadPartialOutput: emittedThisLink,
+            };
+            failovers.push(failover);
+            this.emitObs("onStreamFailover", this.obs?.onStreamFailover, {
+              traceId,
+              ...failover,
+            });
+            console.warn(
+              `[llm-gateway] stream "${link.provider}/${link.model}" failed (${failover.reason}), failing over to next link`,
+            );
+            continue;
+          }
+          break;
+        } finally {
+          guard.dispose();
         }
-        throw err;
-      } finally {
-        guard.dispose();
       }
+      // Chain exhausted (or a terminal error). Degradation contract: the
+      // consumer sees the LAST link's error on both the iterator and the
+      // object promise, and every attempted link already has a ledger row.
+      const err =
+        lastErr instanceof Error
+          ? lastErr
+          : new Error("streamStructured: no link produced a result");
+      out.fail(err);
+      rejectObject(err);
     })();
 
     return {
       cached: false,
       traceId,
-      partialObjectStream: guard.stream,
+      partialObjectStream: out.stream,
       object: objectPromise,
+      failovers,
     };
   }
 

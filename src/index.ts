@@ -6,6 +6,7 @@ export {
   type RunTextOptions,
   type RunTextResult,
   type StreamStructuredResult,
+  type StreamFailover,
   type PromptTestOptions,
   type PromptTestResult,
 } from "./gateway.js";

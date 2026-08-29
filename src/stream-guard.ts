@@ -58,6 +58,70 @@ export interface StreamGuardOptions {
 }
 
 /**
+ * A single-slot channel: the writer overwrites the pending value rather than
+ * queueing, so a consumer slower than the producer sees the NEWEST value and
+ * memory stays O(1). Safe for partial-object streams specifically because
+ * every partial is a complete snapshot of the object so far — a dropped
+ * intermediate loses a frame, never information.
+ */
+export interface ConflatedCell<T> {
+  publish(value: T): void;
+  close(): void;
+  /** First failure wins; later ones (e.g. the abort that a stall causes) are
+   *  ignored so the consumer sees the root cause. */
+  fail(err: Error): void;
+  isClosed(): boolean;
+  readonly stream: AsyncIterable<T>;
+}
+
+export function createConflatedCell<T>(): ConflatedCell<T> {
+  let latest: { value: T } | null = null;
+  let closed = false;
+  let failure: Error | null = null;
+  let wake: (() => void) | null = null;
+
+  const nudge = () => {
+    const w = wake;
+    wake = null;
+    w?.();
+  };
+
+  async function* consume(): AsyncGenerator<T> {
+    for (;;) {
+      if (latest) {
+        const { value } = latest;
+        latest = null;
+        yield value;
+        continue;
+      }
+      if (failure) throw failure;
+      if (closed) return;
+      await new Promise<void>((r) => {
+        wake = r;
+      });
+    }
+  }
+
+  return {
+    publish(value) {
+      latest = { value };
+      nudge();
+    },
+    close() {
+      closed = true;
+      nudge();
+    },
+    fail(err) {
+      if (!failure) failure = err;
+      closed = true;
+      nudge();
+    },
+    isClosed: () => closed,
+    stream: { [Symbol.asyncIterator]: () => consume() },
+  };
+}
+
+/**
  * Wraps `source` with first-chunk and inter-chunk stall clocks.
  *
  * Emissions are conflated: if the consumer is slower than the provider, it
@@ -72,32 +136,8 @@ export function guardStream<T>(
 ): StreamGuard<T> {
   const { controller, firstChunkMs, stallMs, callerSignal, onTrip, onCallerAbort } = opts;
 
-  // --- conflated cell -------------------------------------------------------
-  let latest: { value: T } | null = null;
-  let closed = false;
-  let failure: Error | null = null;
-  let wake: (() => void) | null = null;
-
-  const nudge = () => {
-    const w = wake;
-    wake = null;
-    w?.();
-  };
-  const publish = (value: T) => {
-    latest = { value };
-    nudge();
-  };
-  const close = () => {
-    closed = true;
-    nudge();
-  };
-  const fail = (err: Error) => {
-    // First failure wins: a clock trip aborts the request, which then makes
-    // the source throw too. The consumer should see the stall, not the abort.
-    if (!failure) failure = err;
-    closed = true;
-    nudge();
-  };
+  const cell = createConflatedCell<T>();
+  const { publish, close, fail } = cell;
 
   // --- clocks ---------------------------------------------------------------
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -117,7 +157,7 @@ export function guardStream<T>(
 
   const arm = (phase: StallPhase, ms: number) => {
     clearTimer();
-    if (disposed || closed || ms <= 0) return;
+    if (disposed || cell.isClosed() || ms <= 0) return;
     armedAt = Date.now();
     timer = setTimeout(() => {
       const waited = Date.now() - armedAt;
@@ -161,24 +201,8 @@ export function guardStream<T>(
     }
   })();
 
-  async function* consume(): AsyncGenerator<T> {
-    for (;;) {
-      if (latest) {
-        const { value } = latest;
-        latest = null;
-        yield value;
-        continue;
-      }
-      if (failure) throw failure;
-      if (closed) return;
-      await new Promise<void>((r) => {
-        wake = r;
-      });
-    }
-  }
-
   return {
-    stream: { [Symbol.asyncIterator]: () => consume() },
+    stream: cell.stream,
     tripped,
     dispose() {
       disposed = true;

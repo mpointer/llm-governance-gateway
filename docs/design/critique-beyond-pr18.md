@@ -53,6 +53,20 @@ FMA's entire LLM control plane is **org-scoped** — `llm_settings`, prompt over
 
 ### 3.2 Streaming is single-link with no mid-stream failover — **Significant**
 
+> **RESOLVED — PR #23.** `streamStructured` now resolves a full chain
+> (admin pin → task chain → config chain → default), ZDR-filters it, and on a
+> stall or retryable mid-stream error advances to the next eligible link and
+> continues. The PR 19 stall clocks are preserved per link; a stall is now a
+> failover trigger rather than terminal. **Degradation contract**: each link
+> restarts the object, so partials are not monotonic across a failover
+> (`failovers[].hadPartialOutput` flags when that was visible); an exhausted
+> chain surfaces the last link's error on both the iterator and the object
+> promise; every attempted link leaves a zero-token ledger row before the
+> driver moves on; a caller abort and a non-retryable error are terminal.
+> `result.failovers` and an `onStreamFailover` observability hook expose the
+> degradation. The governance front door (rate limit, caps, ZDR, ledger) is
+> unchanged.
+
 The gateway's `streamStructured` is explicit about its v1 constraint (gateway.ts:697-700): *"no mid-stream failover (the first resolvable link is used; a mid-stream provider error surfaces to the consumer), no repair retry, no judge, no native-Anthropic options."* The governance front door (rate limit, caps, ZDR, ledger) applies, but the resilience machinery does not.
 
 FMA's chat engine has **streaming failover with degradation** — on a mid-stream provider error it fails over and, if all tiers fail, degrades gracefully. CareerPointers' only conversational surface, `PortfolioChat`, is **non-streaming** today (it awaits `answerPortfolioQuestion` and returns JSON), so this does not block CareerPointers *now*. But the Scout-extraction track delivers a streaming chatbot, and the moment CareerPointers adopts Scout, its chat surface becomes streaming — and inherits this single-link constraint. The gateway's streaming path needs the same chain-walking failover `runStructured` already has (the `for (const link of chain)` loop at gateway.ts:1296), plus a stall-clock (which PR 18 adds) and a degradation contract. **This is the gap most likely to bite CareerPointers first, because it arrives exactly when Scout does.**
