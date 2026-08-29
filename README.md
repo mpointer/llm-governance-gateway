@@ -105,6 +105,32 @@ const gw = new Gateway({
 
 `RedisLike` is a four-method interface (`get/set/incr/expire`) — `@upstash/redis` satisfies it directly; ioredis needs a thin wrapper. The package has no hard Redis dependency.
 
+### Multi-tenancy (optional)
+
+`orgId` scopes a call to one tenant. **It is entirely optional** — omit it everywhere and the gateway behaves exactly as it did before tenancy existed, down to the cache-key bytes. Single-tenant apps can skip this section.
+
+```ts
+// One instance serving one tenant:
+const gw = new Gateway({ usage, orgId: "acme" });
+
+// One instance serving many — per-call wins over the config default:
+await gw.runStructured({ ...opts, orgId: "acme" });
+```
+
+What `orgId` scopes, once present:
+
+| Surface | Scoped behavior |
+|---|---|
+| Cache keys | `aicache:org:<org>:<slug>:<hash>` — one tenant can never read another's cached completion |
+| Global circuit breaker | Evaluated against **that org's** spend only; one tenant can't trip another's breaker |
+| `caps.orgDailyCents` | Optional per-org daily cap, on top of per-user caps |
+| `PromptStore`, `ModelConfigStore`, `TaskOverrideStore` | Receive `orgId` so prompts, chains and task routing can differ per tenant |
+| `UsageStore` | Rows and cap events carry `orgId`; `getSpendToday` scopes the sum |
+
+**Why it's non-breaking.** The store SPIs take `orgId` as an *optional trailing parameter*, and in TypeScript a function of fewer parameters is assignable to a type declaring more — so an existing `getChain: async () => [...]` still compiles and still passes. Unscoped cache keys keep their original `aicache:<slug>:<hash>` form, so upgrading doesn't cold-start your cache. The `org_id` column is nullable and added in place by `ensureSchema`, with no backfill.
+
+The one thing that isn't opt-out is the column existing: on the Drizzle adapters `ensureSchema` adds a nullable `org_id` to `ai_usage_log` and `spend_cap_events` whether or not you use tenancy.
+
 ### Failover chains and tiers
 
 Provide a `ModelConfigStore` (e.g. an admin-editable table) to control routing at runtime:
@@ -125,6 +151,45 @@ const gw = new Gateway({
 await gw.runStructured({ ...opts, tier: "fast" });
 ```
 
+**Configure your own default.** A call with no chain, no task and no override falls through to a last-resort default baked into the library. That fallback exists so the quickstart works, not as a recommendation — inheriting it means this library, rather than your deployment, picked your model and your vendor. Reaching it warns loudly once, naming the assumption. Set your own:
+
+```ts
+providers: { defaultProvider: "openai", defaultModel: "gpt-4.1" },
+// or AI_DEFAULT_PROVIDER / AI_DEFAULT_MODEL in the environment
+providers: { requireExplicitDefault: true }, // upgrade the warning to a throw
+```
+
+Config or env overrides silence the warning entirely. `requireExplicitDefault` is off by default so existing callers are unaffected.
+
+### Timeouts and deadlines
+
+Every outbound provider call is bounded. The framing is **ledger correctness, not latency**: the usage row is written *after* generation returns, so anything that kills a call mid-flight loses the audit trail for money already spent.
+
+```ts
+const gw = new Gateway({
+  usage,
+  timeouts: {
+    attemptMs: 30_000,          // bound on ONE provider attempt. Default 60s.
+    deadlineMs: 25_000,         // bound on the WHOLE call. Default: unbounded.
+    streamFirstChunkMs: 60_000, // time to a stream's first emission. 0 disables.
+    streamStallMs: 60_000,      // time since a stream's last emission. 0 disables.
+  },
+});
+
+// Per call, and a caller signal for request teardown / client disconnect:
+await gw.runStructured({ ...opts, attemptMs: 10_000, deadlineMs: 20_000, signal });
+```
+
+Precedence is the same as every other knob: per call → config → built-in default.
+
+**`attemptMs` vs `deadlineMs`.** An attempt timeout means *this link is slow* — the chain advances to the next provider. A blown deadline means *the whole operation is over* — no further links, no retries, terminal. Keeping them distinguishable is why the gateway composes abort signals by hand instead of using `AbortSignal.any([AbortSignal.timeout(ms), signal])`; that composite reports a bare `DOMException` and [can silently never fire](https://github.com/nodejs/node/issues/57736).
+
+Set `deadlineMs` on any platform with its own function deadline. A three-link chain with retries can otherwise run for minutes, and a platform kill takes the usage row with it. Unbounded is the default only because it preserves pre-existing behavior.
+
+**Streaming uses chunk-relative clocks**, not a total-duration cap: a long stream that is actively producing tokens is healthy, and killing it at N seconds would be a regression. Silence is what is never healthy. Note these clocks measure *parsed partial objects*, not raw provider chunks — a model that has emitted `{"ans` has produced no partial yet, which is why the default window is a generous 60s.
+
+**Aborted attempts are ledgered.** Every timeout path writes a zero-token usage row before it throws, so a provider call that spent money but never returned still leaves an audit trail. Three error classes carry the diagnosis: `AttemptTimeoutError`, `DeadlineExceededError`, and `StreamStallError` (with `phase: "first-chunk" | "stall"`). A caller-initiated abort rethrows your own reason unwrapped — the gateway never disguises your cancellation as its own timeout.
+
 ### Task-based routing
 
 Model ids use a scheme prefix; bare ids are Anthropic: `"claude-opus-4-8"`, `"openai:gpt-4.1"`, `"google:gemini-2.5-pro"`, `"openrouter:meta-llama/llama-3.3-70b"`, `"venice:mistral-31-24b"`.
@@ -138,7 +203,7 @@ const gw = new Gateway({
       editorial: "claude-opus-4-8",           // long-form quality
       translate: "google:gemini-2.0-flash",
     },
-    store: myAdminOverrideStore, // optional: { getOverrides(): Promise<Record<string,string>> }
+    store: myAdminOverrideStore, // optional: { getOverrides(): Promise<Record<string,TaskModelSpec>> }
   },
 });
 
@@ -146,6 +211,21 @@ await gw.runStructured({ ...opts, task: "enrich" });
 ```
 
 Precedence: `modelConfig.getOverride()` → `task` → chain → static default.
+
+**Per-task failover chains.** A task's model can be a single id *or* an ordered chain the gateway walks on retryable errors and attempt timeouts:
+
+```ts
+defaults: {
+  enrich: "claude-haiku-4-5-20251001",              // single model
+  editorial: [                                       // primary → fallback → backup2
+    "claude-opus-4-8",
+    "openai:gpt-4.1",
+    "google:gemini-2.5-pro",
+  ],
+},
+```
+
+The array form *is* the primary/fallback/backup role chain, with roles expressed as positions — so there's no separate role vocabulary to learn. The single-id form is unchanged and a store returning it stays assignable.
 
 ### Model discovery
 
@@ -295,8 +375,18 @@ const { embeddings } = await gw.embed(texts, {
   userId, route: "docs/pipeline",
 });
 // Mock mode: deterministic seeded unit vectors (identical input → identical
-// vector). BYO any AI SDK EmbeddingModel via opts.embeddingModel (Voyage, custom).
+// vector). BYO any AI SDK EmbeddingModel via opts.embeddingModel.
 ```
+
+**Providers.** OpenAI and Voyage are first-class (`EMBEDDING_PROVIDER_IDS`); Voyage speaks the same OpenAI-compatible embeddings shape, so it needs a base URL and a `VOYAGE_API_KEY`, not a new dependency:
+
+```ts
+await gw.embed(texts, { model: "voyage:voyage-3" }); // priced and attributed to voyage
+```
+
+Anything else — a self-hosted encoder, a provider the gateway doesn't model — still goes through the `embeddingModel` BYO seam, which stays an escape hatch rather than the only option.
+
+Embedding calls take the same bounds as generation (`signal`, `attemptMs`, `deadlineMs`) and the same `orgId` scoping.
 
 ### Per-link temperature
 
@@ -327,6 +417,17 @@ const res = await gw.runStructured({
 ```
 
 Scores land in your `UsageStore` (`saveJudgeScore`) linked to the call's usage row; judge spend is logged under `route: "judge:<route>"` so eval cost is visible, not hidden. In mock mode, register `judge:<slug>` responders to test gating deterministically.
+
+**The judge tier.** The judge runs in the request path on every sampled call, so which model it uses is a governance decision an operator makes deliberately — not something it should inherit from whichever provider happens to be the default. It is a first-class tier alongside `fast`/`power`, and an admin can pin it at runtime:
+
+```ts
+providers: { tiers: { anthropic: { fast: "...", power: "...", judge: "claude-haiku-4-5-20251001" } } },
+modelConfig: { getJudgeModel: async (orgId) => "openai:gpt-4o-mini" }, // admin pin, per tenant
+```
+
+Resolution: per-call `judge.model` → `getJudgeModel()` → gateway `judge.model` → provider `judge` tier → provider `fast` tier. There is no built-in judge model for any provider; an unset judge tier falls back to `fast`, which is the pre-tier behavior.
+
+**The judge can never fail your request.** It runs on its own small budget, and a judge that times out, errors, or exhausts its budget is skipped — the response it was scoring still returns. A governance check must never be the thing that breaks the request it was watching.
 
 ### Batch processing (50% token cost)
 
@@ -365,9 +466,16 @@ Reconcile logs per-item discounted actuals, releases the reservation with a comp
 const res = await gw.streamStructured({ ...opts });
 for await (const partial of res.partialObjectStream) render(partial);
 const final = await res.object; // resolves after usage logging + cache write
+res.failovers; // links abandoned before this one — read after `object` settles
 ```
 
-v1 constraints, stated plainly: no mid-stream failover (the first resolvable link is used), no repair retry, no judge, no native-Anthropic options. Cache hits return a single-emission stream.
+**Mid-stream failover.** When a link stalls or fails retryably, the gateway abandons it and restarts on the next link in the chain. Each abandoned attempt is ledgered as its own zero-token row, and `onStreamFailover` fires with `reason` (`"stall" | "retryable"`) and `hadPartialOutput`.
+
+**The degradation contract, stated plainly:** the next link restarts the object from scratch. A consumer rendering partials will see the object *rebuild*, not continue — the partial sequence is **not monotonic across a failover**. No information is lost (every partial is a complete snapshot), but a UI that assumes fields only ever accumulate will flicker. `hadPartialOutput` is the flag that tells you it happened; if that matters to your UI, buffer until `object` settles instead of rendering partials.
+
+Restarting rather than resuming is deliberate: no provider offers mid-object continuation, and stitching two partial JSON objects together produces a document neither model would have written.
+
+Remaining constraints, stated plainly: no repair retry, no judge, no native-Anthropic options on the streaming path. Cache hits return a single-emission stream.
 
 ### Observability export (OTel, Langfuse, metrics)
 
@@ -418,7 +526,9 @@ Endpoints: `POST /run` (structured generation — send your Zod schema as JSON S
 
 ## Status
 
-Extracted from a production system (three independent in-house implementations converged on this design). API may shift before 1.0. Next up ([ROADMAP](./ROADMAP.md)): judge-in-the-request-path with budget-aware sampling, native Anthropic features (thinking, prompt caching, web search), streaming inside the governance pipeline.
+**1.0 — the store interfaces are stable.** Extracted from a production system (three independent in-house implementations converged on this design). From 1.0.0, `UsageStore`, `PromptStore`, `ModelConfigStore`, `TaskOverrideStore`, `RateLimiter` and `CacheStore` are the committed SPI: they gain capability through *optional* parameters, and a breaking change to them requires a major bump. See [CHANGELOG.md](./CHANGELOG.md).
+
+Next up ([ROADMAP](./ROADMAP.md)): pluggable guardrail hooks and an admin UI reference, both gated on real adopter demand rather than speculation.
 
 ## License
 

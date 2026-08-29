@@ -57,6 +57,52 @@ development model, so it gets recorded alongside the plan:
 - [ ] Admin UI reference (prompt library, task routing, spend dashboards) — design: [docs/design/admin-ui-reference.md](./docs/design/admin-ui-reference.md); sequenced after the Show HN wave, informed by external-adopter issues
 - [x] Timeouts and deadlines — shipped S1–S4: chunk-relative stream stall clocks, `abortSignal` on every provider path, native-Anthropic parity, configurable `attemptMs`, whole-operation `deadlineMs` (unbounded by default) across links/retries/backoff, aborted attempts ledgered as zero-token rows, and `runText` failover aligned to `callWithChain`. Framed as ledger correctness, not latency: the usage row is written after generation, so anything that kills a call mid-flight loses the audit trail for money already spent. Design: [docs/design/timeouts-and-deadlines.md](./docs/design/timeouts-and-deadlines.md)
 
+## v1.0 — architecture critique (findings 3.1-3.8)
+
+An external critique of the post-timeouts design named eight gaps. Six are
+closed, one PR each, under a hard backward-compatibility constraint: every
+change is opt-in or default-preserving. Two were deliberately not closed —
+see below; that is a decision, not a backlog.
+
+- [x] **3.1 Multi-tenant org scoping** (#21) — optional `orgId` scoping cache
+      keys, the global circuit breaker, and every store lookup. Unscoped cache
+      keys keep their original bytes, so upgrading doesn't cold-start a cache.
+- [x] **3.2 Streaming mid-stream failover** (#23) — a stalled or retryably
+      failing link is abandoned and the next one restarts the object. The
+      degradation contract (partials are not monotonic across a failover) is
+      documented rather than hidden, and `onStreamFailover` reports it.
+- [x] **3.3 Per-task failover chains** (#22) — `TaskModelSpec = string | string[]`.
+      The array form is the primary/fallback/backup role chain adopters already
+      model, with roles as positions, so no new role vocabulary was needed.
+- [x] **3.4 First-class judge tier** (#24) — `judge` joins fast/power, pinnable
+      by an admin via `getJudgeModel()`. The judge runs on its own budget and a
+      judge failure can never fail the response it was scoring.
+- [x] **3.6 Neutralize hardcoded defaults** (#25) — falling through to the
+      library's built-in provider/model warns loudly once;
+      `requireExplicitDefault` upgrades it to a throw. Resolved as "warn loudly,
+      strict mode opt-in" rather than the critique's "fail loudly", because the
+      backward-compatibility constraint outranked it.
+- [x] **3.7 Broaden embeddings** (#25) — Voyage as a first-class embedding
+      provider with list pricing, plus `parseEmbeddingModelId` so embedding-only
+      providers can't be mis-attributed to a chat provider.
+
+### Deliberately not closed
+
+- **3.5 No control plane** — *held, not deferred.* The gateway is plumbing: its
+  `PromptStore`/`ModelConfigStore`/`UsageStore` interfaces are the SPI an
+  application's control plane implements, and the thin HTTP skeleton
+  (`/health`, `/run`, `/models`, `/tasks`, `/prompt-test`) is the whole intended
+  surface. Growing an admin UI or prompt-management surface here would collide
+  with the adopting app's own control plane. This finding names a boundary to
+  hold, not a gap to fill.
+- **3.8 No hedged/parallel fallback** — *deferred.* Failover is strictly
+  sequential. Hedging (racing links in parallel) trades cost for latency: right
+  for an interactive hot path, wrong for batch, and a spend-governance library
+  should not race two paid calls by default. A candidate harvest once an adopter
+  has a latency-sensitive surface that needs it.
+
+Design and resolution log: [docs/design/critique-beyond-pr18.md](./docs/design/critique-beyond-pr18.md)
+
 ## Non-goals
 
 - Observability breadth (traces, dashboards, analytics) — export to Langfuse/OTel instead.
