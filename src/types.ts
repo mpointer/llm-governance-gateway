@@ -339,6 +339,18 @@ export interface ObservabilityHooks {
   onSpendCapEvent?: (event: SpendCapEvent) => void | Promise<void>;
   /** A judge (caller rubric or model-graded) scored a response. */
   onJudgeScore?: (score: JudgeScore) => void | Promise<void>;
+  /**
+   * A streaming link was abandoned and the gateway failed over to the next.
+   * Fire-and-forget, like the others — an export hook must never break the
+   * stream it is reporting on.
+   */
+  onStreamFailover?: (event: {
+    traceId: string;
+    provider: string;
+    model: string;
+    reason: "stall" | "retryable";
+    hadPartialOutput: boolean;
+  }) => void | Promise<void>;
 }
 
 /**
