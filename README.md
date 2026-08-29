@@ -526,7 +526,7 @@ Endpoints: `POST /run` (structured generation — send your Zod schema as JSON S
 
 ## Status
 
-**1.0 — the store interfaces are stable.** Extracted from a production system (three independent in-house implementations converged on this design). From 1.0.0, `UsageStore`, `PromptStore`, `ModelConfigStore`, `TaskOverrideStore`, `RateLimiter` and `CacheStore` are the committed SPI: they gain capability through *optional* parameters, and a breaking change to them requires a major bump. See [CHANGELOG.md](./CHANGELOG.md).
+Extracted from a production system (three independent in-house implementations converged on this design). Pre-1.0, so the API may still shift — though in practice the store interfaces (`UsageStore`, `PromptStore`, `ModelConfigStore`, `TaskOverrideStore`, `RateLimiter`, `CacheStore`) have only ever gained capability through *optional* parameters, and existing implementations keep compiling. 1.0.0 is gated on a downstream integration proving that holds, not on a date. See [CHANGELOG.md](./CHANGELOG.md).
 
 Next up ([ROADMAP](./ROADMAP.md)): pluggable guardrail hooks and an admin UI reference, both gated on real adopter demand rather than speculation.
 

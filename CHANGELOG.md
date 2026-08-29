@@ -1,15 +1,18 @@
 # Changelog
 
-Notable changes per release. This project follows [semantic versioning](https://semver.org/);
-from 1.0.0 the store interfaces (`UsageStore`, `PromptStore`, `ModelConfigStore`,
-`TaskOverrideStore`, `RateLimiter`, `CacheStore`) are the stable SPI and a breaking
-change to them requires a major bump.
+Notable changes per release. This project follows [semantic versioning](https://semver.org/).
 
-## 1.0.0
+Still pre-1.0: the store interfaces (`UsageStore`, `PromptStore`,
+`ModelConfigStore`, `TaskOverrideStore`, `RateLimiter`, `CacheStore`) are the SPI
+adopters implement, and in practice they have only ever gained capability through
+*optional* parameters — but they are not yet under a formal semver freeze. 1.0.0
+is gated on a downstream integration proving the SPI holds, not on a date.
 
-The API-stability commitment, plus the timeout and multi-tenancy work that
-preceded it. **No breaking changes from 0.9.0** — every addition below is opt-in
-or default-preserving.
+## 0.10.0
+
+Timeouts and deadlines, multi-tenancy, and the architecture-critique work.
+**No breaking changes from 0.9.0** — every addition below is opt-in or
+default-preserving.
 
 ### Added
 

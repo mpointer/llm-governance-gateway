@@ -57,7 +57,7 @@ development model, so it gets recorded alongside the plan:
 - [ ] Admin UI reference (prompt library, task routing, spend dashboards) — design: [docs/design/admin-ui-reference.md](./docs/design/admin-ui-reference.md); sequenced after the Show HN wave, informed by external-adopter issues
 - [x] Timeouts and deadlines — shipped S1–S4: chunk-relative stream stall clocks, `abortSignal` on every provider path, native-Anthropic parity, configurable `attemptMs`, whole-operation `deadlineMs` (unbounded by default) across links/retries/backoff, aborted attempts ledgered as zero-token rows, and `runText` failover aligned to `callWithChain`. Framed as ledger correctness, not latency: the usage row is written after generation, so anything that kills a call mid-flight loses the audit trail for money already spent. Design: [docs/design/timeouts-and-deadlines.md](./docs/design/timeouts-and-deadlines.md)
 
-## v1.0 — architecture critique (findings 3.1-3.8)
+## v0.10 — architecture critique (findings 3.1-3.8)
 
 An external critique of the post-timeouts design named eight gaps. Six are
 closed, one PR each, under a hard backward-compatibility constraint: every
