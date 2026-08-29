@@ -9,7 +9,14 @@ export {
   type PromptTestOptions,
   type PromptTestResult,
 } from "./gateway.js";
-export { RateLimitError, SpendCapError, JudgeGateError, ZdrViolationError } from "./errors.js";
+export {
+  RateLimitError,
+  SpendCapError,
+  JudgeGateError,
+  ZdrViolationError,
+  StreamStallError,
+} from "./errors.js";
+export { attemptSignal, AttemptTimeoutReason, type AttemptSignal } from "./deadline.js";
 export {
   ProviderRegistry,
   parseModelId,
@@ -65,6 +72,7 @@ export {
   callNativeAnthropic,
   NativeSchemaError,
   type AnthropicMessagesClient,
+  type AnthropicRequestOptions,
   type NativeAnthropicConfig,
   type NativeCallOptions,
 } from "./anthropic-native.js";
@@ -108,5 +116,6 @@ export type {
   ModelPricing,
   SpendCapConfig,
   GatewayConfig,
+  TimeoutConfig,
   ObservabilityHooks,
 } from "./types.js";

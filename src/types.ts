@@ -287,6 +287,20 @@ export interface ObservabilityHooks {
   onJudgeScore?: (score: JudgeScore) => void | Promise<void>;
 }
 
+/**
+ * Bounds on outbound provider calls. See
+ * docs/design/timeouts-and-deadlines.md.
+ *
+ * Streaming uses chunk-relative clocks rather than a total-duration cap: a
+ * long stream that is actively producing tokens is healthy, silence is not.
+ */
+export interface TimeoutConfig {
+  /** Time allowed to a stream's FIRST emission. Default 60_000. 0 disables. */
+  streamFirstChunkMs?: number;
+  /** Time allowed since a stream's LAST emission. Default 60_000. 0 disables. */
+  streamStallMs?: number;
+}
+
 export interface GatewayConfig {
   usage: UsageStore;
   cache?: CacheStore;
@@ -315,6 +329,15 @@ export interface GatewayConfig {
   appId?: string;
   /** Cache TTL in seconds. Default 24h. */
   cacheTtlSeconds?: number;
+  /**
+   * Bounds on outbound provider calls. See
+   * docs/design/timeouts-and-deadlines.md. Per-call options override these.
+   *
+   * The per-attempt timeout (`attemptMs`) and whole-operation budget
+   * (`deadlineMs`) are stages S3/S4 of that design and are not implemented
+   * yet; the streaming clocks below are.
+   */
+  timeouts?: TimeoutConfig;
   /**
    * Optional at-rest encryption for logged prompt/output snapshots and cached
    * values. Both must be provided together.

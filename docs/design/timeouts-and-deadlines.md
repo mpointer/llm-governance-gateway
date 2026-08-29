@@ -1,6 +1,6 @@
 # Design: timeouts and deadlines
 
-Status: proposed — target v0.10. Derived from a review of the shipped
+Status: S1 and S2 landed; S3 and S4 proposed — target v0.10. Derived from a review of the shipped
 failover machinery (v0.9.0), not from an outage: the failover design is
 sound, but the clock around it is incomplete, and the gaps are all in the
 paths a serverless adopter actually runs.
@@ -10,6 +10,11 @@ paths a serverless adopter actually runs.
 The library has one hardcoded timeout (60s, `AbortSignal.timeout`) applied
 to three of the seven outbound call sites. Everything else inherits
 whatever the caller's client does, or hangs.
+
+*(This section, including its line anchors, describes the state **before**
+S1/S2. The three "none" rows are the ones those stages closed; the
+anchors are kept as the record of what was found, not as current
+pointers.)*
 
 | Path | Site | Timeout today |
 |---|---|---|
@@ -241,12 +246,16 @@ gets two chunk-relative clocks instead:
 - **`streamStallMs`** — time since the last emission. Covers a mid-stream
   hang.
 
-Implement by wrapping `partialObjectStream` in a generator that races each
-`next()` against a timer, and by racing `stream.object` (`:823`) against
-the same stall clock so **`finalize()` still runs** on a stalled stream
-(Rule 1: the ledger row must survive). `deadlineMs`/`signal`, when the
-caller supplies them, are passed to `streamObject` as `abortSignal` on top
-of this; total duration stays opt-in.
+Race `stream.object` against the same stall clock so **`finalize()` still
+runs** on a stalled stream (Rule 1: the ledger row must survive), and pass
+the composed signal to `streamObject` as `abortSignal`. Total duration
+stays opt-in.
+
+> **Superseded in implementation.** This section originally proposed
+> wrapping `partialObjectStream` and racing each `next()` against a timer.
+> That is wrong for a consumer that only awaits `.object` and never
+> iterates — see "What implementation changed" below. The shipped design
+> in `src/stream-guard.ts` pumps the source itself.
 
 ### Embeddings
 
@@ -298,8 +307,8 @@ Four changes, deliberately ordered so each ships independently:
 
 | # | Change | Size | Value |
 |---|---|---|---|
-| S1 | `abortSignal` on `streamObject` + `embedMany`; stream first-chunk/stall clocks | S | Closes the two indefinite-hang cases, including the un-ledgered stream |
-| S2 | Widen `AnthropicMessagesClient`, thread signal through both native calls | S | Gateway's guarantee stops depending on how the consumer built their client |
+| S1 ✅ | `abortSignal` on `streamObject` + `embedMany`; stream first-chunk/stall clocks | S | Closes the two indefinite-hang cases, including the un-ledgered stream |
+| S2 ✅ | Widen `AnthropicMessagesClient`, thread signal through both native calls | S | Gateway's guarantee stops depending on how the consumer built their client |
 | S3 | `src/deadline.ts` (`AttemptBudget`, abortable `sleep`); `timeouts.attemptMs` config + per-call override; `AttemptTimeoutError` | M | Makes the existing 60s configurable; no behavior change at defaults |
 | S4 | `deadlineMs` enforced across chain links, retries, and backoff; `DeadlineExceededError` | M | The one that actually protects a serverless caller |
 
@@ -353,20 +362,59 @@ with its own tradeoffs (which model? configured where? does the admin
 override still mean "hard pin"?) and deserves its own doc rather than a
 paragraph here.
 
-## Open questions (answer before building)
+## Decisions
 
-- Should `deadlineMs` have a non-undefined default? Unbounded is today's
-  behavior and safest for compatibility, but it means the serverless
-  footgun stays loaded unless an adopter reads this doc. A generous
-  default (120s?) would protect by default at the cost of a behavior
-  change in a library whose whole pitch is predictability.
-- Does the judge get its own budget, or share the main call's? Sharing
-  means a slow main call can starve the judge into a timeout; a separate
-  budget means the total operation can exceed `deadlineMs`. Leaning
-  separate-and-small, since the judge already self-skips under budget
-  pressure and skipping is its established failure mode.
-- Should `RunTextResult` / `RunStructuredResult` surface which link
-  timed out, for adopters tuning `attemptMs` per provider? The ledger's
-  `durationMs` gets close but does not record aborted attempts at all —
-  arguably those should be ledgered as zero-token rows so a chronically
-  slow provider is visible in the data rather than only in logs.
+Answered before building S1/S2; the first two bind S3/S4 when those land.
+
+| Question | Decision |
+|---|---|
+| First implementation scope | **S1 + S2 only.** Closes both indefinite-hang paths without introducing config surface. |
+| `deadlineMs` default | **Unbounded**, matching today's behavior. Protecting by default would be a behavior change in a library whose pitch is predictability; adopters opt in. |
+| Judge budget | **Its own small budget.** The judge already self-skips under spend pressure, so skipping is its established failure mode — a judge timeout must never fail the main response. Total wall-clock can therefore exceed `deadlineMs` by the judge's budget. |
+| Ledger aborted attempts | **Yes — zero-token rows.** A chronically slow provider then shows up in the data the cost page already reads, not only in logs. Implemented for stalls in S1. |
+
+## What implementation changed (S1/S2)
+
+Two things were settled by experiment rather than reasoning, and both
+changed the design:
+
+1. **The guard owns the iteration.** `streamObject` starts the model call
+   eagerly in its constructor, but a consumer that only awaits `.object`
+   never iterates `partialObjectStream` and so produces no observable
+   per-chunk activity. Driving the stall clock from the consumer's
+   iteration would make a healthy long stream trip for that consumer. So
+   `guardStream` pumps the source itself and the consumer drains a
+   conflated cell — emissions are coalesced, keeping memory O(1) for a
+   consumer slower than the provider.
+2. **The clocks measure partial-object emissions, not provider chunks.**
+   `partialObjectStream` emits only when the parsed partial changes, so
+   `{"ans` followed by `wer"` yields nothing yet. "Time to first emission"
+   is therefore time to the first *parseable* partial. This is the right
+   measure for a structured stream — it tracks useful progress rather than
+   bytes — and the 60s default is sized with that slack in mind. A test
+   asserting the opposite is what surfaced it.
+
+A third, smaller finding: vitest's fake clock does not reliably propagate
+chunks through the AI SDK's internal `TransformStream` pipeline before
+jumping to the next timer, so a drip-fed stream looks stalled when it is
+not. The one test that must distinguish "slow but alive" from "stalled"
+runs on the real clock at ~300ms, exactly the carve-out the testing
+section anticipated.
+
+## Still open (for S3/S4)
+
+- Should `RunTextResult` / `RunStructuredResult` surface which link timed
+  out, for adopters tuning `attemptMs` per provider? The ledger's
+  `durationMs` gets close, and S1 now writes zero-token rows for stalled
+  streams, but unary attempt timeouts are not yet ledgered the same way.
+- Does `AttemptTimeoutError` need to be distinguishable from a caller
+  abort in the public API, or is the `AttemptTimeoutReason` abort reason
+  (already shipped in `src/deadline.ts`) enough?
+- **A caller abort mid-stream writes no ledger row, while a stall does.**
+  Deliberate for now: the zero-token-row decision was about making a
+  chronically slow *provider* visible, and a client disconnect is the
+  caller's own choice rather than evidence about the provider — so
+  ledgering every disconnect would add rows that carry no cost signal.
+  But tokens may genuinely have been spent before the abort, which is the
+  same argument that motivated Rule 1. Worth settling alongside S4, when
+  attempt timeouts on the unary paths face the identical question.

@@ -8,7 +8,11 @@ import { z } from "zod";
 import type { LanguageModel } from "ai";
 import { Gateway } from "./gateway.js";
 import { MemoryUsageStore } from "./adapters/memory.js";
-import type { AnthropicMessagesClient, AnthropicMessage } from "./anthropic-native.js";
+import type {
+  AnthropicMessagesClient,
+  AnthropicMessage,
+  AnthropicRequestOptions,
+} from "./anthropic-native.js";
 
 const OutSchema = z.object({ answer: z.string() });
 
@@ -185,5 +189,119 @@ describe("native Anthropic path", () => {
     const res = await gw.runStructured({ ...baseOpts, anthropic: {} });
     expect(res.object).toEqual({ answer: "from-tail" });
     expect(calls).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Request-level abort. See docs/design/timeouts-and-deadlines.md (S2).
+//
+// Before this, the native path passed no signal and no timeout: it inherited
+// whatever the BYO client happened to be constructed with, so a consumer
+// passing a bare `new Anthropic()` got the SDK's 10-minute default while every
+// AI SDK path in the same gateway was bounded at 60s.
+// ---------------------------------------------------------------------------
+
+/** Fake client that records the second (options) argument of each create. */
+function signalCapturingClient(responses: Partial<AnthropicMessage>[]): {
+  client: AnthropicMessagesClient;
+  options: (AnthropicRequestOptions | undefined)[];
+} {
+  const options: (AnthropicRequestOptions | undefined)[] = [];
+  let i = 0;
+  return {
+    options,
+    client: {
+      messages: {
+        async create(_params, opts) {
+          options.push(opts);
+          const r = responses[Math.min(i, responses.length - 1)];
+          i++;
+          return { content: r.content ?? [], usage: r.usage } as AnthropicMessage;
+        },
+      },
+    },
+  };
+}
+
+describe("native Anthropic abort signal", () => {
+  it("passes a live AbortSignal to the client on the structured path", async () => {
+    const { client, options } = signalCapturingClient([toolUseMsg({ answer: "ok" })]);
+    const gw = makeGw(client);
+    await gw.runStructured({ ...baseOpts, anthropic: { thinking: false } });
+
+    expect(options).toHaveLength(1);
+    const signal = options[0]?.signal;
+    expect(signal).toBeInstanceOf(AbortSignal);
+    // Bounded, not merely present: it must not already be aborted, and the
+    // gateway must have disposed the attempt clock after the call returned.
+    expect(signal!.aborted).toBe(false);
+  });
+
+  it("passes a live AbortSignal on the runText native path", async () => {
+    const { client, options } = signalCapturingClient([
+      { content: [{ type: "text", text: "grounded" }], usage: { input_tokens: 3, output_tokens: 2 } },
+    ]);
+    const gw = makeGw(client);
+    const res = await gw.runText({
+      slug: "q",
+      input: { q: "hi" },
+      variables: (i: { q: string }) => ({ q: i.q }),
+      cache: false,
+      anthropic: { webSearch: true },
+    });
+
+    expect(res.text).toBe("grounded");
+    expect(options[0]?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("aborts the in-flight request when the caller's signal fires", async () => {
+    const controller = new AbortController();
+    let observed: AbortSignal | undefined;
+    const client: AnthropicMessagesClient = {
+      messages: {
+        async create(_params, opts) {
+          observed = opts?.signal;
+          // Never resolves on its own; only the signal ends it.
+          return await new Promise<AnthropicMessage>((_resolve, reject) => {
+            opts?.signal?.addEventListener("abort", () =>
+              reject(new Error("request aborted")),
+            );
+          });
+        },
+      },
+    };
+    const gw = makeGw(client);
+    const pending = gw.runStructured({
+      ...baseOpts,
+      anthropic: { thinking: false },
+      signal: controller.signal,
+    });
+    // Let the call reach the client before aborting.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(observed?.aborted).toBe(false);
+    controller.abort(new Error("caller went away"));
+
+    await expect(pending).rejects.toThrow(/aborted/);
+    expect(observed?.aborted).toBe(true);
+  });
+
+  it("a BYO client written against the one-argument shape still works", async () => {
+    // Back-compat proof for widening AnthropicMessagesClient: this client
+    // declares `create(params)` only, ignores the options argument entirely,
+    // and must remain both assignable and functional.
+    const oneArg: AnthropicMessagesClient = {
+      messages: {
+        async create(params: Record<string, unknown>) {
+          expect(params).toHaveProperty("model");
+          return {
+            content: [{ type: "tool_use", name: "emit_result", input: { answer: "legacy" } }],
+            usage: { input_tokens: 1, output_tokens: 1 },
+          } as AnthropicMessage;
+        },
+      },
+    };
+    const gw = makeGw(oneArg);
+    const res = await gw.runStructured({ ...baseOpts, anthropic: { thinking: false } });
+    expect(res.object).toEqual({ answer: "legacy" });
   });
 });

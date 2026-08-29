@@ -3,7 +3,15 @@ import { embedMany, generateObject, generateText, streamObject } from "ai";
 import type { LanguageModel, Schema } from "ai";
 import { z } from "zod";
 import { backoffMs, isRetryable, isSchemaValidationError } from "./backoff.js";
-import { JudgeGateError, RateLimitError, SpendCapError, ZdrViolationError } from "./errors.js";
+import {
+  JudgeGateError,
+  RateLimitError,
+  SpendCapError,
+  StreamStallError,
+  ZdrViolationError,
+} from "./errors.js";
+import { guardStream } from "./stream-guard.js";
+import { attemptSignal } from "./deadline.js";
 import { ProviderRegistry, parseModelId, type ChainLink } from "./providers.js";
 import {
   callNativeAnthropic,
@@ -47,6 +55,15 @@ import {
 } from "./adapters/memory.js";
 
 const SNAPSHOT_LIMIT = 2000;
+// Streaming clocks. Silence for a minute is never legitimate; a stream that
+// is actively producing tokens is never cut off by these.
+// See docs/design/timeouts-and-deadlines.md.
+const DEFAULT_STREAM_FIRST_CHUNK_MS = 60_000;
+const DEFAULT_STREAM_STALL_MS = 60_000;
+// Per-attempt bound on a unary provider call. Making this configurable is
+// stage S3 of docs/design/timeouts-and-deadlines.md; today it matches the
+// value the AI SDK paths have always used, now applied to the native path too.
+const ATTEMPT_TIMEOUT_MS = 60_000;
 const DEFAULT_USER_CAP_CENTS = 200; // unset = conservative default, NOT uncapped
 const DEFAULT_ANON_CAP_CENTS = 100;
 const DEFAULT_GLOBAL_CAP_CENTS = 5000; // app-wide circuit breaker
@@ -82,11 +99,16 @@ async function attemptGenerate<O>(
   prompt: string,
   temperature?: number,
   system?: string,
+  /** Caller cancellation, composed with this call's own per-attempt bound. */
+  callerSignal?: AbortSignal,
 ): Promise<AttemptResult<O>> {
   let currentPrompt = prompt;
   let repaired = false;
   let transientRetries = 0;
   for (;;) {
+    // Fresh window per attempt: a retry deserves a full one, not the remains
+    // of the previous attempt's.
+    const attempt = attemptSignal(ATTEMPT_TIMEOUT_MS, callerSignal);
     try {
       const res = await generateObject({
         model,
@@ -94,7 +116,7 @@ async function attemptGenerate<O>(
         prompt: currentPrompt,
         ...(system ? { system } : {}),
         ...(temperature !== undefined ? { temperature } : {}),
-        abortSignal: AbortSignal.timeout(60_000),
+        abortSignal: attempt.signal,
       });
       return {
         object: res.object as O,
@@ -118,6 +140,8 @@ async function attemptGenerate<O>(
       if (!isRetryable(err) || transientRetries >= 2) throw err;
       await new Promise<void>((r) => setTimeout(r, backoffMs(transientRetries, err)));
       transientRetries++;
+    } finally {
+      attempt.dispose();
     }
   }
 }
@@ -185,6 +209,12 @@ export interface RunStructuredOptions<I, O> {
   userId?: string;
   anonKey?: string;
   route?: string;
+  /**
+   * Caller cancellation (request teardown, client disconnect). Aborts the
+   * in-flight provider call. Composed with the gateway's own per-attempt
+   * bound; whichever fires first wins.
+   */
+  signal?: AbortSignal;
   /** Free, caller-computed rubric (no tokens spent). Kept for simple cases. */
   judgeRubric?: (object: O) => Record<string, number>;
   /** Model-graded judge: sampled, budget-aware, runs in the request path. */
@@ -232,6 +262,12 @@ export interface RunTextOptions<I> {
   anonKey?: string;
   route?: string;
   app?: string;
+  /**
+   * Caller cancellation (request teardown, client disconnect). Aborts the
+   * in-flight provider call. Composed with the gateway's own per-attempt
+   * bound; whichever fires first wins.
+   */
+  signal?: AbortSignal;
   /** Native Anthropic options (web search, thinking, cacheSystem). Applies
    *  on anthropic chain links when GatewayConfig.anthropic is configured;
    *  non-anthropic links in the same chain run the plain AI SDK path, so a
@@ -304,6 +340,7 @@ export class Gateway {
   private readonly mock: boolean;
   private readonly appId: string | null;
   private readonly cacheTtlSeconds: number;
+  private readonly timeouts: GatewayConfig["timeouts"];
   private readonly encrypt?: (t: string) => string;
   private readonly judgeDefaults?: GatewayConfig["judge"];
   private readonly anthropicCfg?: GatewayConfig["anthropic"];
@@ -327,6 +364,7 @@ export class Gateway {
     this.mock = cfg.mock ?? false;
     this.appId = cfg.appId ?? null;
     this.cacheTtlSeconds = cfg.cacheTtlSeconds ?? DEFAULT_CACHE_TTL_SECONDS;
+    this.timeouts = cfg.timeouts;
     this.encrypt = cfg.encrypt;
     this.judgeDefaults = cfg.judge;
     this.anthropicCfg = cfg.anthropic;
@@ -417,6 +455,9 @@ export class Gateway {
       const res = await embedMany({
         model: em,
         values: texts,
+        // The AI SDK's own maxRetries (default 2) is left alone: embed() has
+        // no gateway-level retry loop, so it is the only one there is.
+        ...(opts.signal ? { abortSignal: opts.signal } : {}),
         ...(opts.dimensions !== undefined
           ? { providerOptions: { openai: { dimensions: opts.dimensions } } }
           : {}),
@@ -523,6 +564,10 @@ export class Gateway {
     const attemptNativeText = async (linkModel: string, linkTemp?: number | null) => {
       const effTemp = linkTemp === null ? undefined : (linkTemp ?? temperature);
       for (let retry = 0; ; ) {
+        // Previously unbounded: the native path inherited whatever timeout the
+        // BYO client happened to be constructed with. Same bound as the AI SDK
+        // path below now applies here.
+        const attempt = attemptSignal(ATTEMPT_TIMEOUT_MS, opts.signal);
         try {
           return await callNativeAnthropicText(this.anthropicCfg!, {
             model: linkModel,
@@ -531,11 +576,14 @@ export class Gateway {
             ...(effTemp !== undefined ? { temperature: effTemp } : {}),
             ...(opts.maxOutputTokens !== undefined ? { maxTokens: opts.maxOutputTokens } : {}),
             native: opts.anthropic!,
+            signal: attempt.signal,
           });
         } catch (err) {
           if (!isRetryable(err) || retry >= 2) throw err;
           await new Promise<void>((r) => setTimeout(r, backoffMs(retry, err)));
           retry++;
+        } finally {
+          attempt.dispose();
         }
       }
     };
@@ -543,6 +591,7 @@ export class Gateway {
     const attemptText = async (lm: LanguageModel, linkTemp?: number | null) => {
       const effTemp = linkTemp === null ? undefined : (linkTemp ?? temperature);
       for (let retry = 0; ; ) {
+        const attempt = attemptSignal(ATTEMPT_TIMEOUT_MS, opts.signal);
         try {
           const res = await generateText({
             model: lm,
@@ -550,13 +599,15 @@ export class Gateway {
             ...(opts.system ? { system: opts.system } : {}),
             ...(effTemp !== undefined ? { temperature: effTemp } : {}),
             ...(opts.maxOutputTokens !== undefined ? { maxOutputTokens: opts.maxOutputTokens } : {}),
-            abortSignal: AbortSignal.timeout(60_000),
+            abortSignal: attempt.signal,
           });
           return res;
         } catch (err) {
           if (!isRetryable(err) || retry >= 2) throw err;
           await new Promise<void>((r) => setTimeout(r, backoffMs(retry, err)));
           retry++;
+        } finally {
+          attempt.dispose();
         }
       }
     };
@@ -703,6 +754,16 @@ export class Gateway {
   async streamStructured<I, O>(
     opts: Omit<RunStructuredOptions<I, O>, "judge" | "anthropic" | "schema"> & {
       schema: z.ZodType<O>;
+      /**
+       * Time allowed to the stream's FIRST emission. Default 60_000.
+       * 0 disables. Overrides GatewayConfig.timeouts.
+       */
+      streamFirstChunkMs?: number;
+      /**
+       * Time allowed since the stream's LAST emission. Default 60_000.
+       * 0 disables. A stream actively producing tokens never trips this.
+       */
+      streamStallMs?: number;
     },
   ): Promise<StreamStructuredResult<O>> {
     const traceId = randomUUID();
@@ -811,32 +872,97 @@ export class Gateway {
     }
 
     const start = Date.now();
+
+    // Chunk-relative clocks. The controller is created first so the same
+    // signal reaches streamObject before the source stream exists.
+    const controller = new AbortController();
     const stream = streamObject({
       model: resolved.languageModel,
       schema: opts.schema,
       prompt,
+      abortSignal: controller.signal,
       ...(opts.system ? { system: opts.system } : {}),
       ...(temperature !== undefined ? { temperature } : {}),
     });
 
+    const guard = guardStream<Partial<O>>(
+      stream.partialObjectStream as AsyncIterable<Partial<O>>,
+      {
+        controller,
+        // Per call > config > default. `0` is a real value (disables the
+        // clock), so `??` is correct here and `||` would not be.
+        firstChunkMs:
+          opts.streamFirstChunkMs ??
+          this.timeouts?.streamFirstChunkMs ??
+          DEFAULT_STREAM_FIRST_CHUNK_MS,
+        stallMs:
+          opts.streamStallMs ?? this.timeouts?.streamStallMs ?? DEFAULT_STREAM_STALL_MS,
+        ...(opts.signal ? { callerSignal: opts.signal } : {}),
+        onTrip: (phase, waitedMs) =>
+          new StreamStallError(phase, waitedMs, resolved.provider, resolved.model),
+        onCallerAbort: (reason) =>
+          reason instanceof Error ? reason : new Error("Stream aborted by caller"),
+      },
+    );
+
+    // A stalled stream makes these reject; the race below surfaces the stall
+    // error instead, so mark them handled to avoid an unhandled rejection.
+    void stream.object.catch(() => {});
+    void stream.usage.catch(() => {});
+
     const objectPromise = (async () => {
-      const object = await stream.object; // schema-validated by the AI SDK
-      const usage = await stream.usage;
-      await finalize(
-        object,
-        usage.inputTokens ?? 0,
-        usage.outputTokens ?? 0,
-        resolved.provider,
-        resolved.model,
-        Date.now() - start,
-      );
-      return object;
+      try {
+        const completed = await Promise.race([
+          (async () => {
+            const object = await stream.object; // schema-validated by the AI SDK
+            const usage = await stream.usage;
+            return { object, usage };
+          })(),
+          guard.tripped.then((err) => {
+            throw err;
+          }),
+        ]);
+        await finalize(
+          completed.object,
+          completed.usage.inputTokens ?? 0,
+          completed.usage.outputTokens ?? 0,
+          resolved.provider,
+          resolved.model,
+          Date.now() - start,
+        );
+        return completed.object;
+      } catch (err) {
+        // The whole point of the stall clock: a provider call that spent
+        // money must leave an audit trail even when it never finished.
+        // Zero-token row — nothing usable came back, but the attempt is real.
+        if (err instanceof StreamStallError) {
+          await this.logUsage({
+            app: opts.app,
+            userId: opts.userId ?? null,
+            route: opts.route ?? null,
+            promptSlug: opts.slug,
+            provider: resolved.provider,
+            model: resolved.model,
+            inputTokens: 0,
+            outputTokens: 0,
+            estimatedCostCents: 0,
+            cacheHit: false,
+            traceId,
+            durationMs: Date.now() - start,
+            inputText: prompt,
+            outputText: null,
+          });
+        }
+        throw err;
+      } finally {
+        guard.dispose();
+      }
     })();
 
     return {
       cached: false,
       traceId,
-      partialObjectStream: stream.partialObjectStream as AsyncIterable<Partial<O>>,
+      partialObjectStream: guard.stream,
       object: objectPromise,
     };
   }
@@ -1095,6 +1221,8 @@ export class Gateway {
     system: string | undefined,
     callTemperature: number | undefined,
     native: NativeCallOptions | undefined,
+    /** Caller cancellation, composed with each attempt's own bound. */
+    callerSignal?: AbortSignal,
   ): Promise<AttemptResult<O> & { extras?: { cacheCreateTokens: number; cacheReadTokens: number; webSearches: number } }> {
     // Per-link temperature: link (incl. null = never send) > call > prompt.
     const temperature =
@@ -1104,6 +1232,9 @@ export class Gateway {
       let repaired = false;
       let transientRetries = 0;
       for (;;) {
+        // Previously unbounded: the native path inherited whatever timeout the
+        // BYO client happened to be constructed with.
+        const attempt = attemptSignal(ATTEMPT_TIMEOUT_MS, callerSignal);
         try {
           const res = await callNativeAnthropic(this.anthropicCfg, {
             model: link.model,
@@ -1112,6 +1243,7 @@ export class Gateway {
             schema: schema as Parameters<typeof callNativeAnthropic>[1]["schema"],
             temperature,
             native,
+            signal: attempt.signal,
           });
           // Validate the tool input; wrap failures so the shared
           // isSchemaValidationError machinery sees them.
@@ -1151,6 +1283,8 @@ export class Gateway {
           if (!isRetryable(err) || transientRetries >= 2) throw err;
           await new Promise<void>((r) => setTimeout(r, backoffMs(transientRetries, err)));
           transientRetries++;
+        } finally {
+          attempt.dispose();
         }
       }
     }
@@ -1160,7 +1294,14 @@ export class Gateway {
         `No API key for provider "${link.provider}" (and native execution does not apply).`,
       );
     }
-    const result = await attemptGenerate(link.languageModel, schema, prompt, temperature, system);
+    const result = await attemptGenerate(
+      link.languageModel,
+      schema,
+      prompt,
+      temperature,
+      system,
+      callerSignal,
+    );
     return result;
   }
 
@@ -1290,12 +1431,21 @@ export class Gateway {
     temperature?: number,
     system?: string,
     native?: NativeCallOptions,
+    callerSignal?: AbortSignal,
   ) {
     const start = Date.now();
     let lastErr: unknown;
     for (const link of chain) {
       try {
-        const result = await this.execLink(link, zodSchema, prompt, system, temperature, native);
+        const result = await this.execLink(
+          link,
+          zodSchema,
+          prompt,
+          system,
+          temperature,
+          native,
+          callerSignal,
+        );
         return {
           object: result.object,
           inputTokens: result.usage.inputTokens,
@@ -1455,6 +1605,7 @@ export class Gateway {
           opts.system,
           temperature,
           opts.anthropic,
+          opts.signal,
         );
         object = result.object;
         inputTokens = result.usage.inputTokens;
@@ -1482,6 +1633,7 @@ export class Gateway {
           opts.system,
           temperature,
           opts.anthropic,
+          opts.signal,
         );
         object = result.object;
         inputTokens = result.usage.inputTokens;
@@ -1537,6 +1689,7 @@ export class Gateway {
             opts.system,
             temperature,
             opts.anthropic,
+            opts.signal,
           );
           object = result.object;
           inputTokens = result.usage.inputTokens ?? 0;
@@ -1553,6 +1706,7 @@ export class Gateway {
             temperature,
             opts.system,
             opts.anthropic,
+            opts.signal,
           );
           object = gen.object;
           inputTokens = gen.inputTokens;
@@ -1810,12 +1964,20 @@ export class Gateway {
         );
       }
       const start = Date.now();
-      const res = await generateText({
-        model: lm,
-        prompt,
-        ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
-        abortSignal: AbortSignal.timeout(60_000),
-      });
+      // One composition mechanism across the codebase, so nobody later wires
+      // this one into an AbortSignal.any (see src/deadline.ts for why).
+      const attempt = attemptSignal(ATTEMPT_TIMEOUT_MS);
+      let res;
+      try {
+        res = await generateText({
+          model: lm,
+          prompt,
+          ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+          abortSignal: attempt.signal,
+        });
+      } finally {
+        attempt.dispose();
+      }
       text = res.text;
       inputTokens = res.usage.inputTokens ?? 0;
       outputTokens = res.usage.outputTokens ?? 0;

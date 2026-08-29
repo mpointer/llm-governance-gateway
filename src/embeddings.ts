@@ -15,6 +15,8 @@ export interface EmbedOptions {
   /** BYO AI SDK embedding model (tests, Voyage, custom endpoints). When set,
    *  `model` is used for attribution/pricing only. */
   embeddingModel?: EmbeddingModel;
+  /** Aborts the embedding request (caller cancellation, request teardown). */
+  signal?: AbortSignal;
   requireZdr?: boolean;
   userId?: string;
   anonKey?: string;
