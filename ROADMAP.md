@@ -95,11 +95,15 @@ see below; that is a decision, not a backlog.
   surface. Growing an admin UI or prompt-management surface here would collide
   with the adopting app's own control plane. This finding names a boundary to
   hold, not a gap to fill.
-- **3.8 No hedged/parallel fallback** — *deferred.* Failover is strictly
-  sequential. Hedging (racing links in parallel) trades cost for latency: right
-  for an interactive hot path, wrong for batch, and a spend-governance library
-  should not race two paid calls by default. A candidate harvest once an adopter
-  has a latency-sensitive surface that needs it.
+- **3.8 No hedged/parallel fallback** — *rescoped, still gated.* Filed as a
+  latency feature and deferred on that basis. Reviewing LLMRouter (#33) showed
+  the more valuable half: calling two models on one query is the only source of
+  the counterfactual — how A *and* B did on the same input — that the ledger
+  structurally lacks. Design:
+  [hedging-and-shadow-calls.md](./docs/design/hedging-and-shadow-calls.md) specs
+  **shadow** (serve the primary, compare off the critical path, judge and ledger
+  both, join on `traceId`) and keeps **race** deferred behind it. Not started:
+  gated on a named adopter who will switch it on, per the guardrail-hooks rule.
 
 Design and resolution log: [docs/design/critique-beyond-pr18.md](./docs/design/critique-beyond-pr18.md)
 
