@@ -147,7 +147,22 @@ The gateway's admin surface is `src/http/app.ts`: `/health`, `/run`, `/models`, 
 
 The gateway's `embed()` runs the full governance front door (rate limit, caps, ZDR, ledger — gateway.ts:371-376), which is correct and matches the principle that "embedding spend is real money." But `buildEmbeddingModel` is **OpenAI-only** (embeddings.ts:50-56): *"v1: OpenAI only — the one provider our adopters embed with today."* Voyage and custom endpoints are deferred to a BYO `embeddingModel` seam. This is the same provider-neutrality gap the deep-dive flagged in FMA (the last hardcoded `text-embedding-3-small`), now present in the shared plumbing. CareerPointers does not currently embed (no vector/RAG pipeline in `packages/ai`), so this is latent for CareerPointers — but the Scout-extraction track's knowledge layer (`scout-knowledge`) needs embeddings, and if CareerPointers adopts Scout's RAG, it inherits the OpenAI-only constraint unless the BYO seam is exercised.
 
-### 3.8 No hedged/parallel fallback — **Minor**
+### 3.8 No hedged/parallel fallback — **Minor** → **RESCOPED**
+
+> **RESCOPED (2026-08-29) — see [hedging-and-shadow-calls.md](./hedging-and-shadow-calls.md).**
+> The "Minor / latency" framing below is why this was deferred, and it undersold
+> the finding. Calling more than one model on one query is the only way to obtain
+> a counterfactual — how model A *and* model B did on the same input. Without it
+> the ledger is logged-bandit data (one arm pulled, others unobserved), which
+> cannot answer "is our cheap tier good enough here?" and cannot train a router.
+> Failover doesn't count: it produces a second model's output only when the first
+> failed, which is a censored sample.
+>
+> The design doc specs the **shadow** mode (serve the primary, run the comparison
+> off the critical path, judge and ledger both) as the data primitive, and keeps
+> **race** — the latency feature described below — deferred behind it. Still gated
+> on a named adopter.
+
 
 FMA's `openai.ts` has **hedged** fallback (a parallel `Promise.any`-style race across tiers for latency-sensitive paths). The gateway's failover is strictly **sequential** (walk the chain one link at a time). Hedging trades cost for latency; it is appropriate for interactive hot paths and inappropriate for batch. The gateway has no hedging primitive. CareerPointers has no hedging either and no latency-sensitive interactive surface beyond the non-streaming PortfolioChat, so this is Minor for CareerPointers — but it is a capability FMA would lose on the paths where it currently hedges, and a candidate harvest from FMA into the gateway.
 
@@ -164,7 +179,7 @@ FMA's `openai.ts` has **hedged** fallback (a parallel `Promise.any`-style race a
 | 3.5 | No control plane (thin HTTP skeleton) | Boundary | **BY DESIGN — boundary held.** No admin surface was added; the widened store interfaces are the SPI |
 | 3.6 | ~~Hardcoded default provider/model~~ **RESOLVED #25** | Config hygiene | **None** — CP already defaults to Anthropic; fix for the shared package |
 | 3.7 | ~~Embeddings OpenAI-only~~ **RESOLVED #25** | Provider neutrality | **Latent** — CP doesn't embed; Scout's RAG would inherit it |
-| 3.8 | No hedged fallback | Latency | **DEFERRED** — Minor; not in the ordered priorities of §5. See §9 |
+| 3.8 | No hedged fallback | Latency → **Data** | **RESCOPED** — shadow mode specced as the counterfactual-data primitive; race still deferred. See [hedging-and-shadow-calls.md](./hedging-and-shadow-calls.md) |
 
 ---
 
