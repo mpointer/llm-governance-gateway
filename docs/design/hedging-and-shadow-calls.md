@@ -59,9 +59,9 @@ to get a confident wrong answer.
 **Calling more than one model on the same query is the only thing that fixes
 this**, and that is what §3.8 was really about.
 
-## Two modes that share one sentence and nothing else
+## Modes that share one sentence and nothing else
 
-"Call more than one model on one query" describes two features with opposite
+"Call more than one model on one query" describes several features with opposite
 semantics. Conflating them would be a design error, so this doc separates them
 and specs one.
 
@@ -78,15 +78,61 @@ and specs one.
 They share link resolution and nothing else — not result selection, not
 cancellation, not ledger semantics, not failure handling.
 
-**This document specs `shadow`.** Race is deferred (see "Explicitly out of
-scope"): it has a real use case but no evidence behind it, whereas shadow has an
+### It is not a dial — it is two independent questions
+
+Calling this a spectrum from "speed" to "learning" would be wrong, and the
+mistake matters because it hides a real option. There are two independent binary
+choices:
+
+|  | **Discard the second answer** | **Keep the second answer** |
+|---|---|---|
+| **Use the primary's answer** | pointless | **`shadow`** |
+| **Use whichever finishes first** | **`race`** | **`both`** |
+
+The bottom-right cell is real and the first draft of this document missed it. If
+you race and simply *do not cancel* the loser, you get the latency win **and**
+the comparison data. The marginal cost is only the loser's remaining output
+tokens — the input tokens were committed the moment it was fired.
+
+`both` is not a compromise between the other two. It is strictly more than
+`race` for slightly more money, and its sampling shape differs from `shadow`:
+you would race a hot route at 100% rather than sample 2% across everything, so
+the data concentrates on that route. That is ideal if it is the route you are
+deciding about and misleading if you generalise from it.
+
+**This document specs `shadow`, and reserves the shape for the others.** Race
+and `both` have real use cases but no evidence behind them yet; shadow has an
 argument — it is the missing input to every routing decision the gateway might
 later make, including the content-based routing question in #33.
 
 ## Shape
 
+One `hedge` block with a `mode` discriminant, not two sibling features. From the
+caller's seat this is a single decision — *"I will pay for a second call; what do
+I want back?"* — and `mode` is the shape for that. It also matches vocabulary
+this codebase already uses twice: `judge.mode: "observe" | "gate"` and
+`caps.mode: "observe" | "enforce"` both switch a feature between watching and
+acting.
+
+What is deliberately **not** merged is the config body. Race needs a
+pre-hedge delay and a cancellation policy; shadow needs a sample rate, a judge
+and the detached flag. Flattening both into one object produces a bag of fields
+where half are meaningless depending on the other half. A discriminated union
+gives one concept and one place to look while letting the compiler reject
+`sampleRate` on a race.
+
 ```ts
-export interface ShadowConfig {
+/**
+ * `mode` is optional ONLY on the shadow branch, which is what makes shadow the
+ * default: omit it and you get the data-collection behaviour. Race and both
+ * must be asked for by name, because they change what the caller receives.
+ */
+export type HedgeConfig =
+  | ({ mode?: "shadow" } & ShadowOptions)
+  | ({ mode: "race" } & RaceOptions)
+  | ({ mode: "both" } & RaceOptions & Pick<ShadowOptions, "judge">);
+
+export interface ShadowOptions {
   /**
    * The model to compare the primary against. A bare id resolves through the
    * registry like any other; a ChainLink lets you pin a BYO model.
@@ -115,7 +161,30 @@ export interface ShadowConfig {
   /** Injectable RNG for deterministic sampling in tests. Default Math.random. */
   random?: () => number;
 }
+
+/** Reserved. Not implemented — see Sequencing (H4). */
+export interface RaceOptions {
+  model: string | ChainLink;
+  /**
+   * Wait this long before firing the second call. 0 fires both immediately
+   * (maximum latency win, maximum cost); a non-zero value only pays for the
+   * hedge when the primary is already slow.
+   */
+  afterMs?: number;
+}
 ```
+
+A note on `judge`, because it decides how much this costs. The field takes the
+model-graded `JudgeConfig`, but the **caller-computed rubric** path is equally
+valid and much cheaper: a deterministic in-process scoring function can grade
+both responses for free, reproducibly, with no judge-model spend, no added
+latency and no ZDR exposure. An adopter that already has one gets the quality
+signal in H1 without waiting for H2.
+
+Called out because it is easy to assume the quality signal requires an LLM
+judge. It does not, and the deterministic path is better where it is available:
+a model grading inconsistently adds noise to exactly the comparison you are
+trying to measure.
 
 Available per call and as a gateway-level default, mirroring `judge` exactly:
 
@@ -293,6 +362,64 @@ asserts the **ledger**, not just the absence of an exception.
 - ZDR: a non-ZDR shadow model is skipped on a `requireZdr` call.
 - `detached: true` still writes its row on a long-lived process.
 
+## Intended first adopter: CareerPointers
+
+Named 2026-09-01. **The gate is provisionally satisfied, not open** — see the
+contingency below, which is the whole point of writing this down.
+
+Why CareerPointers rather than an app already on the gateway:
+
+- **The reason §3.8 was rated "Minor for CareerPointers" does not apply here.**
+  That rating reads: *"CareerPointers has no hedging either and no
+  latency-sensitive interactive surface beyond the non-streaming PortfolioChat."*
+  That is an argument about `race`. Shadow is indifferent to latency. The rating
+  was correct for the feature as filed and is void for the feature as rescoped.
+- **Low latency pressure is an advantage, not a disqualifier.** Rule 2's awaited
+  default costs a non-interactive surface nothing anyone perceives. A
+  latency-critical adopter would be pushed straight to `detached: true` and the
+  serverless risk it carries.
+- **The question is already live there.** CareerPointers has a three-role chain
+  (`ROLE_ORDER: primary/fallback/backup2`), so multiple models are configured and
+  the comparators are already chosen. "Is `fallback` as good as `primary` here?"
+  is unanswerable for them today.
+- **Its judge is deterministic, and that is a feature here.** §3.4 records that
+  CareerPointers' `judgeRubric` is an in-process function, not an LLM. It can
+  score both responses free and reproducibly — no judge spend, no judge latency,
+  no ZDR exposure, and none of the grading noise an LLM judge adds to the exact
+  comparison being measured. **This is why H1 alone would be useful to them**:
+  the quality signal does not have to wait for H2.
+- **Single-tenant** (§3.1), so no org axis in the comparison data.
+- **Non-streaming**, which matches this document's scope exactly. A
+  streaming-first adopter would hit the out-of-scope wall immediately.
+
+### The contingency, stated plainly
+
+**CareerPointers is not on the gateway yet.** It runs its own mirrored pipeline;
+§5 of the critique describes its convergence as "swapping its `runStructured`
+internals for the gateway's and implementing the `PromptStore`/`ModelConfigStore`
+SPI". So the real sequence is:
+
+1. CareerPointers adopts the gateway.
+2. It accumulates enough traffic for a sample to mean something.
+3. **Then** H1 starts.
+
+Building H1 before step 1 would repeat the mistake this gate exists to prevent —
+shipping a data primitive against a hypothesis rather than a user. A named
+*intended* adopter is not the same as a live one, and the difference is a
+quarter of elapsed time.
+
+### Open questions for the adopter
+
+- **Volume.** At `sampleRate: 0.02`, a low-hundreds-of-calls-per-day surface
+  yields a comparison every few days and a quarter's wait for signal.
+  CareerPointers may want a rate near `1.0`, which is fine but changes the cost
+  arithmetic entirely and should be decided deliberately.
+- **Which call site.** The best first target is wherever the cost spread between
+  chain roles is widest, since that is where the answer is worth the most.
+- **`inputText` availability.** If an `encrypt` hook is configured, the query
+  text is ciphertext at rest. Irrelevant for cost/quality comparison, decisive
+  if anyone later wants to train on it.
+
 ## Sequencing
 
 - **H1 — the primitive.** `shadow` on `runStructured`, sampled, awaited, both
@@ -301,9 +428,10 @@ asserts the **ledger**, not just the absence of an exception.
 - **H2 — quality signal.** Judge both responses. This is what makes the data a
   training set rather than a cost report.
 - **H3 — `runText`.** Same rules, no schema validation.
-- **H4 — race mode.** Only if an adopter has a latency-sensitive surface that
-  needs it. Different result-selection and cancellation logic; do not build it
-  speculatively alongside shadow.
+- **H4 — `race` and `both`.** Only if an adopter has a latency-sensitive
+  surface that needs them. Different result-selection and cancellation logic; do
+  not build them speculatively alongside shadow. `both` is the cheaper of the two
+  to add once `race` exists — it is `race` minus the cancellation.
 
 **Gate: H1 does not start without a named adopter who will switch it on.** This
 is the `guardrail-hooks.md` discipline, and it was the right call there. A data
@@ -321,7 +449,7 @@ an ordinary `ai_usage_log` row and the join key already exists.
 
 ## Explicitly out of scope
 
-- **Race / latency hedging.** H4 above, deferred with reasons.
+- **`race` and `both`.** H4 above, deferred with reasons. Their *shape* is reserved in `HedgeConfig` so adding them later is not a breaking rename.
 - **Streaming.** Shadowing `streamStructured` means buffering an entire second
   stream while managing the existing failover and stall clocks. The degradation
   contract there is already the most complex thing in the codebase.
@@ -359,3 +487,6 @@ an ordinary `ai_usage_log` row and the join key already exists.
 | Shadow output cached? | Never | Would silently swap the served model |
 | Shadow failure → failover? | No | It is the data |
 | Default `sampleRate` | 0 | It spends real money |
+| One `hedge` block or two features? | One, with a `mode` discriminant | It is one caller decision; matches `judge.mode` and `caps.mode` |
+| Is `mode` required? | No — defaults to `"shadow"` | Shadow is the case with evidence behind it; race and both change what the caller receives, so they are asked for by name |
+| Merge the config bodies? | No | Race and shadow share almost no fields; a union keeps the compiler able to reject invalid combinations |
