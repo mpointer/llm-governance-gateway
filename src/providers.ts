@@ -104,6 +104,23 @@ const BUILTIN_PRICING: Record<string, ModelPricing> = {
   "text-embedding-3-large": { in: 0.013, out: 0 },
 };
 
+/**
+ * Pricing is keyed on the BARE model id, because that is what a chain link
+ * carries and what `estimateCostCents` is called with. An adopter who uses the
+ * scheme-prefix convention everywhere else — as the README tells them to for
+ * `tasks.defaults` and `ChainLinkConfig.model` — would otherwise register
+ * "openai:gpt-4.1" and have nothing ever look it up, silently falling back to
+ * the estimate. Normalising on the way in means both forms work.
+ *
+ * Ids without a RECOGNISED provider prefix pass through untouched, so vendor
+ * ids that merely contain a colon keep their shape: OpenRouter's ":free" and
+ * ":beta" variants split on a prefix that is not a provider id, and
+ * slash-scoped ids ("meta-llama/Llama-3.3-70B") contain no colon at all.
+ */
+function pricingKey(id: string): string {
+  return parseModelId(id).model;
+}
+
 const DEFAULT_FALLBACK_PRICING: ModelPricing = { in: 0.3, out: 1.5 };
 
 // The library's last-resort default. Deliberately named rather than inlined,
@@ -116,10 +133,17 @@ export class ProviderRegistry {
   private readonly cfg: ProviderConfig;
   private readonly pricing: Record<string, ModelPricing>;
   private warnedMissingDefault = false;
+  /** Models already warned about, so the warning is loud once, not per call. */
+  private readonly warnedMissingPricing = new Set<string>();
 
   constructor(cfg: ProviderConfig = {}) {
     this.cfg = cfg;
-    this.pricing = { ...BUILTIN_PRICING, ...cfg.pricing };
+    this.pricing = { ...BUILTIN_PRICING };
+    // Normalised on the way in: a configured "openai:gpt-4.1" key is the same
+    // footgun as a prefixed addPricing() call, and just as invisible.
+    for (const [id, rate] of Object.entries(cfg.pricing ?? {})) {
+      this.pricing[pricingKey(id)] = rate;
+    }
   }
 
   apiKey(provider: ProviderId): string | undefined {
@@ -375,13 +399,50 @@ export class ProviderRegistry {
     return out;
   }
 
-  /** Register/override pricing at runtime (e.g. synced from a vendor's models API). */
+  /**
+   * Register/override pricing at runtime (e.g. synced from a vendor's models
+   * API).
+   *
+   * Accepts either form: "gpt-4.1" or "openai:gpt-4.1" both register under the
+   * bare id that lookups use. Passing the prefixed form used to register a key
+   * nothing read, which cost adopters their cost data silently.
+   */
   addPricing(model: string, pricing: ModelPricing): void {
-    this.pricing[model] = pricing;
+    this.pricing[pricingKey(model)] = pricing;
   }
 
+  /** True when `model` has real pricing. Accepts bare or prefixed ids. */
   hasPricing(model: string): boolean {
-    return model in this.pricing;
+    return pricingKey(model) in this.pricing;
+  }
+
+  /**
+   * The subset of `modelIds` with no real pricing, in the order given.
+   * Accepts bare or prefixed ids. Empty means every id would be priced.
+   */
+  missingPricing(modelIds: readonly string[]): string[] {
+    return modelIds.filter((id) => !this.hasPricing(id));
+  }
+
+  /**
+   * Throw unless every id has real pricing. **Call this at startup or in a
+   * test**, never per request.
+   *
+   * This is the strict mode, and it lives here rather than inside
+   * `estimateCostCents` deliberately. Estimation runs inline in the
+   * `estimatedCostCents` field of a usage-row payload, so throwing there would
+   * mean a pricing gap costs you the LEDGER ROW — trading a wrong cost for no
+   * record at all, on a call that already spent money. A pre-flight fails where
+   * a misconfiguration should fail: at boot, before anything is billed.
+   */
+  assertPricingComplete(modelIds: readonly string[]): void {
+    const missing = this.missingPricing(modelIds);
+    if (missing.length === 0) return;
+    throw new Error(
+      `[llm-gateway] no pricing configured for: ${missing.join(", ")}. ` +
+        `Add them to ProviderConfig.pricing or call registry.addPricing(). ` +
+        `Ids may be bare ("gpt-4.1") or prefixed ("openai:gpt-4.1").`,
+    );
   }
 
   estimateCostCents(
@@ -391,13 +452,25 @@ export class ProviderRegistry {
     extras?: { cacheCreateTokens?: number; cacheReadTokens?: number; webSearches?: number },
   ): number {
     if (model === "mock" || model === "cache") return 0;
-    let rate = this.pricing[model];
+    let rate = this.pricing[pricingKey(model)];
     if (!rate) {
       rate = this.cfg.fallbackPricing ?? DEFAULT_FALLBACK_PRICING;
-      // Don't silently log $0 — a missing pricing entry must be visible.
-      console.warn(
-        `[llm-gateway] no pricing for "${model}" — using fallback estimate. Add it to ProviderConfig.pricing.`,
-      );
+      // Don't silently log $0 — a missing pricing entry must be visible. Once
+      // per model, not once per call: the old per-call warning was emitted on a
+      // hot path, which in production means it is either drowned out or turned
+      // off, and either way nobody sees it. The message names the mistake that
+      // actually causes this (a prefixed key) because that is the one an
+      // adopter shipped to production without noticing.
+      if (!this.warnedMissingPricing.has(model)) {
+        this.warnedMissingPricing.add(model);
+        console.warn(
+          `[llm-gateway] no pricing for "${model}" — every cost for it is the ` +
+            `fallback estimate (${rate.in}/${rate.out} cents per 1K in/out), not real. ` +
+            `Add it to ProviderConfig.pricing or call registry.addPricing(). ` +
+            `Pricing is keyed on the BARE model id: "openai:gpt-4.1" registers as "gpt-4.1". ` +
+            `Use registry.assertPricingComplete([...]) at startup to catch this before it bills.`,
+        );
+      }
     }
     // Anthropic ratios as defaults: cache write 1.25× input, cache read 0.1×.
     const cacheWriteRate = rate.cacheWrite ?? rate.in * 1.25;
