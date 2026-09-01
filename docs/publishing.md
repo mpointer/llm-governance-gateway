@@ -33,16 +33,21 @@ package.json and moved it to the workflow.
    `npm publish --provenance --access public`, with `permissions:
    id-token: write` and npm >= 11.5 (`npm install -g npm@latest` in the
    job; older npm cannot mint the OIDC token).
-5. Every subsequent release: bump version, tag `vX.Y.Z`, push the tag.
-   The workflow guard checks tag == package.json version before
-   publishing.
+5. Every subsequent release: bump version, then either tag `vX.Y.Z` and
+   push the tag, or run the Release workflow manually (Actions → Release
+   → Run workflow) and give it the version — it creates the tag for you.
+   The manual path exists because pushing a tag needs credentials that
+   not every release path has, and it is the same publish job either
+   way. Both are guarded on tag == package.json version, so a manual run
+   cannot publish a version the branch does not declare.
 
 ## Rules of thumb
 
 - Provenance lives in the workflow command line, never in package.json.
 - The release workflow filename is part of the trusted-publishing config;
   renaming the file silently breaks releases until the npm settings are
-  updated to match.
+  updated to match. The trust binds to the *file*, not to the trigger, so
+  adding `workflow_dispatch` to it did not require an npm settings change.
 - PyPI has the same bootstrap shape (a pending-publisher feature exists,
   but if the first upload happened via twine, configure trusted
   publishing afterward and stop using the token).
