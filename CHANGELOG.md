@@ -8,6 +8,50 @@ adopters implement, and in practice they have only ever gained capability throug
 *optional* parameters — but they are not yet under a formal semver freeze. 1.0.0
 is gated on a downstream integration proving the SPI holds, not on a date.
 
+## 0.12.0
+
+One fix, reported by two independent adoptions (#9, and #28 item 3).
+
+**No breaking changes from 0.11.0.**
+
+### Fixed
+
+- **Pricing accepts prefixed model ids.** Everything else in the library takes a
+  scheme-prefixed id — `tasks.defaults`, `ChainLinkConfig.model`, `judge.model`.
+  Pricing alone keys on the **bare** id, because that is what a chain link
+  carries, and nothing said so.
+
+  An adopter following the convention the README teaches registered
+  `"openai:gpt-4.1"`, lookups happened under `"gpt-4.1"`, nothing matched, and
+  every call for that model was priced at the fallback estimate rather than the
+  real rate. `addPricing`, `hasPricing`, `ProviderConfig.pricing` and the lookup
+  now normalise through `parseModelId`, so **both forms work**.
+
+  Only a *recognised provider prefix* is stripped: OpenRouter's `:free`/`:beta`
+  variants and slash-scoped vendor ids keep their shape.
+
+- **The missing-pricing warning fires once per model, not once per call**, and
+  names the prefixed-key mistake that causes it. The old per-call warning sat on
+  a hot path, which in production means drowned out or switched off.
+
+### Added
+
+- **`registry.assertPricingComplete(ids)`** and **`registry.missingPricing(ids)`**
+  — a startup or CI preflight. `assertPricingComplete` throws listing everything
+  unpriced.
+
+  There is deliberately **no** strict mode inside the cost calculation itself.
+  `estimateCostCents` runs inline in the `estimatedCostCents` field of the
+  usage-row payload, so throwing there would lose the ledger row for a call that
+  already spent money — a wrong cost traded for no record at all. The preflight
+  fails at boot, before anything is billed.
+
+### Documented
+
+- The bare-vs-prefixed contract on `ProviderConfig.pricing` and on
+  `UsageEntry.provider`/`model` (usage rows keep the split and never rejoin it),
+  plus a README section.
+
 ## 0.11.0
 
 Two SPI shape gaps closed before a 1.0 freeze would make them expensive to
