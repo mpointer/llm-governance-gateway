@@ -498,6 +498,46 @@ Restarting rather than resuming is deliberate: no provider offers mid-object con
 
 Remaining constraints, stated plainly: no repair retry, no judge, no native-Anthropic options on the streaming path. Cache hits return a single-emission stream.
 
+### Model-id conventions, and the one place they differ
+
+Most places take a **scheme-prefixed** id — `tasks.defaults`,
+`ChainLinkConfig.model`, `judge.model`: `"openai:gpt-4.1"`, bare means Anthropic.
+
+**Pricing is keyed on the bare id**, because that is what a chain link carries
+and what the cost lookup uses:
+
+```ts
+providers: { pricing: { "gpt-4.1": { in: 0.2, out: 0.8 } } }   // bare
+gw.registry.addPricing("openai:gpt-4.1", { in: 0.2, out: 0.8 }); // also fine — normalised
+```
+
+Both forms work: a prefixed key is normalised to the bare id on the way in. It
+did not use to be, and the failure was invisible — the key registered, nothing
+ever read it, and every call for that model was silently priced at the fallback
+estimate instead of the real rate. An adopter shipped that to production and
+found it by reading the source.
+
+Usage rows keep the split: `entry.provider` is `"openai"` and `entry.model` is
+`"gpt-4.1"`, never rejoined. Reconstruct the prefixed id from both if your own
+cost table uses that convention.
+
+**Check at startup, not in production:**
+
+```ts
+gw.registry.assertPricingComplete(["gpt-4.1", "claude-sonnet-4-6", "google:gemini-2.5-pro"]);
+```
+
+Throws listing everything unpriced. `missingPricing()` is the non-throwing form.
+Run it at boot or in a test — a model with no pricing still generates fine, it
+just costs you accurate spend data, which is the one thing this library exists to
+give you. Unpriced models also warn once each (not once per call, which was
+noise on a hot path).
+
+There is deliberately **no** strict mode inside the cost calculation itself.
+Estimation runs inline in the usage-row payload, so throwing there would cost the
+ledger row for a call that already spent money — trading a wrong cost for no
+record at all.
+
 ### Attribution beyond userId
 
 `userId`, `orgId`, `app`, `route` and `promptSlug` are the dimensions the gateway itself reasons about — caps, cache scoping, routing. If your cost model has one the gateway has no opinion on, pass it as `metadata`:

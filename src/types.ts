@@ -9,6 +9,12 @@ export interface UsageEntry {
   app?: string | null;
   route?: string | null;
   promptSlug?: string | null;
+  /**
+   * Split, and deliberately not re-joined: `provider` is `"openai"` and `model`
+   * is the BARE `"gpt-4.1"`, never `"openai:gpt-4.1"`. A store writing to its
+   * own table under a prefixed convention has to reconstruct the id from both
+   * fields.
+   */
   provider: string;
   model: string;
   inputTokens: number;
@@ -242,7 +248,18 @@ export interface ProviderConfig {
    * to be impossible rather than merely discouraged.
    */
   requireExplicitDefault?: boolean;
-  /** Merged over built-in pricing; add entries for models you use. */
+  /**
+   * Merged over built-in pricing; add entries for models you use.
+   *
+   * **Keys are BARE model ids** — `"gpt-4.1"`, not `"openai:gpt-4.1"` — because
+   * that is what a chain link carries and what the cost lookup uses. This is
+   * deliberately the opposite convention to `tasks.defaults` and
+   * `ChainLinkConfig.model`, which DO take the scheme prefix.
+   *
+   * Prefixed keys are normalised for you rather than ignored, so both forms
+   * work. Before 0.12.0 a prefixed key silently registered something nothing
+   * read, and every call for that model was priced at the fallback estimate.
+   */
   pricing?: Record<string, ModelPricing>;
   /**
    * Custom OpenAI-compatible endpoints (local/self-hosted serving: Ollama,
