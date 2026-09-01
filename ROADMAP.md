@@ -102,8 +102,9 @@ see below; that is a decision, not a backlog.
   structurally lacks. Design:
   [hedging-and-shadow-calls.md](./docs/design/hedging-and-shadow-calls.md) specs
   **shadow** (serve the primary, compare off the critical path, judge and ledger
-  both, join on `traceId`) and keeps **race** deferred behind it. Not started:
-  gated on a named adopter who will switch it on, per the guardrail-hooks rule.
+  both, join on `traceId`) and reserves the shape for **race** and **both**.
+  Intended first adopter: CareerPointers — but it is not on the gateway yet, so
+  the sequence is adopt, accumulate traffic, then H1. Not started.
 
 Design and resolution log: [docs/design/critique-beyond-pr18.md](./docs/design/critique-beyond-pr18.md)
 
