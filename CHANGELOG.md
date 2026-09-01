@@ -8,6 +8,56 @@ adopters implement, and in practice they have only ever gained capability throug
 *optional* parameters — but they are not yet under a formal semver freeze. 1.0.0
 is gated on a downstream integration proving the SPI holds, not on a date.
 
+## 0.13.0
+
+One fix, opt-in: a published prompt edit now reaches production.
+
+**No breaking changes from 0.12.0.** The new behaviour is off unless you set
+`invalidateCacheOnPromptChange: true`, and with it off the cache keys are
+byte-identical to 0.12.0's — upgrading does not cold-start anyone's cache.
+
+### Fixed
+
+- **Editing a prompt had no effect on anything already cached.** `cacheKey()`
+  was built from the slug, the caller's `cacheParts` and the optional `orgId` —
+  never from the prompt itself. The cache is also read *before* `loadPrompt`, to
+  save a store round-trip on a hit. So publishing a new body changed the answer
+  only for inputs nobody had asked yet; every cached input kept serving the old
+  version until the 24h TTL expired.
+
+  Nothing reported a problem: the admin saw a successful publish and the
+  gateway saw a cache hit. This is the prerequisite the shared control plane's
+  prompt-editing surface was blocked on — an editor that silently does not take
+  effect is worse than no editor.
+
+  Set `invalidateCacheOnPromptChange: true` and the resolved prompt is loaded
+  before the cache read, and its fingerprint is appended to the key, so an edit
+  invalidates exactly the entries it affects and nothing else.
+
+  It is **opt-in rather than default** because scoping the key to the prompt
+  means loading the prompt on every request, including hits — giving up the
+  round-trip saving that the current ordering exists to preserve. That is a real
+  cost on a cache-heavy workload, and not one to impose on an adopter who edits
+  prompts by deploying code.
+
+### Added
+
+- **`GatewayConfig.invalidateCacheOnPromptChange`** (default `false`).
+
+- **`promptFingerprint(cfg)`** — exported, so a caller that computes keys itself
+  stays consistent with the gateway. A short hash over the prompt body,
+  `modelHint`, `providerOverride` and `temperature`.
+
+  A *fingerprint* rather than a `StoredPrompt.version` field: a version is
+  correct only for as long as every writer remembers to bump it, and a store
+  that forgets silently reintroduces this exact bug. A hash cannot go stale, it
+  needs no SPI change so every hand-written `PromptStore` works unchanged, and
+  it covers `modelHint` too — repointing a prompt at a different model changes
+  the answer and must invalidate.
+
+- **`cacheKey()` takes an optional fourth `promptFp`.** Omitted, the key is the
+  pre-0.13 shape exactly; supplied, it appends `:p<fp>`.
+
 ## 0.12.0
 
 One fix, reported by two independent adoptions (#9, and #28 item 3).
