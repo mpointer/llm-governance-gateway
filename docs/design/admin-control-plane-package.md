@@ -524,7 +524,7 @@ of A1 — not to fit it, but to size the migration.
 | Decision | Answer | Why |
 |---|---|---|
 | Inside the gateway? | No — sibling package | §3.5: the boundary is the point |
-| Which layer first? | L1 store adapters | Highest value, lowest risk, independently useful |
+| Which layer first? | L1 store adapters | Lowest risk and the schema L2 needs — *not* highest value; see the layering section |
 | Owns auth? | No — `identify` callback | Every app already has a session |
 | Owns a database? | No — takes the app's connection | Same posture as the Drizzle adapters |
 | New analytics store? | No | The ledger already has the columns |
