@@ -165,6 +165,12 @@ Three ways out, in preference order:
 effect is worse than no prompt library, because it invites the operator to
 believe a change landed when it has not.
 
+> **Resolved in gateway 0.13.0** via option (1), as
+> `invalidateCacheOnPromptChange`. It fingerprints the resolved prompt instead
+> of adding `StoredPrompt.version` — see the Sequencing note on A0 for why. The
+> control plane must set the flag; it is off by default so existing caches
+> survive the upgrade.
+
 The task-override path has the same shape but a smaller blast radius and an
 existing escape hatch: `TaskRouter` caches `getOverrides` per org for 30 s
 (`tasks.ts:63-85`) and already exposes `invalidateOverrides()`, labelled "admin
@@ -443,9 +449,15 @@ Collected from adversarial review; none of these are exotic.
 
 ## Sequencing
 
-- **A0 — the cache-key gateway PR.** A prompt version or body hash on
-  `StoredPrompt`, incorporated into `cacheKey`. Lives in the gateway repo, is
-  justified on its own merits, and blocks A1: see "The prerequisite" above.
+- **A0 — the cache-key gateway PR. DONE** (gateway 0.13.0). Shipped as
+  `GatewayConfig.invalidateCacheOnPromptChange`, opt-in and default-off.
+  Implemented by fingerprinting the resolved prompt rather than versioning
+  `StoredPrompt` as sketched below: a version field is only correct while every
+  writer remembers to bump it, and one that forgets reintroduces this bug
+  silently, whereas a hash cannot go stale and needs no SPI change. The
+  fingerprint covers `modelHint`/`providerOverride`/`temperature` as well as the
+  body, so repointing a prompt at another model invalidates too. **A1 is
+  unblocked.**
 - **A1 — L1 adapters.** `PromptStore`, `ModelConfigStore`, `TaskOverrideStore`
   over Drizzle (PG + SQLite), plus the reference schema and its migration path.
   Closes the table in "Problem" and is independently useful. Note `ensureTables`

@@ -418,12 +418,52 @@ function buildJudgePrompt(
  * Unscoped keys keep their exact pre-multi-tenant shape, so an existing cache
  * survives the upgrade rather than silently missing on every read.
  */
-export function cacheKey(slug: string, parts: string[], orgId?: string | null): string {
+export function cacheKey(
+  slug: string,
+  parts: string[],
+  orgId?: string | null,
+  /** See promptFingerprint. Omitted = the exact pre-0.13 key shape. */
+  promptFp?: string,
+): string {
   const hash = createHash("sha256")
     .update(parts.join(" "))
     .digest("hex")
     .slice(0, 32);
-  return orgId ? `aicache:org:${orgId}:${slug}:${hash}` : `aicache:${slug}:${hash}`;
+  const base = orgId ? `aicache:org:${orgId}:${slug}:${hash}` : `aicache:${slug}:${hash}`;
+  return promptFp ? `${base}:p${promptFp}` : base;
+}
+
+/**
+ * Fingerprint of a resolved prompt, for the cache key.
+ *
+ * Hashing the prompt rather than carrying a version number on `StoredPrompt`
+ * is deliberate. A version field is only correct while every writer remembers
+ * to bump it, and a writer that forgets reintroduces exactly the bug this
+ * closes — silently, which is the property that made the bug expensive. A hash
+ * cannot go stale. It also needs nothing of the SPI, so every hand-written
+ * PromptStore keeps working untouched.
+ *
+ * It covers more than the body: `modelHint`, `providerOverride` and
+ * `temperature` all change what the model returns, so an admin who repoints a
+ * prompt at a different model must invalidate too. A body-only version would
+ * miss that.
+ */
+export function promptFingerprint(cfg: {
+  body: string;
+  modelHint?: string;
+  providerOverride?: string;
+  temperature?: number;
+}): string {
+  return createHash("sha256")
+    .update(cfg.body)
+    .update("\u0000")
+    .update(cfg.modelHint ?? "")
+    .update("\u0000")
+    .update(cfg.providerOverride ?? "")
+    .update("\u0000")
+    .update(cfg.temperature === undefined ? "" : String(cfg.temperature))
+    .digest("hex")
+    .slice(0, 12);
 }
 
 export class Gateway {
@@ -440,6 +480,7 @@ export class Gateway {
   private readonly appId: string | null;
   private readonly cacheTtlSeconds: number;
   private readonly timeouts: GatewayConfig["timeouts"];
+  private readonly scopeCacheToPrompt: boolean;
   private readonly orgId: string | undefined;
   private readonly encrypt?: (t: string) => string;
   private readonly judgeDefaults?: GatewayConfig["judge"];
@@ -465,6 +506,7 @@ export class Gateway {
     this.appId = cfg.appId ?? null;
     this.cacheTtlSeconds = cfg.cacheTtlSeconds ?? DEFAULT_CACHE_TTL_SECONDS;
     this.timeouts = cfg.timeouts;
+    this.scopeCacheToPrompt = cfg.invalidateCacheOnPromptChange === true;
     this.orgId = cfg.orgId;
     this.encrypt = cfg.encrypt;
     this.judgeDefaults = cfg.judge;
@@ -705,7 +747,15 @@ export class Gateway {
     if (useCache && !opts.cacheParts) {
       throw new Error("runText: cacheParts is required unless cache:false is set.");
     }
-    const key = useCache ? cacheKey(opts.slug, opts.cacheParts!, orgId) : null;
+    const prefetched = await this.prefetchPromptForKey(opts, orgId, useCache);
+    const key = useCache
+      ? cacheKey(
+          opts.slug,
+          opts.cacheParts!,
+          orgId,
+          prefetched ? promptFingerprint(prefetched) : undefined,
+        )
+      : null;
     if (key) {
       const cached = await this.cache.get<string>(key);
       if (cached !== undefined) {
@@ -738,9 +788,9 @@ export class Gateway {
       }
     }
 
-    const promptConfig: PromptConfig = opts.promptBody
-      ? { body: opts.promptBody }
-      : await this.loadPrompt(opts.slug, orgId);
+    const promptConfig: PromptConfig =
+      prefetched ??
+      (opts.promptBody ? { body: opts.promptBody } : await this.loadPrompt(opts.slug, orgId));
     const prompt = renderTemplate(promptConfig.body, opts.variables(opts.input));
     const temperature = opts.temperature ?? promptConfig.temperature;
 
@@ -1054,7 +1104,15 @@ export class Gateway {
     if (useCache && !opts.cacheParts) {
       throw new Error("streamStructured: cacheParts is required unless cache:false is set.");
     }
-    const key = useCache ? cacheKey(opts.slug, opts.cacheParts!, orgId) : null;
+    const prefetched = await this.prefetchPromptForKey(opts, orgId, useCache);
+    const key = useCache
+      ? cacheKey(
+          opts.slug,
+          opts.cacheParts!,
+          orgId,
+          prefetched ? promptFingerprint(prefetched) : undefined,
+        )
+      : null;
     if (key) {
       const cached = await this.cache.get<O>(key);
       if (cached !== undefined) {
@@ -1083,9 +1141,9 @@ export class Gateway {
       }
     }
 
-    const promptConfig: PromptConfig = opts.promptBody
-      ? { body: opts.promptBody }
-      : await this.loadPrompt(opts.slug, orgId);
+    const promptConfig: PromptConfig =
+      prefetched ??
+      (opts.promptBody ? { body: opts.promptBody } : await this.loadPrompt(opts.slug, orgId));
     const prompt = renderTemplate(promptConfig.body, opts.variables(opts.input));
     const temperature = opts.temperature ?? promptConfig.temperature;
 
@@ -1380,7 +1438,14 @@ export class Gateway {
     const misses: { id: string; prompt: string; cacheK: string | null }[] = [];
     for (const item of opts.items) {
       const prompt = renderTemplate(promptConfig.body, item.variables);
-      const k = useCache ? cacheKey(opts.slug, [JSON.stringify(item.variables)], orgId) : null;
+      const k = useCache
+        ? cacheKey(
+            opts.slug,
+            [JSON.stringify(item.variables)],
+            orgId,
+            this.scopeCacheToPrompt ? promptFingerprint(promptConfig) : undefined,
+          )
+        : null;
       if (k) {
         const hit = await this.cache.get<O>(k);
         if (hit !== undefined) {
@@ -1795,6 +1860,27 @@ export class Gateway {
   //   - Store unreachable but slug known → warn, use default.
   //   - Slug unknown to both → throw.
   // -------------------------------------------------------------------------
+  /**
+   * Resolve the prompt early when the cache key must include it.
+   *
+   * The default ordering reads the cache BEFORE loading the prompt, which
+   * saves a store round-trip on every hit. That optimisation is exactly why a
+   * prompt edit does not invalidate anything, so scoping the key to the prompt
+   * necessarily gives it up — for the calls that opt in, and only those.
+   *
+   * An inline `promptBody` needs no store read at all: the prompt is already
+   * in hand, so it is fingerprinted without any extra cost.
+   */
+  private async prefetchPromptForKey(
+    opts: { slug: string; promptBody?: string },
+    orgId: string | null | undefined,
+    useCache: boolean,
+  ): Promise<PromptConfig | undefined> {
+    if (!useCache || !this.scopeCacheToPrompt) return undefined;
+    if (opts.promptBody) return { body: opts.promptBody };
+    return await this.loadPrompt(opts.slug, orgId);
+  }
+
   private async loadPrompt(slug: string, orgId?: string | null): Promise<PromptConfig> {
     const def = this.promptDefaults.find((d) => d.slug === slug);
 
@@ -1960,7 +2046,15 @@ export class Gateway {
         "runStructured: cacheParts is required unless cache:false is set.",
       );
     }
-    const key = useCache ? cacheKey(opts.slug, opts.cacheParts!, orgId) : null;
+    const prefetched = await this.prefetchPromptForKey(opts, orgId, useCache);
+    const key = useCache
+      ? cacheKey(
+          opts.slug,
+          opts.cacheParts!,
+          orgId,
+          prefetched ? promptFingerprint(prefetched) : undefined,
+        )
+      : null;
     if (key) {
       const cached = await this.cache.get<O>(key);
       if (cached !== undefined) {
@@ -1984,9 +2078,9 @@ export class Gateway {
     }
 
     // 4. Load prompt (inline promptBody skips the store/defaults lookup)
-    const promptConfig: PromptConfig = opts.promptBody
-      ? { body: opts.promptBody }
-      : await this.loadPrompt(opts.slug, orgId);
+    const promptConfig: PromptConfig =
+      prefetched ??
+      (opts.promptBody ? { body: opts.promptBody } : await this.loadPrompt(opts.slug, orgId));
     const prompt = renderTemplate(promptConfig.body, opts.variables(opts.input));
     const temperature = opts.temperature ?? promptConfig.temperature;
 
