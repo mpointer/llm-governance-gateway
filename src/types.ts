@@ -532,6 +532,29 @@ export interface GatewayConfig {
   /** Cache TTL in seconds. Default 24h. */
   cacheTtlSeconds?: number;
   /**
+   * Include a fingerprint of the resolved prompt in the cache key, so editing
+   * a prompt makes prior cached answers unreachable instead of stale.
+   * Default false, which is the pre-0.13 behaviour exactly.
+   *
+   * **Turn this on if prompts are editable at runtime.** Without it, publishing
+   * a new prompt version changes nothing for any input already cached until the
+   * TTL expires (24h by default): the cache is read BEFORE the prompt is
+   * loaded, and the prompt is not part of the key. The admin sees a successful
+   * edit, production keeps serving the old version, and nothing reports a
+   * problem.
+   *
+   * The cost, and the reason this is opt-in rather than the default: the prompt
+   * must be loaded before the cache can be consulted, so every cache HIT gains
+   * a `PromptStore.getPrompt` round-trip. Deployments with static
+   * `promptDefaults` and no prompt store gain nothing from this and should
+   * leave it off; the in-memory default path makes the extra load nearly free,
+   * but a DB-backed store on a hot path will feel it.
+   *
+   * Keys are unchanged when off, so an existing cache survives the upgrade.
+   * Turning it ON invalidates every existing entry once, by design.
+   */
+  invalidateCacheOnPromptChange?: boolean;
+  /**
    * Bounds on outbound provider calls. See
    * docs/design/timeouts-and-deadlines.md. Per-call options override these:
    * per call > this config > built-in default.

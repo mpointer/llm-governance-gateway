@@ -1,6 +1,7 @@
 export {
   Gateway,
   cacheKey,
+  promptFingerprint,
   type RunStructuredOptions,
   type RunStructuredResult,
   type RunTextOptions,
