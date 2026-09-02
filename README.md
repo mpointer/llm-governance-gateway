@@ -28,6 +28,13 @@ Spend controls in this space are usually observed (dashboards that tell you *aft
 
 ## Quickstart
 
+Starting fresh? This section is enough. **Already have your own retry loop,
+usage table and model constants?** Read
+[Adopting the gateway](./docs/integration/adopting-the-gateway.md) instead —
+the SPI boundary (which stores ship and which you write), a phased path where
+each step is independently revertible, and four traps that have each already
+bitten a real adopter.
+
 ```ts
 import { z } from "zod";
 import { Gateway, MemoryUsageStore } from "llm-governance-gateway";
