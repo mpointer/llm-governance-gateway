@@ -475,6 +475,12 @@ That condition is arguably met today — the requirement is to confirm what FMA 
 CareerPointers actually implement before writing a third version, since the
 adapters must fit the schemas already in production, not a greenfield ideal.
 
+**Half of that confirmation is now in** ([#44](https://github.com/mpointer/llm-governance-gateway/issues/44),
+2026-09-01). CareerPointers was verified against its current `main`; see Open
+question 1 below for what it changes. **FMA remains unconfirmed, and it is the
+half that matters more** — it is the app with a real control plane, so it is the
+one whose schema an adapter would have to fit.
+
 ## Which repository
 
 A new one. Not this repo — the gateway must not carry a dependency on an admin
@@ -520,7 +526,26 @@ of A1 — not to fit it, but to size the migration.
 
 1. **What do FMA and CareerPointers actually implement today?** The single
    highest-value unknown. The adapters must fit real schemas. Neither repository
-   is in scope for the session that wrote this document, so this is unverified.
+   is in scope for the session that wrote this document.
+
+   **CareerPointers: answered** ([#44](https://github.com/mpointer/llm-governance-gateway/issues/44),
+   verified against CP `main` on 2026-09-01; full report with file:line citations
+   in `futuremeanswered/CareerPointers` PR #635). Two things for A1's scoping:
+
+   - **The prior art to fit is `aiModelConfig` (admin override) plus the admin
+     prompt editor, both over `@pointers/db`.** That is what an L1 adapter would
+     have to map onto.
+   - **Not `apps/ai-gateway`.** CP carries an unactivated Cloudflare Worker of
+     that name which duplicates `packages/ai`'s chain-walking, tiers, pricing and
+     admin override so that CP and FMA could share one governed backend over HTTP
+     — the same problem this package and the gateway already solve. It is not a
+     gateway defect and it is not prior art for the stores; the honest read is
+     that adopting the gateway retires it rather than running alongside it.
+     Recorded here because a scoping pass that mistook it for CP's control plane
+     would size the migration against the wrong code.
+
+   **FMA: still unanswered**, and it is the more consequential half — FMA is the
+   app with the real org-scoped control plane.
 2. **One package or two?** Splitting adapters (L1) from admin logic (L2+) lets an
    adopter take the stores without the write side. Leaning: one package, subpath
    exports, mirroring how the gateway ships `/drizzle-pg` and `/http`.

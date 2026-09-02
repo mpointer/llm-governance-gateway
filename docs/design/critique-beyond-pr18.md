@@ -8,6 +8,7 @@
 | **Date** | August 29, 2026 |
 | **Gateway version** | [`mpointer/llm-governance-gateway`](https://github.com/mpointer/llm-governance-gateway) @ `989f5af` (v0.9.0), with PR 18 in flight — **see the Addendum (§7) for PRs 19 & 20** |
 | **Proof point** | [`futuremeanswered/CareerPointers`](https://github.com/futuremeanswered/CareerPointers) @ `fb252e28` |
+| **Profile re-verified** | 2026-09-01 against CP `main` — §2 held on all 11 lines, [#44](https://github.com/mpointer/llm-governance-gateway/issues/44) |
 | **Companion** | *The Pointer AI Component Architecture*; *FMA LLM Architecture Deep-Dive* |
 
 ---
@@ -15,6 +16,17 @@
 ## 1. Framing: Two Tracks, One Proof Point
 
 The architecture is now explicitly **two coordinated tracks**. The **gateway-convergence track** moves each app's LLM execution onto `llm-governance-gateway` as the dependable plumbing. The **Scout-extraction track** lifts the conversational surface into `@pointer/scout`, which routes every generation through the gateway's `Gateway` interface. They are coordinated but independent: Scout depends on the gateway's *interface*, not its concrete adoption, so neither blocks the other.
+
+> **Verification note (2026-09-01).** This document's CareerPointers profile was
+> written against `fb252e28` and was, until now, unverified since. It has been
+> re-checked against CP's current `main` and **held on every point** —
+> the pipeline order, the `ROLE_ORDER` failover roles, live model discovery, the
+> 13-line admin route, `userId`-only scoping, Anthropic-first `MODEL_TIERS`, and
+> no embeddings. Both flagged staleness risks failed to materialise: in
+> particular **`PortfolioChat` is still non-streaming**, so §3.2 remains latent
+> rather than live. Details and file:line citations in
+> [#44](https://github.com/mpointer/llm-governance-gateway/issues/44). Treat the
+> profile below as current as of that date.
 
 **CareerPointers is the first proof point for both tracks simultaneously** — and it is an unusually informative one, because it sits between FMA and a greenfield app in maturity. It already has a real AI subsystem (`@pointers/ai`, which its own `package.json` describes as "Mirrors future-me-answered's AI subsystem"), a governed pipeline (`runStructured` with rate limit → spend cap → cache → failover chain → usage log → judge), a three-tier failover chain (`primary`/`fallback`/`backup2` with a `ROLE_ORDER`), live model discovery (`listAllProviderModels`), and a public grounded-Q&A surface (`PortfolioChat`). What it **lacks** is precisely what the two tracks are meant to supply — and where the gateway, even after PR 18, still falls short of supplying it.
 
