@@ -198,8 +198,23 @@ export interface ModelConfigStore {
   /**
    * Hard-pin override; bypasses the chain entirely. Null = use the chain.
    * `orgId` scopes the pin to one tenant; undefined = the global pin.
+   *
+   * `tier` is the call's own `RunStructuredOptions.tier`/`RunTextOptions.tier`
+   * ("fast" | "power"), passed through so a store CAN honor a caller's
+   * explicit capability request even when an admin has hard-pinned a model —
+   * an adopter that needs "an explicit tier always beats the admin pin" (never
+   * silently downgrade a caller's requested capability) implements that by
+   * returning `null` here when `tier` is set, falling through to task/chain
+   * resolution instead. Optional and additive: a store whose `getOverride`
+   * takes zero or one parameter remains a valid implementation (TypeScript
+   * structural typing — same convention as the pre-existing `orgId` param),
+   * and the gateway's own default resolution order is unchanged for any
+   * store that ignores it.
    */
-  getOverride(orgId?: string | null): Promise<{ provider: ProviderId; model: string } | null>;
+  getOverride(
+    orgId?: string | null,
+    tier?: "fast" | "power",
+  ): Promise<{ provider: ProviderId; model: string } | null>;
   /**
    * Failover chain in priority order (primary → fallback → ...).
    * `orgId` scopes the chain to one tenant; undefined = the global chain.
