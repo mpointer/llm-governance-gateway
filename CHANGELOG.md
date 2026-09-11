@@ -8,6 +8,51 @@ adopters implement, and in practice they have only ever gained capability throug
 *optional* parameters — but they are not yet under a formal semver freeze. 1.0.0
 is gated on a downstream integration proving the SPI holds, not on a date.
 
+## 0.14.0
+
+One SPI addition, from the first adopter with a pre-existing AI subsystem
+(CareerPointers, #47).
+
+**No breaking changes from 0.13.0.** The new parameter is optional and
+trailing, so a store that ignores it behaves exactly as before — including
+the default resolution order, where an admin pin still always wins.
+
+### Added
+
+- **`ModelConfigStore.getOverride(orgId?, tier?)` now receives the call's
+  tier.** The call's own `RunStructuredOptions.tier`/`RunTextOptions.tier`
+  (`"fast" | "power"`) is threaded to the store at all three resolution sites
+  — `runStructured`, `streamStructured` and `runText`.
+
+  The gateway makes **no policy decision** with it. It passes the tier through
+  so a store *can* decide the pin should not apply: an adopter that needs "an
+  explicit tier always beats the admin pin" — an admin may choose the provider
+  but must never silently downgrade a caller's requested capability —
+  implements that by returning `null` when `tier` is set, falling through to
+  task and chain resolution. That safety floor was not expressible before,
+  because the store could not see the tier.
+
+  Additive and trailing, the same convention `orgId` already established: a
+  zero-, one-, or two-parameter `getOverride` all remain valid implementations
+  under TypeScript's structural typing, and there is a test pinning the
+  zero-parameter case.
+
+### Documented
+
+- The README now points at
+  [`docs/integration/adopting-the-gateway.md`](./docs/integration/adopting-the-gateway.md)
+  from the top of Quickstart — the playbook for an app that already has its
+  own retry loop, usage table and model constants. `README.md` ships in the
+  tarball and `docs/` does not, so before this an adopter installing from npm
+  had no pointer to it.
+
+### Also in this release
+
+Dev-dependency bumps only, none of which reach the published package: hono
+4.12.34 → 4.13.5 (three security advisories — none reachable from this
+library's own code, which imports only `Hono` and uses no cache middleware,
+`parseBody` or `toSSG`), plus two grouped Dependabot updates.
+
 ## 0.13.0
 
 One fix, opt-in: a published prompt edit now reaches production.
