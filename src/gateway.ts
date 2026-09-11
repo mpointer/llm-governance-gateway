@@ -896,7 +896,7 @@ export class Gateway {
       durationMs = 0;
     } else {
       // Single-link resolution + ZDR-filtered chain (parallel to runStructured).
-      const adminOverride = (await this.modelConfig?.getOverride(orgId)) ?? null;
+      const adminOverride = (await this.modelConfig?.getOverride(orgId, opts.tier)) ?? null;
       let links: { provider: string; model: string; languageModel?: LanguageModel }[];
       if (adminOverride) {
         links = [this.registry.resolveDefault(adminOverride)];
@@ -1187,7 +1187,7 @@ export class Gateway {
 
     // Resolution: adminOverride (single, hard pin) > task chain > config
     // chain > default. Everything but the admin pin can be multi-link.
-    const adminOverride = (await this.modelConfig?.getOverride(orgId)) ?? null;
+    const adminOverride = (await this.modelConfig?.getOverride(orgId, opts.tier)) ?? null;
     let links: { provider: string; model: string; languageModel?: LanguageModel }[];
     if (adminOverride) {
       links = [this.registry.resolveDefault(adminOverride)];
@@ -2159,7 +2159,7 @@ export class Gateway {
       //   b. task routing              — per-task override/default
       //   c. modelConfig.getChain()    — primary → fallback → ...
       //   d. Static/env default        — no dynamic config present
-      const adminOverride = (await this.modelConfig?.getOverride(orgId)) ?? null;
+      const adminOverride = (await this.modelConfig?.getOverride(orgId, opts.tier)) ?? null;
 
       if (!adminOverride && opts.task) {
         if (!this.tasks) {
