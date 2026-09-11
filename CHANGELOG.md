@@ -8,32 +8,6 @@ adopters implement, and in practice they have only ever gained capability throug
 *optional* parameters — but they are not yet under a formal semver freeze. 1.0.0
 is gated on a downstream integration proving the SPI holds, not on a date.
 
-## 0.14.0
-
-`ModelConfigStore.getOverride()` gained an optional `tier` parameter.
-
-### Added
-
-- **`getOverride(orgId?, tier?)`.** The gateway now passes the call's own
-  `tier` ("fast" | "power") through to `getOverride`, in addition to the
-  existing `orgId`. This closes a real gap a downstream adopter hit: the
-  resolution order is `adminOverride (hard pin) > task > chain > default`,
-  and there was previously no way for a store to know a caller had requested
-  a specific capability tier before deciding whether its hard pin should
-  apply. A store that wants "an explicit tier always beats the admin pin —
-  admin config chooses the provider, never silently downgrades a caller's
-  requested capability" now implements that by returning `null` when `tier`
-  is set, falling through to task/chain resolution instead.
-
-  **No breaking changes.** The parameter is additive and trailing, following
-  the same convention already established for `orgId` (documented in
-  `docs/integration/adopting-the-gateway.md`): an implementation with zero,
-  one, or two parameters remains a valid `ModelConfigStore` — TypeScript's
-  structural typing accepts a function declaring fewer parameters than the
-  interface. A store that ignores the new parameter is unaffected; the
-  gateway's default resolution order (admin pin always wins, regardless of
-  tier) is unchanged for it.
-
 ## 0.13.0
 
 One fix, opt-in: a published prompt edit now reaches production.

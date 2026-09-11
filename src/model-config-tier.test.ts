@@ -40,6 +40,64 @@ function lm(answer: string, id = "m"): LanguageModel {
   } as unknown as LanguageModel;
 }
 
+// runText's doGenerate returns plain text, not a JSON-encoded object.
+function textLm(text: string, id = "tm"): LanguageModel {
+  return {
+    specificationVersion: "v2",
+    provider: "fake",
+    modelId: id,
+    supportedUrls: {},
+    async doGenerate() {
+      return {
+        content: [{ type: "text", text }],
+        finishReason: "stop",
+        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        warnings: [],
+      };
+    },
+    async doStream() {
+      throw new Error("not used");
+    },
+  } as unknown as LanguageModel;
+}
+
+// streamStructured needs a real doStream implementation — mirrors
+// stream.test.ts's fake V2 streaming model.
+function streamLm(answer: string, id = "sm"): LanguageModel {
+  return {
+    specificationVersion: "v2",
+    provider: "fake",
+    modelId: id,
+    supportedUrls: {},
+    async doGenerate() {
+      throw new Error("not used");
+    },
+    async doStream() {
+      const parts = [
+        { type: "stream-start", warnings: [] },
+        { type: "text-start", id: "1" },
+        { type: "text-delta", id: "1", delta: JSON.stringify({ answer }) },
+        { type: "text-end", id: "1" },
+        { type: "finish", finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } },
+      ];
+      return {
+        stream: new ReadableStream({
+          start(controller) {
+            for (const p of parts) controller.enqueue(p);
+            controller.close();
+          },
+        }),
+      };
+    },
+  } as unknown as LanguageModel;
+}
+
+async function collect<T>(it: AsyncIterable<T>): Promise<T[]> {
+  const out: T[] = [];
+  for await (const v of it) out.push(v);
+  return out;
+}
+
 describe("ModelConfigStore.getOverride() tier parameter", () => {
   it("passes the call's tier through to getOverride", async () => {
     const seen: (string | undefined)[] = [];
@@ -114,5 +172,63 @@ describe("ModelConfigStore.getOverride() tier parameter", () => {
     const res = await gw.runStructured({ ...base, cacheParts: ["1"], tier: "power" });
     expect(res.object).toEqual({ answer: "legacy" });
     expect(usage.entries[0]!.model).toBe("legacy-model");
+  });
+
+  it("passes the call's tier through to getOverride on runText too", async () => {
+    const usage = new MemoryUsageStore();
+    const seen: (string | undefined)[] = [];
+    const store: ModelConfigStore = {
+      getOverride: async (_orgId, tier) => {
+        seen.push(tier);
+        return tier ? null : { provider: "anthropic", model: "pinned-model" };
+      },
+      getChain: async () => [
+        { provider: "anthropic" as const, model: "chain-model", languageModel: textLm("from-chain") },
+      ],
+    };
+    const gw = new Gateway({
+      usage,
+      promptDefaults: [{ slug: "q", body: "Q {{q}}", variables: ["q"] }],
+      modelConfig: store,
+      caps: { userDailyCents: 0, anonDailyCents: 0, globalDailyCents: 0 },
+    });
+
+    await gw.runText({
+      slug: "q",
+      input: { q: "x" },
+      variables: (i: { q: string }) => ({ q: i.q }),
+      cache: false,
+      tier: "fast",
+    });
+
+    expect(seen).toEqual(["fast"]);
+    expect(usage.entries[0]!.model).toBe("chain-model");
+  });
+
+  it("passes the call's tier through to getOverride on streamStructured too", async () => {
+    const usage = new MemoryUsageStore();
+    const seen: (string | undefined)[] = [];
+    const store: ModelConfigStore = {
+      getOverride: async (_orgId, tier) => {
+        seen.push(tier);
+        return tier ? null : { provider: "anthropic", model: "pinned-model" };
+      },
+      getChain: async () => [
+        { provider: "anthropic" as const, model: "chain-model", languageModel: streamLm("from-chain") },
+      ],
+    };
+    const gw = new Gateway({
+      usage,
+      promptDefaults: [{ slug: "q", body: "Q {{q}}", variables: ["q"] }],
+      modelConfig: store,
+      caps: { userDailyCents: 0, anonDailyCents: 0, globalDailyCents: 0 },
+    });
+
+    const res = await gw.streamStructured({ ...base, cacheParts: ["1"], tier: "power" });
+    await collect(res.partialObjectStream);
+
+    expect(await res.object).toEqual({ answer: "from-chain" });
+    expect(seen).toEqual(["power"]);
+    expect(usage.entries[0]!.model).toBe("chain-model");
   });
 });
