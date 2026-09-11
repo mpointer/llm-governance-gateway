@@ -53,3 +53,44 @@ package.json and moved it to the workflow.
   publishing afterward and stop using the token).
 - Delete dead tags promptly (a v0.2 tag that never published cost us a
   confused hour on the gateway).
+- **A successful publish is not an installable package.** npm accepts the
+  upload and *then* processes it, and the two halves of "published" arrive
+  separately. Measured on v0.14.0:
+
+  | | |
+  |---|---|
+  | `npm publish` returns `+ pkg@version` | T+0 |
+  | Metadata live (packument, `dist-tags`) | T+9 min |
+  | **Tarball live — `npm install` works** | **T+26 min** |
+
+  So for ~17 minutes `npm view` reported the new version while installing it
+  404'd. npm says this itself, in the line right before the success line:
+  *"Your package is being processed and may take a few minutes to become
+  available."*
+
+  **Verify against the tarball URL, not `npm view`:**
+
+  ```sh
+  curl -s -o /dev/null -w '%{http_code}\n' \
+    https://registry.npmjs.org/<pkg>/-/<pkg>-<version>.tgz
+  ```
+
+  Two traps inside this one:
+
+  - **`npm view` is CDN-cached** (`cache-control: max-age=300`), so it can
+    report the *old* version for five minutes after the metadata actually
+    landed. Cache-bust before believing it:
+
+    ```sh
+    curl -H 'Cache-Control: no-cache' \
+      "https://registry.npmjs.org/<pkg>?t=$(date +%s)"
+    ```
+
+  - **Never re-run the release on a 404.** npm already holds the version, so
+    a republish fails with a 403 — and because the tag-reuse check passes
+    first (the tag points at the same commit), you get all the way to that
+    error before learning anything. Waiting is the only fix.
+
+  Budget half an hour before telling an adopter a release is available, and
+  expect provenance-signed publishes to sit at the slow end: the attestation
+  adds steps between acceptance and availability.
