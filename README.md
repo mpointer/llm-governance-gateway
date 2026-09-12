@@ -177,6 +177,19 @@ const gw = new Gateway({
 await gw.runStructured({ ...opts, tier: "fast" });
 ```
 
+**`tier` applies to chain links, not to `task`.** A task resolves through its
+own `defaults` entry (or the override store) and its models are built verbatim,
+so passing `tier` beside `task` does not change which model the task picks.
+
+It is still passed to `ModelConfigStore.getOverride(orgId, tier)`, though, and
+that matters more than it looks. A store can use it to let an explicit tier
+beat an admin pin — returning `null` when a tier is set, so a caller's
+capability request falls through to the task instead of being silently
+downgraded. **If your store does that, `tier` next to `task` is load-bearing.**
+Dropping it as redundant makes the store return the pin, the pin outranks the
+task, and every named call site stops using its task default for as long as a
+pin row exists — with no error, and only when a pin is set.
+
 **Configure your own default.** A call with no chain, no task and no override falls through to a last-resort default baked into the library. That fallback exists so the quickstart works, not as a recommendation — inheriting it means this library, rather than your deployment, picked your model and your vendor. Reaching it warns loudly once, naming the assumption. Set your own:
 
 ```ts
