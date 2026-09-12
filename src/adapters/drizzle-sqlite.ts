@@ -98,6 +98,9 @@ export class DrizzleSqliteUsageStore implements UsageStore {
         cacheReadTokens: entry.cacheReadTokens ?? null,
         webSearches: entry.webSearches ?? null,
         zdrEnforced: entry.zdrEnforced ?? null,
+        // Stored as received, deliberately. Gateway.logUsage() has already
+        // applied truncate() and the configured encrypt hook, so encrypting
+        // here would double-wrap: nothing throws, and no decrypt unwraps it.
         inputText: entry.inputText ?? null,
         outputText: entry.outputText ?? null,
         metadata: entry.metadata ?? null,
