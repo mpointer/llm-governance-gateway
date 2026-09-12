@@ -139,7 +139,7 @@ Not on Drizzle, or keeping your own tables? `UsageStore` is six methods, four
 of them required. Implementing it against any client is an afternoon; read
 `src/adapters/drizzle-pg.ts` as the reference.
 
-Two things about it have real semantics, and both fail silently:
+Three things about it have real semantics, and all three fail silently:
 
 - **`sumSpendCents`'s identity argument.** `userId === undefined` means *all*
   identities (the global circuit breaker); `userId === null` means anonymous
@@ -148,6 +148,21 @@ Two things about it have real semantics, and both fail silently:
   If your column is in seconds and you window against it with a millisecond
   `since`, you get a number back rather than an error — the same failure shape
   as the identity confusion above.
+- **Snapshots arrive already truncated and already encrypted.** `logUsage()`
+  applies `truncate()` and then your `encrypt` hook *before* the store sees
+  the entry, so a store must write `inputText`/`outputText` **verbatim**.
+
+  This bites when porting rather than when writing fresh. A hand-rolled logger
+  being replaced almost certainly encrypted the snapshot itself, because
+  nothing upstream of it did; keep that line in the port and every snapshot is
+  encrypted twice. Nothing throws — `encrypt` takes a string and returns a
+  string — and a `decrypt` helper that fails open renders the double-wrapped
+  value without complaining. `isEncrypted` can't catch it either: the value is
+  still ciphertext after one unwrap.
+
+  The shipped adapters store both fields as received, deliberately. If you are
+  reading one as a reference, the absent encryption step is the contract, not
+  an omission.
 
 ---
 
