@@ -228,6 +228,22 @@ export interface RunStructuredOptions<I, O> {
   /**
    * 'fast' routes to the cheapest model tier per provider; 'power' to the
    * most capable. Omit to use each chain link's configured model as-is.
+   *
+   * **Applies to chain links only, not to `task`.** Tier substitution happens
+   * in `buildChain`, which every chain branch calls and no task branch does —
+   * a task resolves through `TaskRouter.chainForTask(task, orgId)`, which
+   * takes no tier, and its models are built verbatim. Passing `tier` beside
+   * `task` does not change which model the task resolves to.
+   *
+   * **It is still passed to `ModelConfigStore.getOverride(orgId, tier)`.**
+   * That is not incidental: a store implementing the pattern this parameter
+   * was added for returns `null` when a tier is set, so an explicit
+   * capability request falls through to the task/chain instead of being
+   * silently downgraded by an admin pin. For such a store, `tier` alongside
+   * `task` is load-bearing — removing it as "redundant" makes the store hand
+   * back the pin, and the pin outranks the task, so every named call site
+   * quietly stops using its task default for as long as a pin row exists.
+   * Nothing errors, and it only reproduces when a pin is set.
    */
   tier?: "fast" | "power";
   /**
@@ -331,6 +347,8 @@ export interface RunTextOptions<I> {
   maxOutputTokens?: number;
   cacheParts?: string[];
   cache?: boolean;
+  /** See RunStructuredOptions.tier — same semantics, same interaction with
+   *  `task` and with ModelConfigStore.getOverride. */
   tier?: "fast" | "power";
   task?: string;
   requireZdr?: boolean;
