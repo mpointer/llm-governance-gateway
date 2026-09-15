@@ -52,6 +52,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "smoke": "npm run build && node scripts/smoke.mjs",
+    "prepare": "npm run build",
     "prepublishOnly": "npm run typecheck && npm run test && npm run build",
     "smoke:batch": "npm run build && node scripts/smoke-batch.mjs"
   },
