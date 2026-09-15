@@ -8,6 +8,43 @@ adopters implement, and in practice they have only ever gained capability throug
 *optional* parameters — but they are not yet under a formal semver freeze. 1.0.0
 is gated on a downstream integration proving the SPI holds, not on a date.
 
+## 0.14.1
+
+Bug fix, from the same adopter as 0.14.0 (CareerPointers), caught via
+production Sentry monitoring on a staging deployment.
+
+### Fixed
+
+- **A prompt's `modelHint` could reach the provider API as a literal model
+  id even when it was not one.** `modelHint` is documented (see
+  `promptFingerprint`) as a per-prompt model override, but it comes from an
+  admin-editable text column with nothing enforcing that an edit actually put
+  a real model id in it rather than, say, a cost-tier label. CareerPointers
+  seeds every prompt's `modelHint` with the literal string `"standard"` (a
+  cost tier in their own vocabulary, not a model id); whenever a call fell
+  through to the Gateway's admin-override or no-chain default-resolution
+  branch, that string was forwarded to `resolveDefault` unchanged and sent to
+  Anthropic as the model, which 404'd (`AI_APICallError: model: standard`).
+
+  Both branches now validate `modelHint` against `ProviderRegistry`'s known
+  models for the resolved provider (new `resolveModelHint(hint, provider?)`,
+  exported alongside `knownModels`) before trusting it as a literal id. A
+  hint that doesn't resolve is dropped — with a console warning naming it,
+  once per distinct value — and the call falls through to the admin's pinned
+  model or the configured default instead, mirroring how `resolveDefault`
+  already treats a missing default as a loud, recoverable condition rather
+  than silently forwarding garbage upstream. A hint that IS a real, known
+  model id for that provider is used exactly as before. Providers without a
+  static known-model list (openrouter/venice/together/huggingface) are
+  unaffected — they accept arbitrary upstream model strings by design and a
+  hint headed there still passes through unchanged.
+
+  One behavior change worth calling out: in the admin-override branch, an
+  invalid `modelHint` no longer silently overrides the admin's own pinned
+  model — the admin's pin now wins, matching what "admin override" is
+  supposed to mean. A *valid* `modelHint` (a real model id) still wins over
+  the pin, unchanged from 0.14.0.
+
 ## 0.14.0
 
 One SPI addition, from the first adopter with a pre-existing AI subsystem

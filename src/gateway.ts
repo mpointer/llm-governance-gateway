@@ -489,6 +489,7 @@ export class Gateway {
   private readonly mockResponders = new Map<string, MockResponder>();
   private readonly obs?: ObservabilityHooks;
   private readonly obsWarned = new Set<string>();
+  private readonly badModelHintWarned = new Set<string>();
 
   constructor(cfg: GatewayConfig) {
     this.usage = cfg.usage;
@@ -536,6 +537,25 @@ export class Gateway {
     } catch (err) {
       warn(err);
     }
+  }
+
+  /** Resolve `promptConfig.modelHint` against the registry's known-model
+   *  list, warning once per distinct rejected hint. See
+   *  `ProviderRegistry.resolveModelHint` for why this check exists. */
+  private validatedModelHint(hint: string | undefined, provider?: ProviderId): string | undefined {
+    if (!hint) return undefined;
+    const resolved = this.registry.resolveModelHint(hint, provider);
+    if (resolved === undefined && !this.badModelHintWarned.has(hint)) {
+      this.badModelHintWarned.add(hint);
+      console.warn(
+        `[llm-gateway] promptConfig.modelHint "${hint}" is not a known model id` +
+          (provider ? ` for provider "${provider}"` : "") +
+          ` — ignoring it and using the configured default model instead. If "${hint}" is a ` +
+          `cost tier rather than a literal model id, resolve it to a real model id before it ` +
+          `reaches the Gateway.`,
+      );
+    }
+    return resolved;
   }
 
   /** Per call > gateway config > unscoped. */
@@ -2224,7 +2244,9 @@ export class Gateway {
       } else if (adminOverride) {
         const resolved = this.registry.resolveDefault({
           provider: adminOverride.provider,
-          model: promptConfig.modelHint ?? adminOverride.model,
+          model:
+            this.validatedModelHint(promptConfig.modelHint, adminOverride.provider) ??
+            adminOverride.model,
         });
         assertZdr(resolved.provider, resolved.model, "admin model override");
         const nativeApplies =
@@ -2276,13 +2298,13 @@ export class Gateway {
         }
 
         if (chain.length === 0) {
+          const hintProvider = promptConfig.providerOverride as ProviderId | undefined;
+          const validHint = this.validatedModelHint(promptConfig.modelHint, hintProvider);
           const resolved = this.registry.resolveDefault(
-            promptConfig.modelHint
+            validHint || hintProvider
               ? {
-                  model: promptConfig.modelHint,
-                  ...(promptConfig.providerOverride
-                    ? { provider: promptConfig.providerOverride as ProviderId }
-                    : {}),
+                  ...(validHint ? { model: validHint } : {}),
+                  ...(hintProvider ? { provider: hintProvider } : {}),
                 }
               : undefined,
           );

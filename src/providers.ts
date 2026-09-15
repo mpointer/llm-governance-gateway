@@ -129,6 +129,13 @@ const DEFAULT_FALLBACK_PRICING: ModelPricing = { in: 0.3, out: 1.5 };
 const FALLBACK_PROVIDER: ProviderId = "anthropic";
 const FALLBACK_MODEL = "claude-sonnet-4-6";
 
+// Providers `resolveModelHint` can check a hint against — the ones with a
+// static known-model list (see `knownModels`). Aggregators/proxies are
+// intentionally excluded: they route arbitrary upstream model strings by
+// design, so there is nothing to validate a hint against.
+const VALIDATABLE_HINT_PROVIDERS_LIST: ProviderId[] = ["anthropic", "google", "openai"];
+const VALIDATABLE_HINT_PROVIDERS = new Set(VALIDATABLE_HINT_PROVIDERS_LIST);
+
 export class ProviderRegistry {
   private readonly cfg: ProviderConfig;
   private readonly pricing: Record<string, ModelPricing>;
@@ -262,6 +269,33 @@ export class ProviderRegistry {
       ? Object.keys(this.pricing).filter((m) => m.startsWith(prefix))
       : [];
     return Array.from(new Set([...fromTiers, ...fromPricing]));
+  }
+
+  /**
+   * Validate a prompt's `modelHint` before it is trusted as a literal model
+   * id. `modelHint` is documented (see gateway.ts's `promptFingerprint`) as a
+   * per-prompt model override — a real, callable id like "gpt-4.1" — but the
+   * column it comes from is admin-editable free text, and nothing here ever
+   * checked that an edit actually put a model id in it rather than a cost-tier
+   * label like "standard"/"economy"/"premium". A tier label reached the
+   * provider API unchanged and 404'd (AI_APICallError: model: standard,
+   * reported against a downstream adopter's staging deployment, 2026-09).
+   *
+   * Only validated for providers with a static known-model list (anthropic/
+   * google/openai, via `knownModels`). Aggregator/proxy providers
+   * (openrouter/venice/together/huggingface) accept arbitrary upstream model
+   * strings by design — same trust boundary `resolveModelId` already gives
+   * them — so a hint headed there passes through unchanged.
+   *
+   * Returns the hint when it resolves to a real, known model id; otherwise
+   * `undefined` so the caller falls through to its own default instead of
+   * forwarding garbage to the provider.
+   */
+  resolveModelHint(hint: string | undefined, provider?: ProviderId): string | undefined {
+    if (!hint) return undefined;
+    if (provider && !VALIDATABLE_HINT_PROVIDERS.has(provider)) return hint;
+    const candidates = provider ? [provider] : VALIDATABLE_HINT_PROVIDERS_LIST;
+    return candidates.some((p) => this.knownModels(p).includes(hint)) ? hint : undefined;
   }
 
   /**
