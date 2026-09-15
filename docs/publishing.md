@@ -41,9 +41,46 @@ package.json and moved it to the workflow.
    way. Both are guarded on tag == package.json version, so a manual run
    cannot publish a version the branch does not declare.
 
+## Installing a commit that is not released yet
+
+An adopter who needs a fix before it ships — or while a publish is stuck in
+the T+26 window below — installs the git ref directly:
+
+```sh
+npm install "github:mpointer/llm-governance-gateway#<commit-sha>"
+```
+
+That works only because of the `prepare` script. `dist/` is gitignored, so a
+git checkout carries no build output; npm installs devDependencies for a git
+dependency specifically so it can run `prepare`, which builds it. Without the
+script npm installs the package, skips the build, and `files` publishes the
+three things that do exist — LICENSE, README.md, package.json — producing an
+install that resolves and then throws on first import:
+
+```
+ERR_MODULE_NOT_FOUND: Cannot find module .../llm-governance-gateway/dist/index.js
+```
+
+`prepublishOnly` does NOT cover this: npm runs it for `npm publish` only,
+never for a git install.
+
+The same script is what makes `npm pack` self-contained. Packing a clean
+checkout without it produced a 3-file tarball with no `dist/` — the identical
+failure, in a form that looks like a real artifact and can be handed to
+someone before anyone notices. With it, `npm pack` builds first and produces
+95 files.
+
+The optional peer dependencies are unchanged by any of this: `/http` needs
+`hono` and the drizzle adapters need `drizzle-orm` in the CONSUMER's project,
+on a git install exactly as on a registry install.
+
 ## Rules of thumb
 
 - Provenance lives in the workflow command line, never in package.json.
+- `scripts.prepare` is load-bearing twice over: it is the only thing that
+  makes a git ref installable, and the only thing that makes `npm pack`
+  build. Removing it breaks both silently — the install succeeds and the
+  tarball is produced, each missing `dist/`.
 - The release workflow filename is part of the trusted-publishing config;
   renaming the file silently breaks releases until the npm settings are
   updated to match. The trust binds to the *file*, not to the trigger, so
