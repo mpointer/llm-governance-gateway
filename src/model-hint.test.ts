@@ -20,6 +20,7 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { Gateway } from "./gateway.js";
 import { ProviderRegistry } from "./providers.js";
+import { InvalidModelHintError } from "./errors.js";
 import { MemoryUsageStore } from "./adapters/memory.js";
 import type { ModelConfigStore, PromptStore, StoredPrompt } from "./types.js";
 
@@ -358,5 +359,154 @@ describe("Gateway.runStructured no longer forwards a bad modelHint to resolveDef
     expect(calls.some((m) => m.includes('"openai"'))).toBe(true);
     expect(calls.some((m) => m.includes('"google"'))).toBe(true);
     warn.mockRestore();
+  });
+});
+
+
+// CareerPointers asked for this: their hint vocabulary is two known static
+// values they control, and their staging deployment already carries an
+// aiModelConfig pin row — so "drop the hint and fall through" concretely
+// means every standard/economy-hinted prompt quietly runs the pinned model.
+// They would rather fail loud. Other adopters may genuinely want the
+// graceful degradation, so it is opt-in, mirroring `requireExplicitDefault`:
+// warn by default, throw only when asked.
+describe("ProviderConfig.throwOnInvalidModelHint", () => {
+  const loud = { throwOnInvalidModelHint: true } as const;
+
+  describe("registry level", () => {
+    it("throws InvalidModelHintError instead of returning undefined", () => {
+      const reg = new ProviderRegistry({ ...loud, defaultProvider: "anthropic" });
+      expect(() => reg.resolveModelHint("standard", "anthropic")).toThrow(
+        InvalidModelHintError,
+      );
+    });
+
+    it("carries the hint as written and the provider it was checked against", () => {
+      const reg = new ProviderRegistry({ ...loud, defaultProvider: "anthropic" });
+      try {
+        reg.resolveModelHint("standard", "anthropic");
+        expect.unreachable("should have thrown");
+      } catch (e) {
+        expect(e).toBeInstanceOf(InvalidModelHintError);
+        const err = e as InvalidModelHintError;
+        expect(err.hint).toBe("standard");
+        expect(err.provider).toBe("anthropic");
+        expect(err.name).toBe("InvalidModelHintError");
+        expect(err.message).toMatch(/"standard"/);
+      }
+    });
+
+    // An absent hint is not an invalid hint. Throwing here would break every
+    // prompt that simply has no modelHint, which is most of them.
+    it("does not throw for an absent or blank hint", () => {
+      const reg = new ProviderRegistry({ ...loud, defaultProvider: "anthropic" });
+      expect(reg.resolveModelHint(undefined, "anthropic")).toBeUndefined();
+      expect(reg.resolveModelHint("   ", "anthropic")).toBeUndefined();
+    });
+
+    it("does not throw for a hint it accepts", () => {
+      const reg = new ProviderRegistry({ ...loud, defaultProvider: "anthropic" });
+      expect(reg.resolveModelHint("claude-opus-4-8", "anthropic")).toEqual({
+        model: "claude-opus-4-8",
+      });
+      expect(reg.resolveModelHint("openai:gpt-4.1")).toEqual({
+        provider: "openai",
+        model: "gpt-4.1",
+      });
+    });
+
+    it("does not throw where the hint passes through unchecked (aggregators)", () => {
+      const reg = new ProviderRegistry({ ...loud, defaultProvider: "openrouter" });
+      expect(reg.resolveModelHint("standard")).toEqual({ model: "standard" });
+    });
+
+    it("throws on every rejection route, not just the tier-label one", () => {
+      const anthropic = new ProviderRegistry({ ...loud, defaultProvider: "anthropic" });
+      // cross-provider id
+      expect(() => anthropic.resolveModelHint("gpt-4.1-mini")).toThrow(InvalidModelHintError);
+      // scheme prefix trying to escape the pinned provider
+      expect(() => anthropic.resolveModelHint("openai:gpt-4.1", "anthropic")).toThrow(
+        InvalidModelHintError,
+      );
+      // a prefix naming a custom endpoint, which resolveDefault cannot express
+      const withEndpoint = new ProviderRegistry({
+        ...loud,
+        endpoints: { ollama: { baseURL: "http://localhost:11434/v1" } },
+      });
+      expect(() => withEndpoint.resolveModelHint("ollama:llama3", "anthropic")).toThrow(
+        InvalidModelHintError,
+      );
+    });
+
+    it("is off by default — the shipped behavior is unchanged", () => {
+      const reg = new ProviderRegistry({ defaultProvider: "anthropic" });
+      expect(reg.resolveModelHint("standard", "anthropic")).toBeUndefined();
+    });
+  });
+
+  // Same flag, same behavior, at BOTH resolution branches in runStructured.
+  describe("Gateway.runStructured", () => {
+    it("admin-override branch: throws instead of falling back to the admin's pin", async () => {
+      const store: ModelConfigStore = {
+        getOverride: async () => ({ provider: "anthropic", model: "claude-sonnet-4-6" }),
+        getChain: async () => [],
+      };
+      const gw = new Gateway({
+        usage: new MemoryUsageStore(),
+        promptDefaults: [
+          { slug: "q", body: "Q {{q}}", variables: ["q"], modelHint: "standard" },
+        ],
+        modelConfig: store,
+        providers: loud,
+        caps: { userDailyCents: 0, anonDailyCents: 0, globalDailyCents: 0 },
+      });
+
+      await expect(gw.runStructured(base)).rejects.toThrow(InvalidModelHintError);
+    });
+
+    it("no-chain default branch: throws instead of resolving the configured default", async () => {
+      const gw = new Gateway({
+        usage: new MemoryUsageStore(),
+        prompts: storeWith({ q: { modelHint: "standard", providerOverride: "openai" } }),
+        promptDefaults: [{ slug: "q", body: "Q {{q}}", variables: ["q"] }],
+        modelConfig: noAdminPin,
+        providers: loud,
+        caps: { userDailyCents: 0, anonDailyCents: 0, globalDailyCents: 0 },
+      });
+
+      await expect(gw.runStructured(base)).rejects.toThrow(InvalidModelHintError);
+    });
+
+    // The flag must not turn every hintless prompt into an error.
+    it("does not throw for a prompt with no modelHint at all", async () => {
+      const resolveDefault = vi.spyOn(ProviderRegistry.prototype, "resolveDefault");
+      const gw = new Gateway({
+        usage: new MemoryUsageStore(),
+        promptDefaults: [{ slug: "q", body: "Q {{q}}", variables: ["q"] }],
+        modelConfig: noAdminPin,
+        providers: loud,
+        caps: { userDailyCents: 0, anonDailyCents: 0, globalDailyCents: 0 },
+      });
+
+      // Still fails - no API key - but on the provider, not on the hint.
+      await expect(gw.runStructured(base)).rejects.not.toThrow(InvalidModelHintError);
+      expect(resolveDefault).toHaveBeenCalledWith(undefined);
+      resolveDefault.mockRestore();
+    });
+
+    it("off by default: the same prompt falls through instead of throwing", async () => {
+      const resolveDefault = vi.spyOn(ProviderRegistry.prototype, "resolveDefault");
+      const gw = new Gateway({
+        usage: new MemoryUsageStore(),
+        prompts: storeWith({ q: { modelHint: "standard", providerOverride: "openai" } }),
+        promptDefaults: [{ slug: "q", body: "Q {{q}}", variables: ["q"] }],
+        modelConfig: noAdminPin,
+        caps: { userDailyCents: 0, anonDailyCents: 0, globalDailyCents: 0 },
+      });
+
+      await expect(gw.runStructured(base)).rejects.not.toThrow(InvalidModelHintError);
+      expect(resolveDefault).toHaveBeenCalledWith(undefined);
+      resolveDefault.mockRestore();
+    });
   });
 });

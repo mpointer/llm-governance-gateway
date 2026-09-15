@@ -19,6 +19,7 @@ export {
   StreamStallError,
   AttemptTimeoutError,
   DeadlineExceededError,
+  InvalidModelHintError,
 } from "./errors.js";
 export {
   attemptSignal,

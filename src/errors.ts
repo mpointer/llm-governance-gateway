@@ -116,3 +116,31 @@ export class SpendCapError extends Error {
     this.name = "SpendCapError";
   }
 }
+
+/**
+ * A `promptConfig.modelHint` did not resolve to a usable model id, and
+ * `ProviderConfig.throwOnInvalidModelHint` is on.
+ *
+ * Off by default the same hint is dropped with a one-time warning and the
+ * call runs the admin's pinned model or the configured default. That is
+ * graceful, and it is also silent: the call runs a DIFFERENT model than the
+ * prompt asked for and nothing downstream can tell. A deployment whose hint
+ * vocabulary is a small controlled set would rather find out loudly — this
+ * is what it gets when it opts in.
+ */
+export class InvalidModelHintError extends Error {
+  constructor(
+    /** The hint exactly as it reached the Gateway, before any parsing. */
+    public readonly hint: string,
+    /** The provider the hint was validated against. */
+    public readonly provider: string,
+  ) {
+    super(
+      `promptConfig.modelHint "${hint}" is not usable as a model id for provider ` +
+        `"${provider}". Resolve it to a real model id before it reaches the Gateway. ` +
+        `Unset ProviderConfig.throwOnInvalidModelHint to drop the hint and run the ` +
+        `configured default model instead of throwing.`,
+    );
+    this.name = "InvalidModelHintError";
+  }
+}

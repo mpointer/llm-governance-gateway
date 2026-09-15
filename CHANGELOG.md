@@ -8,10 +8,44 @@ adopters implement, and in practice they have only ever gained capability throug
 *optional* parameters — but they are not yet under a formal semver freeze. 1.0.0
 is gated on a downstream integration proving the SPI holds, not on a date.
 
-## 0.14.1
+## 0.15.0
 
-Bug fix, from the same adopter as 0.14.0 (CareerPointers), caught via
-production Sentry monitoring on a staging deployment.
+A bug fix and, after the adopter who reported it read the fix and pushed
+back, the opt-in escape hatch they asked for. Both from CareerPointers, the
+same adopter as 0.14.0; the bug was caught via production Sentry monitoring
+on a staging deployment.
+
+Minor rather than patch because of the `Added` section: the fix alone shipped
+as 0.14.1 in an earlier revision of this change, which was never published.
+
+### Added
+
+- **`ProviderConfig.throwOnInvalidModelHint`** — throw
+  `InvalidModelHintError` instead of dropping a `modelHint` that does not
+  resolve to a usable model id.
+
+  Off by default; with it unset nothing changes. The default behavior is to
+  warn once and fall through to the admin's pinned model or the configured
+  default, which is graceful and also silent: the call runs a DIFFERENT model
+  than the prompt asked for, and neither the response nor the usage row says
+  so.
+
+  That is a bad trade for a deployment whose hint vocabulary is a small,
+  controlled set. CareerPointers' is two static values they own, and their
+  staging deployment already carries an admin pin row — so "falls through"
+  concretely meant every tier-labelled prompt quietly running the pinned
+  model. They would rather fail loud. Deployments that prefer the graceful
+  degradation keep it by doing nothing.
+
+  Same shape as `requireExplicitDefault`: warn by default, throw only when an
+  adopter opts in. Applies at both `modelHint` resolution sites in
+  `runStructured` — the admin-override branch and the no-chain default
+  branch. An ABSENT `modelHint` is not an invalid one and never throws,
+  whatever the flag says.
+
+  `InvalidModelHintError` is exported from the package root and carries
+  `hint` (as written, before parsing) and `provider` (what it was checked
+  against).
 
 ### Fixed
 

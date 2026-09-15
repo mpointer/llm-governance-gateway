@@ -2,6 +2,7 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createOpenAI } from "@ai-sdk/openai";
 import type { LanguageModel } from "ai";
+import { InvalidModelHintError } from "./errors.js";
 import type {
   ChainLinkConfig,
   ModelPricing,
@@ -359,6 +360,24 @@ export class ProviderRegistry {
   }
 
   /**
+   * A hint was present, examined, and found unusable.
+   *
+   * Throws when the adopter opted in via
+   * `ProviderConfig.throwOnInvalidModelHint`; otherwise returns `undefined`
+   * so the caller falls through to its own default. Same warn-by-default,
+   * throw-on-request shape `resolveDefault` uses for `requireExplicitDefault`.
+   *
+   * Only reached for a hint that was actually rejected — an ABSENT hint is
+   * not an invalid one and never throws, whatever the flag says.
+   */
+  private rejectHint(hint: string, provider: ProviderId): undefined {
+    if (this.cfg.throwOnInvalidModelHint) {
+      throw new InvalidModelHintError(hint, provider);
+    }
+    return undefined;
+  }
+
+  /**
    * Validate a prompt's `modelHint` before it is trusted as a literal model
    * id. `modelHint` is documented (see gateway.ts's `promptFingerprint`) as a
    * per-prompt model override — a real, callable id like "gpt-4.1" — but the
@@ -399,16 +418,20 @@ export class ProviderRegistry {
     provider?: ProviderId,
   ): ResolvedModelHint | undefined {
     const raw = hint?.trim();
+    // No hint at all is not an invalid hint: nothing to reject, nothing to
+    // throw, the caller just uses its own default.
     if (!raw) return undefined;
 
+    const fallbackTarget = provider ?? this.effectiveDefaultProvider();
     const scheme = this.hintScheme(raw);
-    if (scheme === "unsupported") return undefined;
+    if (scheme === "unsupported") return this.rejectHint(raw, fallbackTarget);
+
     const explicit = scheme?.provider;
     const model = scheme ? scheme.model : raw;
-    if (!model) return undefined;
-    if (explicit && provider && explicit !== provider) return undefined;
+    if (!model) return this.rejectHint(raw, fallbackTarget);
+    if (explicit && provider && explicit !== provider) return this.rejectHint(raw, provider);
 
-    const target = explicit ?? provider ?? this.effectiveDefaultProvider();
+    const target = explicit ?? fallbackTarget;
     if (!VALIDATABLE_HINT_PROVIDERS.has(target)) {
       return explicit ? { provider: explicit, model } : { model };
     }
@@ -427,14 +450,11 @@ export class ProviderRegistry {
     // prevent. Prefix ownership rather than a known-model lookup, so an id
     // the installed version has never seen is still attributed correctly.
     const owner = providerByModelPrefix(model);
-    if (owner && owner !== target) return undefined;
+    if (owner && owner !== target) return this.rejectHint(raw, target);
 
     // Otherwise: reject only what cannot be a model id at all.
-    return looksLikeModelId(model)
-      ? explicit
-        ? { provider: explicit, model }
-        : { model }
-      : undefined;
+    if (!looksLikeModelId(model)) return this.rejectHint(raw, target);
+    return explicit ? { provider: explicit, model } : { model };
   }
 
   /**

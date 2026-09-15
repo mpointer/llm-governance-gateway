@@ -264,6 +264,23 @@ export interface ProviderConfig {
    */
   requireExplicitDefault?: boolean;
   /**
+   * Throw `InvalidModelHintError` instead of dropping a
+   * `promptConfig.modelHint` that does not resolve to a usable model id.
+   *
+   * Off by default, so the shipped behavior is unchanged: a rejected hint is
+   * warned about once and the call falls through to the admin's pinned model
+   * or the configured default. That is graceful, and it is also silent — the
+   * call runs a DIFFERENT model than the prompt asked for, and neither the
+   * response nor the usage row says so. A deployment whose hint vocabulary is
+   * a small controlled set (a fixed tier label per prompt, say) would rather
+   * fail loudly than pay for the wrong model.
+   *
+   * Same shape as `requireExplicitDefault`: warn by default, throw only when
+   * an adopter opts in. Applies wherever a `modelHint` is resolved — both the
+   * admin-override and no-chain default branches of `runStructured`.
+   */
+  throwOnInvalidModelHint?: boolean;
+  /**
    * Merged over built-in pricing; add entries for models you use.
    *
    * **Keys are BARE model ids** — `"gpt-4.1"`, not `"openai:gpt-4.1"` — because
