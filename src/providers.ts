@@ -129,12 +129,69 @@ const DEFAULT_FALLBACK_PRICING: ModelPricing = { in: 0.3, out: 1.5 };
 const FALLBACK_PROVIDER: ProviderId = "anthropic";
 const FALLBACK_MODEL = "claude-sonnet-4-6";
 
-// Providers `resolveModelHint` can check a hint against — the ones with a
-// static known-model list (see `knownModels`). Aggregators/proxies are
-// intentionally excluded: they route arbitrary upstream model strings by
-// design, so there is nothing to validate a hint against.
-const VALIDATABLE_HINT_PROVIDERS_LIST: ProviderId[] = ["anthropic", "google", "openai"];
-const VALIDATABLE_HINT_PROVIDERS = new Set(VALIDATABLE_HINT_PROVIDERS_LIST);
+// Providers `resolveModelHint` can check a hint against — the ones the
+// library has any static knowledge of (see `knownModels`). Aggregators and
+// proxies are intentionally excluded: they route arbitrary upstream model
+// strings by design, so there is nothing to validate a hint against.
+const VALIDATABLE_HINT_PROVIDERS = new Set<ProviderId>(["anthropic", "google", "openai"]);
+
+/**
+ * Does this string have the shape of a model id at all?
+ *
+ * Every chat model these providers ship carries a version in its id: a digit
+ * ("gpt-4.1", "o4-mini", "claude-opus-4-8"), a separator
+ * ("meta-llama/llama-3.3-70b"), or both. A cost-tier label — "standard",
+ * "economy", "premium", and the library's own "fast"/"power"/"judge" — is a
+ * bare word with neither.
+ *
+ * This is deliberately a NARROW reject rule and not a known-model allowlist.
+ * Rejecting a hint is not free: the call then runs a DIFFERENT model than the
+ * prompt asked for, and unlike a 404 nothing downstream can tell that it
+ * happened. An allowlist built from `knownModels` — a best-effort list of
+ * `BUILTIN_TIERS` plus prefix-matched pricing keys — would reject every id
+ * the library has not shipped a pricing entry for: "o4-mini" (registered
+ * pricing, no "gpt" prefix), an adopter's configured tier model, and every
+ * model released after the installed version. So a hint is rejected only
+ * when it cannot plausibly be a model id, and anything else passes through
+ * to fail loudly upstream if it is wrong.
+ */
+function looksLikeModelId(id: string): boolean {
+  return /[0-9]/.test(id) || /[-_./]/.test(id);
+}
+
+// The id prefix each validatable provider's models carry. Used both to
+// attribute pricing keys to a provider (`knownModels`) and, in
+// `resolveModelHint`, as positive evidence that an id belongs to a provider
+// OTHER than the one it is about to be sent to.
+const PROVIDER_MODEL_PREFIXES: Partial<Record<ProviderId, string>> = {
+  anthropic: "claude",
+  google: "gemini",
+  openai: "gpt",
+};
+
+/**
+ * The provider whose ids start this way, if any.
+ *
+ * Unlike a known-model lookup this keeps working for models the installed
+ * version has never heard of: "claude-opus-9" is recognisably Anthropic's
+ * whether or not it is in the pricing table, which is what lets a
+ * cross-provider mismatch be rejected without also rejecting every new
+ * release (see `resolveModelHint`).
+ */
+function providerByModelPrefix(model: string): ProviderId | undefined {
+  for (const [provider, prefix] of Object.entries(PROVIDER_MODEL_PREFIXES)) {
+    if (model.startsWith(prefix)) return provider as ProviderId;
+  }
+  return undefined;
+}
+
+/** A `modelHint` accepted as a literal model id. `provider` is set only when
+ *  the hint named one itself via a scheme prefix ("openai:gpt-4.1"); the
+ *  caller supplies the provider otherwise. */
+export interface ResolvedModelHint {
+  provider?: ProviderId;
+  model: string;
+}
 
 export class ProviderRegistry {
   private readonly cfg: ProviderConfig;
@@ -258,17 +315,47 @@ export class ProviderRegistry {
    * pricing). Fallback when a provider's models API is unreachable.
    */
   knownModels(provider: ProviderId): string[] {
-    const prefixes: Partial<Record<ProviderId, string>> = {
-      anthropic: "claude",
-      google: "gemini",
-      openai: "gpt",
-    };
-    const prefix = prefixes[provider];
+    const prefix = PROVIDER_MODEL_PREFIXES[provider];
     const fromTiers = Object.values(BUILTIN_TIERS[provider] ?? {});
     const fromPricing = prefix
       ? Object.keys(this.pricing).filter((m) => m.startsWith(prefix))
       : [];
     return Array.from(new Set([...fromTiers, ...fromPricing]));
+  }
+
+  /**
+   * The provider a bare model id would be sent to — `resolveDefault`'s own
+   * precedence, so a hint is validated against the provider that will
+   * actually receive it.
+   */
+  private effectiveDefaultProvider(): ProviderId {
+    return (
+      this.cfg.defaultProvider ??
+      (process.env.AI_DEFAULT_PROVIDER as ProviderId | undefined) ??
+      FALLBACK_PROVIDER
+    );
+  }
+
+  /**
+   * Split a recognised "provider:model" prefix off a hint.
+   *
+   * Returns `undefined` for a bare id or a colon that is not a namespace at
+   * all (OpenRouter's ":free"/":beta" variants), and "unsupported" for a
+   * prefix naming a custom endpoint or provider factory: those are real
+   * namespaces, but the override `resolveDefault` takes can only express a
+   * built-in ProviderId, so such a hint cannot be honoured here.
+   */
+  private hintScheme(
+    id: string,
+  ): { provider: ProviderId; model: string } | "unsupported" | undefined {
+    const idx = id.indexOf(":");
+    if (idx <= 0) return undefined;
+    const prefix = id.slice(0, idx);
+    if ((PROVIDER_IDS as string[]).includes(prefix)) {
+      return { provider: prefix as ProviderId, model: id.slice(idx + 1) };
+    }
+    if (this.isEndpoint(prefix) || this.isFactory(prefix)) return "unsupported";
+    return undefined;
   }
 
   /**
@@ -281,21 +368,73 @@ export class ProviderRegistry {
    * provider API unchanged and 404'd (AI_APICallError: model: standard,
    * reported against a downstream adopter's staging deployment, 2026-09).
    *
-   * Only validated for providers with a static known-model list (anthropic/
-   * google/openai, via `knownModels`). Aggregator/proxy providers
-   * (openrouter/venice/together/huggingface) accept arbitrary upstream model
-   * strings by design — same trust boundary `resolveModelId` already gives
-   * them — so a hint headed there passes through unchanged.
+   * What is checked, and against what:
    *
-   * Returns the hint when it resolves to a real, known model id; otherwise
-   * `undefined` so the caller falls through to its own default instead of
-   * forwarding garbage to the provider.
+   * - A hint carrying a scheme prefix ("openai:gpt-4.1" — the form the README
+   *   documents for every other model-id field) names its own provider, and
+   *   the returned `provider` says so. A prompt-level hint may change the
+   *   model within the provider a call is already pinned to; it may not move
+   *   the call to a different provider, so a prefix that disagrees with the
+   *   `provider` argument is rejected rather than silently obeyed.
+   * - Everything else is validated against the provider the model will
+   *   actually be paired with: the `provider` argument when the caller has
+   *   one, otherwise the configured default. Checking "does ANY provider know
+   *   this id" would accept "gpt-4.1-mini" under a `defaultProvider` of
+   *   anthropic and reproduce the very 404 this exists to prevent.
+   * - Aggregator/proxy providers (openrouter/venice/together/huggingface)
+   *   accept arbitrary upstream model strings by design — the same trust
+   *   boundary `resolveModelId` already gives them — so a hint headed to one
+   *   passes through unchecked, whether it got there by argument or by being
+   *   the configured default.
+   * - The check itself is `looksLikeModelId`, not membership of
+   *   `knownModels`. See that function for why an allowlist is the wrong
+   *   shape here.
+   *
+   * Returns the hint, parsed, when it is plausibly a literal model id;
+   * otherwise `undefined` so the caller falls through to its own default
+   * instead of forwarding a tier label to the provider.
    */
-  resolveModelHint(hint: string | undefined, provider?: ProviderId): string | undefined {
-    if (!hint) return undefined;
-    if (provider && !VALIDATABLE_HINT_PROVIDERS.has(provider)) return hint;
-    const candidates = provider ? [provider] : VALIDATABLE_HINT_PROVIDERS_LIST;
-    return candidates.some((p) => this.knownModels(p).includes(hint)) ? hint : undefined;
+  resolveModelHint(
+    hint: string | undefined,
+    provider?: ProviderId,
+  ): ResolvedModelHint | undefined {
+    const raw = hint?.trim();
+    if (!raw) return undefined;
+
+    const scheme = this.hintScheme(raw);
+    if (scheme === "unsupported") return undefined;
+    const explicit = scheme?.provider;
+    const model = scheme ? scheme.model : raw;
+    if (!model) return undefined;
+    if (explicit && provider && explicit !== provider) return undefined;
+
+    const target = explicit ?? provider ?? this.effectiveDefaultProvider();
+    if (!VALIDATABLE_HINT_PROVIDERS.has(target)) {
+      return explicit ? { provider: explicit, model } : { model };
+    }
+
+    // Known good for the provider it is actually going to.
+    if (
+      this.knownModels(target).includes(model) ||
+      Object.values(this.cfg.tiers?.[target] ?? {}).includes(model)
+    ) {
+      return explicit ? { provider: explicit, model } : { model };
+    }
+
+    // Positive evidence it belongs to a DIFFERENT provider: "gpt-4.1-mini"
+    // under a `defaultProvider` of anthropic is not a model this call can
+    // run, and sending it produces exactly the 404 this check exists to
+    // prevent. Prefix ownership rather than a known-model lookup, so an id
+    // the installed version has never seen is still attributed correctly.
+    const owner = providerByModelPrefix(model);
+    if (owner && owner !== target) return undefined;
+
+    // Otherwise: reject only what cannot be a model id at all.
+    return looksLikeModelId(model)
+      ? explicit
+        ? { provider: explicit, model }
+        : { model }
+      : undefined;
   }
 
   /**

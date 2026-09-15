@@ -14,7 +14,12 @@ import {
 } from "./errors.js";
 import { createConflatedCell, guardStream } from "./stream-guard.js";
 import { AttemptBudget, sleep } from "./deadline.js";
-import { ProviderRegistry, parseModelId, type ChainLink } from "./providers.js";
+import {
+  ProviderRegistry,
+  parseModelId,
+  type ChainLink,
+  type ResolvedModelHint,
+} from "./providers.js";
 import {
   callNativeAnthropic,
   callNativeAnthropicText,
@@ -539,19 +544,27 @@ export class Gateway {
     }
   }
 
-  /** Resolve `promptConfig.modelHint` against the registry's known-model
-   *  list, warning once per distinct rejected hint. See
-   *  `ProviderRegistry.resolveModelHint` for why this check exists. */
-  private validatedModelHint(hint: string | undefined, provider?: ProviderId): string | undefined {
+  /** Resolve `promptConfig.modelHint` to a literal model id, warning once per
+   *  distinct rejected (provider, hint) pair — the same string can be valid
+   *  for one provider and rejected for another, and the message names the
+   *  provider, so deduping on the hint alone would silence the second case
+   *  entirely. See `ProviderRegistry.resolveModelHint` for why this check
+   *  exists and what it does and does not reject. */
+  private validatedModelHint(
+    hint: string | undefined,
+    provider?: ProviderId,
+  ): ResolvedModelHint | undefined {
     if (!hint) return undefined;
     const resolved = this.registry.resolveModelHint(hint, provider);
-    if (resolved === undefined && !this.badModelHintWarned.has(hint)) {
-      this.badModelHintWarned.add(hint);
+    const warnKey = `${provider ?? "*"}\u0000${hint}`;
+    if (resolved === undefined && !this.badModelHintWarned.has(warnKey)) {
+      this.badModelHintWarned.add(warnKey);
       console.warn(
-        `[llm-gateway] promptConfig.modelHint "${hint}" is not a known model id` +
+        `[llm-gateway] promptConfig.modelHint "${hint}" is not usable as a model id` +
           (provider ? ` for provider "${provider}"` : "") +
-          ` — ignoring it and using the configured default model instead. If "${hint}" is a ` +
-          `cost tier rather than a literal model id, resolve it to a real model id before it ` +
+          ` — ignoring it and using the configured default model instead. That means this ` +
+          `call runs a DIFFERENT model than the prompt asked for. If "${hint}" is a cost ` +
+          `tier rather than a literal model id, resolve it to a real model id before it ` +
           `reaches the Gateway.`,
       );
     }
@@ -2242,11 +2255,15 @@ export class Gateway {
         durationMs = gen.durationMs;
         extras = gen.extras;
       } else if (adminOverride) {
+        // The hint is validated against the admin's pinned provider, so it
+        // can only name a model for that provider — the pin stays in force.
+        const adminHint = this.validatedModelHint(
+          promptConfig.modelHint,
+          adminOverride.provider,
+        );
         const resolved = this.registry.resolveDefault({
           provider: adminOverride.provider,
-          model:
-            this.validatedModelHint(promptConfig.modelHint, adminOverride.provider) ??
-            adminOverride.model,
+          model: adminHint?.model ?? adminOverride.model,
         });
         assertZdr(resolved.provider, resolved.model, "admin model override");
         const nativeApplies =
@@ -2298,12 +2315,21 @@ export class Gateway {
         }
 
         if (chain.length === 0) {
-          const hintProvider = promptConfig.providerOverride as ProviderId | undefined;
-          const validHint = this.validatedModelHint(promptConfig.modelHint, hintProvider);
+          const rowProvider = promptConfig.providerOverride as ProviderId | undefined;
+          const validHint = this.validatedModelHint(promptConfig.modelHint, rowProvider);
+          // A provider is only ever passed together with a model for it.
+          // `resolveDefault` fills an absent model from `defaultModel`, so
+          // handing it a provider on its own pairs, say, providerOverride
+          // "openai" with the configured default "claude-sonnet-4-6" and
+          // 404s — which is how a row with no usable hint reached the
+          // provider API before. Without a usable hint the whole override is
+          // dropped and the configured default PAIR resolves, exactly as it
+          // did when `modelHint` was absent in 0.14.0.
+          const hintProvider = validHint?.provider ?? rowProvider;
           const resolved = this.registry.resolveDefault(
-            validHint || hintProvider
+            validHint
               ? {
-                  ...(validHint ? { model: validHint } : {}),
+                  model: validHint.model,
                   ...(hintProvider ? { provider: hintProvider } : {}),
                 }
               : undefined,

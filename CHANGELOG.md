@@ -26,24 +26,63 @@ production Sentry monitoring on a staging deployment.
   branch, that string was forwarded to `resolveDefault` unchanged and sent to
   Anthropic as the model, which 404'd (`AI_APICallError: model: standard`).
 
-  Both branches now validate `modelHint` against `ProviderRegistry`'s known
-  models for the resolved provider (new `resolveModelHint(hint, provider?)`,
-  exported alongside `knownModels`) before trusting it as a literal id. A
-  hint that doesn't resolve is dropped — with a console warning naming it,
-  once per distinct value — and the call falls through to the admin's pinned
-  model or the configured default instead, mirroring how `resolveDefault`
-  already treats a missing default as a loud, recoverable condition rather
-  than silently forwarding garbage upstream. A hint that IS a real, known
-  model id for that provider is used exactly as before. Providers without a
-  static known-model list (openrouter/venice/together/huggingface) are
-  unaffected — they accept arbitrary upstream model strings by design and a
-  hint headed there still passes through unchanged.
+  Both branches now resolve `modelHint` through a new
+  `ProviderRegistry.resolveModelHint(hint, provider?)` (exported alongside
+  `knownModels`) before trusting it as a literal id. A hint that does not
+  resolve is dropped — with a console warning naming it, once per distinct
+  (provider, hint) pair — and the call falls through to the admin's pinned
+  model or the configured default instead.
+
+  **What is rejected is deliberately narrow.** Dropping a hint is not free:
+  the call then runs a *different* model than the prompt asked for, and
+  unlike a 404 nothing downstream can tell that it happened. Validating
+  against `knownModels` — a best-effort list of built-in tiers plus pricing
+  keys matching a hardcoded `claude`/`gemini`/`gpt` prefix — would have made
+  that the common case, silently downgrading `o4-mini` (registered pricing,
+  no matching prefix), an adopter's own configured tier model, and every
+  model released after the installed version. So a hint is rejected only
+  when it is positively wrong:
+
+  - it cannot be a model id at all — a bare word with no digit or separator,
+    which is what a cost-tier label looks like (`"standard"`, `"economy"`,
+    `"premium"`, and the library's own `"fast"`/`"power"`/`"judge"`); or
+  - it belongs to a *different* provider than the one the call will reach,
+    by id prefix (`"gpt-4.1-mini"` on an anthropic-default deployment).
+
+  Anything else — a known id, a configured tier model, an unrecognised id
+  that still looks like one — passes through and fails loudly upstream if it
+  is wrong, exactly as in 0.14.0.
+
+  Three details follow from validating against *the provider the model will
+  actually be paired with*, rather than against whichever provider happens to
+  know the id:
+
+  - The provider is the one the call resolves to — an explicit
+    `providerOverride`/admin pin when there is one, otherwise the configured
+    default. Aggregator/proxy providers (openrouter/venice/together/
+    huggingface) accept arbitrary upstream model strings by design, so a hint
+    headed to one passes through unchecked whether it got there by override
+    or by being the deployment's default.
+  - A scheme-prefixed hint (`"openai:gpt-4.1"` — the form the README
+    documents for every other model-id field) is parsed, and supplies its own
+    provider. It may change the model *within* a provider a call is already
+    pinned to, but it may not move the call to another provider: a prefix
+    that disagrees with an admin pin or a `providerOverride` is rejected
+    rather than silently obeyed. A colon that is not a provider namespace
+    (OpenRouter's `":free"`/`":beta"` variants) is left alone.
+  - A `providerOverride` is only ever sent to `resolveDefault` together with
+    a model for it. `resolveDefault` fills an absent model from
+    `defaultModel`, so passing a provider on its own would pair, say,
+    `providerOverride: "openai"` with a configured default of
+    `claude-sonnet-4-6` — a guaranteed 404, and the same class of bug as the
+    tier label. A row whose hint is dropped resolves the configured default
+    *pair*, exactly as it did when `modelHint` was absent in 0.14.0.
 
   One behavior change worth calling out: in the admin-override branch, an
   invalid `modelHint` no longer silently overrides the admin's own pinned
   model — the admin's pin now wins, matching what "admin override" is
-  supposed to mean. A *valid* `modelHint` (a real model id) still wins over
-  the pin, unchanged from 0.14.0.
+  supposed to mean. A *valid* `modelHint` (a real model id for the pinned
+  provider) still wins over the pin, unchanged from 0.14.0.
 
 ## 0.14.0
 
