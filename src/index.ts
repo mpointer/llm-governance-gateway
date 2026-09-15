@@ -19,6 +19,7 @@ export {
   StreamStallError,
   AttemptTimeoutError,
   DeadlineExceededError,
+  InvalidModelHintError,
 } from "./errors.js";
 export {
   attemptSignal,
@@ -33,6 +34,7 @@ export {
   parseModelId,
   PROVIDER_IDS,
   type ResolvedModel,
+  type ResolvedModelHint,
   type ChainLink,
 } from "./providers.js";
 export { TaskRouter, type ResolvedTaskModel } from "./tasks.js";
