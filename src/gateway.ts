@@ -13,6 +13,12 @@ import {
   ZdrViolationError,
 } from "./errors.js";
 import { createConflatedCell, guardStream } from "./stream-guard.js";
+import {
+  guardrailError,
+  runGuardrail,
+  type GuardrailConfig,
+  type GuardrailRecord,
+} from "./guardrails.js";
 import { AttemptBudget, sleep } from "./deadline.js";
 import {
   ProviderRegistry,
@@ -489,6 +495,7 @@ export class Gateway {
   private readonly orgId: string | undefined;
   private readonly encrypt?: (t: string) => string;
   private readonly judgeDefaults?: GatewayConfig["judge"];
+  private readonly guardrails?: GuardrailConfig;
   private readonly anthropicCfg?: GatewayConfig["anthropic"];
   private readonly batchCfg?: GatewayConfig["batch"];
   private readonly mockResponders = new Map<string, MockResponder>();
@@ -516,6 +523,7 @@ export class Gateway {
     this.orgId = cfg.orgId;
     this.encrypt = cfg.encrypt;
     this.judgeDefaults = cfg.judge;
+    this.guardrails = cfg.guardrails;
     this.anthropicCfg = cfg.anthropic;
     this.batchCfg = cfg.batch;
     this.obs = cfg.observability;
@@ -2114,8 +2122,60 @@ export class Gateway {
     const promptConfig: PromptConfig =
       prefetched ??
       (opts.promptBody ? { body: opts.promptBody } : await this.loadPrompt(opts.slug, orgId));
-    const prompt = renderTemplate(promptConfig.body, opts.variables(opts.input));
+    let prompt = renderTemplate(promptConfig.body, opts.variables(opts.input));
     const temperature = opts.temperature ?? promptConfig.temperature;
+
+    // 4b. Pre guardrail: policy on the rendered prompt, before any provider
+    // spend. A block costs no tokens but still writes a zero-token usage row
+    // carrying the verdict — an audit that cannot see blocked calls is not
+    // an audit. A transform replaces the prompt that goes out. Runs in mock
+    // mode too, so CI can test policy.
+    const guardrailRecords: GuardrailRecord[] = [];
+    const failOpen = this.guardrails?.failOpen === true;
+    if (this.guardrails?.pre) {
+      const { verdict, record } = await runGuardrail(
+        this.guardrails.pre,
+        "pre",
+        {
+          slug: opts.slug,
+          prompt,
+          system: opts.system,
+          input: opts.input,
+          traceId,
+          userId: opts.userId ?? null,
+          orgId: orgId ?? null,
+          route: opts.route ?? null,
+          task: opts.task,
+        },
+        failOpen,
+      );
+      guardrailRecords.push(record);
+      if (verdict.action === "block") {
+        await this.logUsage({
+          metadata: opts.metadata,
+          orgId,
+          app: opts.app,
+          userId: opts.userId ?? null,
+          route: opts.route ?? null,
+          promptSlug: opts.slug,
+          provider: "guardrail",
+          model: "pre",
+          inputTokens: 0,
+          outputTokens: 0,
+          estimatedCostCents: 0,
+          cacheHit: false,
+          traceId,
+          durationMs: record.durationMs,
+          inputText: prompt,
+          outputText: null,
+          guardrails: guardrailRecords,
+        });
+        throw guardrailError(record);
+      }
+      if (verdict.action === "transform" && typeof verdict.prompt === "string") {
+        prompt = verdict.prompt;
+      }
+    }
 
     // Native features must never silently not apply.
     if (opts.anthropic && !this.anthropicCfg && !this.mock) {
@@ -2388,6 +2448,84 @@ export class Gateway {
       }
     }
 
+    // 5b. Post guardrail: policy on the schema-valid object, before the cache
+    // write (a transformed object is what gets cached) and before the judge
+    // (the judge scores what the caller will receive). A block writes the
+    // usage row first — the tokens were spent — then throws with the object
+    // attached, so a reviewer can still be shown what was rejected.
+    if (this.guardrails?.post) {
+      const { verdict, record } = await runGuardrail(
+        this.guardrails.post,
+        "post",
+        {
+          slug: opts.slug,
+          prompt,
+          system: opts.system,
+          input: opts.input,
+          output: object,
+          provider,
+          model,
+          traceId,
+          userId: opts.userId ?? null,
+          orgId: orgId ?? null,
+          route: opts.route ?? null,
+          task: opts.task,
+        },
+        failOpen,
+      );
+      let blocked: GuardrailRecord | undefined;
+      if (verdict.action === "transform" && verdict.output !== undefined) {
+        // A transform must still satisfy the caller's schema: a scrubber that
+        // breaks the shape would otherwise hand the caller (and the cache) an
+        // object the type system says cannot exist. Treated as a block, under
+        // the same fail-open policy as a throwing hook.
+        try {
+          object = isZodSchema(opts.schema)
+            ? opts.schema.parse(verdict.output)
+            : (verdict.output as O);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          record.error = `transform produced schema-invalid output: ${message}`;
+          if (!failOpen) {
+            record.action = "block";
+            record.reason = record.error;
+            blocked = record;
+          } else {
+            record.action = "allow";
+          }
+        }
+      } else if (verdict.action === "block") {
+        blocked = record;
+      }
+      guardrailRecords.push(record);
+      if (blocked) {
+        await this.logUsage({
+          metadata: opts.metadata,
+          orgId,
+          app: opts.app,
+          userId: opts.userId ?? null,
+          route: opts.route ?? null,
+          promptSlug: opts.slug,
+          provider,
+          model,
+          inputTokens,
+          outputTokens,
+          estimatedCostCents: this.registry.estimateForLink(provider, model, inputTokens, outputTokens, extras),
+          cacheHit: false,
+          traceId,
+          durationMs,
+          cacheCreateTokens: extras?.cacheCreateTokens ?? null,
+          cacheReadTokens: extras?.cacheReadTokens ?? null,
+          webSearches: extras?.webSearches ?? null,
+          zdrEnforced: requireZdr ? true : null,
+          inputText: prompt,
+          outputText: JSON.stringify(object),
+          guardrails: guardrailRecords,
+        });
+        throw guardrailError(blocked, object);
+      }
+    }
+
     // 6. Cache write
     if (key) await this.cache.set(key, object, this.cacheTtlSeconds);
 
@@ -2413,6 +2551,7 @@ export class Gateway {
       zdrEnforced: requireZdr ? true : null,
       inputText: prompt,
       outputText: JSON.stringify(object),
+      guardrails: guardrailRecords.length > 0 ? guardrailRecords : null,
     });
 
     // 8a. Free caller-computed rubric

@@ -18,6 +18,7 @@ import {
   timestamp,
 } from "drizzle-orm/pg-core";
 import type { PgDatabase } from "drizzle-orm/pg-core";
+import type { GuardrailRecord } from "../guardrails.js";
 import type {
   JudgeScore,
   SpendCapEvent,
@@ -49,6 +50,8 @@ export const aiUsageLog = pgTable("ai_usage_log", {
   outputText: text("output_text"),
   /** Caller-defined attribution. NULL before 0.11.0. */
   metadata: jsonb("metadata").$type<Record<string, unknown>>(),
+  /** Guardrail verdicts for the call. JSON. NULL before 0.16.0. */
+  guardrails: jsonb("guardrails").$type<GuardrailRecord[]>(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
 });
 
@@ -105,6 +108,7 @@ export class DrizzlePgUsageStore implements UsageStore {
         inputText: entry.inputText ?? null,
         outputText: entry.outputText ?? null,
         metadata: entry.metadata ?? null,
+        guardrails: entry.guardrails ?? null,
         createdAt: entry.createdAt,
       })
       .returning({ id: aiUsageLog.id });
