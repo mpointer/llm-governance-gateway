@@ -23,6 +23,24 @@ export class JudgeGateError extends Error {
   }
 }
 
+/**
+ * A guardrail hook blocked the call. For a `pre` block no provider call was
+ * made and the ledger row is a zero-token one; for a `post` block the tokens
+ * were spent and `output` carries what the provider returned, so a caller
+ * that wants to show a human the rejected object still can.
+ */
+export class GuardrailError extends Error {
+  constructor(
+    public readonly hook: "pre" | "post",
+    public readonly reason: string,
+    public readonly detail?: Record<string, unknown>,
+    public readonly output?: unknown,
+  ) {
+    super(`Call blocked by ${hook} guardrail: ${reason}`);
+    this.name = "GuardrailError";
+  }
+}
+
 export class ZdrViolationError extends Error {
   constructor(
     public readonly provider: string,

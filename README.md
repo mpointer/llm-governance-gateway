@@ -636,6 +636,98 @@ Endpoints: `POST /run` (structured generation — send your Zod schema as JSON S
 
 `POST /run` supports both prompt modes: `variables` renders the server-side prompt library entry for `slug`; `promptBody` sends a client-rendered template instead.
 
+## Guardrail hooks (pre/post)
+
+Policy enforced on every `runStructured` call, in the request path, with the
+verdict written to the ledger. Two seams, both plain TypeScript functions:
+
+```ts
+import { Gateway, GuardrailError } from "llm-governance-gateway";
+
+const gw = new Gateway({
+  usage,
+  guardrails: {
+    // After the prompt is rendered, before any provider spend.
+    pre: ({ prompt }) =>
+      /\b\d{3}-\d{2}-\d{4}\b/.test(prompt)
+        ? { action: "block", reason: "SSN in prompt" }
+        : { action: "allow" },
+    // After generation and schema validation, before the cache write and the judge.
+    post: ({ output }) =>
+      containsCrisisLanguage(output)
+        ? { action: "transform", output: redact(output), reason: "crisis redaction" }
+        : { action: "allow" },
+    // Default false: a hook that THROWS blocks the call. true lets it through
+    // and records that the gate was open. The choice is ledgered either way.
+    failOpen: false,
+  },
+});
+
+try {
+  await gw.runStructured({ ... });
+} catch (err) {
+  if (err instanceof GuardrailError) {
+    err.hook;    // "pre" | "post"
+    err.reason;  // what the hook said
+    err.detail;  // whatever the hook attached (JSON)
+    err.output;  // for a post block: the object the provider returned
+  }
+}
+```
+
+A verdict is `allow`, `transform` (replace the prompt or the output and
+continue) or `block`. Every verdict lands in `UsageEntry.guardrails` on the
+call's usage row: a pre block writes a zero-token row (`provider:
+"guardrail"`), a post block writes the row with the tokens that were spent,
+then throws. An audit that cannot see blocked calls is not an audit. A
+transformed output is what gets cached and what the judge scores; a transform
+that breaks the caller's schema is treated as a block. Hooks run in mock mode
+too, so CI can test policy without keys.
+
+Two deliberate limits: cache hits do not run the hooks (the cached object was
+produced under the guardrails in force when it was written; use `cache: false`
+when the pre policy depends on the caller), and this version applies hooks to
+`runStructured` only, not `streamStructured`, `batch` or `runText`.
+
+### TrustGate: confidence and human-in-the-loop routing as a post hook
+
+`trustGatePostGuardrail` builds a post hook from the math of a production
+decision-integrity platform: ground each extracted field in the source text,
+check business rules, blend a confidence score (generator confidence 0.20,
+schema 0.15, grounding 0.30, rules 0.15, judge 0.20) and route to a human when
+it falls under a per-document-type threshold adjusted for risk and stake.
+
+```ts
+import { trustGatePostGuardrail } from "llm-governance-gateway";
+
+guardrails: {
+  post: trustGatePostGuardrail<Invoice>({
+    sourceText: (ctx) => (ctx.input as { doc: string }).doc,
+    rules: [{ id: "status", field: "status", allowedValues: ["open", "paid"] }],
+    documentType: "invoice",
+    riskLevel: "MEDIUM",
+    estimatedValue: (ctx) => ctx.output.totalCents / 100,
+    thresholds: { invoice: { baseThreshold: 0.85 } },
+    onRoute: "block", // "allow" while calibrating: ledger the decision, let it through
+  }),
+}
+```
+
+A routed decision becomes a `block` whose `detail` carries the full decision
+(threshold and why, confidence components, which fields failed grounding,
+which rules failed), so the handler that queues it for a human has everything
+it needs. The pieces are exported on their own too (`groundFields`,
+`checkBusinessRules`, `computeConfidence`, `routeToHitl`).
+
+Two things to know before trusting it. The default grounder is lexical: a
+case-insensitive substring match with numeric normalization and a structured-
+metadata fallback. It catches fabricated values and misses paraphrase, and it
+will accept "1" because "1042" is in the source. Pass `grounder` to swap in an
+embedding or NLI check. And the port's HITL defaults are not the original's:
+the Python code lowered the threshold for high risk and high value, which
+sends fewer high-stakes items to a human; this package raises it instead.
+`ORIGINAL_ADJUSTMENTS` has the old numbers if you need parity.
+
 ## Design notes
 
 - **Fail-open rate limiting, fail-closed spend caps.** A Redis blip should not 500 every AI call — the limiter fails open with an alert, while the store-backed spend cap (independent of Redis) still bounds cost.
@@ -647,7 +739,7 @@ Endpoints: `POST /run` (structured generation — send your Zod schema as JSON S
 
 Extracted from a production system (three independent in-house implementations converged on this design). Pre-1.0, so the API may still shift — though in practice the store interfaces (`UsageStore`, `PromptStore`, `ModelConfigStore`, `TaskOverrideStore`, `RateLimiter`, `CacheStore`) have only ever gained capability through *optional* parameters, and existing implementations keep compiling. 1.0.0 is gated on a downstream integration proving that holds, not on a date. See [CHANGELOG.md](./CHANGELOG.md).
 
-Next up ([ROADMAP](./ROADMAP.md)): pluggable guardrail hooks and an admin UI reference, both gated on real adopter demand rather than speculation.
+Next up ([ROADMAP](./ROADMAP.md)): an admin UI reference, gated on real adopter demand rather than speculation.
 
 ## License
 

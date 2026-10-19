@@ -50,6 +50,13 @@ export interface UsageEntry {
    * only — so keep PII out of it, or encrypt it yourself before passing.
    */
   metadata?: Record<string, unknown> | null;
+  /**
+   * Guardrail verdicts for this call, one per hook that ran (pre, post), in
+   * order. NULL when no guardrails are configured and on rows written before
+   * 0.16.0. A blocked call still writes its row, with the block here, so an
+   * audit sees blocks rather than silence.
+   */
+  guardrails?: import("./guardrails.js").GuardrailRecord[] | null;
   createdAt: Date;
 }
 
@@ -602,4 +609,12 @@ export interface GatewayConfig {
   isEncrypted?: (value: string) => boolean;
   /** Export hooks for OTel/Langfuse/metrics. See ObservabilityHooks. */
   observability?: ObservabilityHooks;
+  /**
+   * Pre/post guardrail hooks run on every `runStructured` call (mock mode
+   * included, so CI can test policy). Verdicts are ledgered on the usage row.
+   * Fail closed on hook error unless `failOpen` is set. Not applied to
+   * streaming, batch or `runText` in this version; see
+   * docs/design/guardrail-hooks.md.
+   */
+  guardrails?: import("./guardrails.js").GuardrailConfig;
 }

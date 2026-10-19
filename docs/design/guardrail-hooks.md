@@ -1,7 +1,7 @@
 # Design: pluggable guardrail hooks (pre/post)
 
-Status: proposed. Not scheduled until a real adopter demand lands (the
-harvest rule: features enter from production need, not speculation).
+Status: shipped in 0.16.0 (`src/guardrails.ts`, `src/trustgate.ts`). The
+shape below is what shipped, with the open questions answered at the end.
 
 ## Problem
 
@@ -61,3 +61,32 @@ the judge (the judge scores what the caller will actually receive).
 - Batch: run post-guardrails at reconcile time per item?
 - Does `transform` need to be visible to the caller (a "was scrubbed"
   flag on the result), or is the ledger enough?
+
+## Decisions at ship time (0.16.0)
+
+- **Where pre runs.** After prompt render and after the rate limiter and spend
+  check, before any provider spend. The limiter has already counted the call
+  by then, which is the right accounting: a request that was made is a
+  request, blocked or not. What a block never costs is provider tokens.
+- **Ledger shape.** `UsageEntry.guardrails` is an array of records, one per
+  hook that ran, rather than a single column: a call can have both a pre and a
+  post verdict. A pre block writes a zero-token row with `provider:
+  "guardrail", model: "pre"`. NULL means no hooks were configured, which keeps
+  pre-0.16 rows and unguarded rows indistinguishable on purpose.
+- **Transform visibility.** The ledger is enough. The caller gets the
+  transformed object with no flag on the result; the row says it was
+  transformed and why. An app that needs to tell its user can read the record
+  through `observability.onUsage`.
+- **Schema-invalid transforms** are a block (or, under `failOpen`, an allow of
+  the original object with the error recorded). A scrubber must not hand the
+  caller an object the type system says cannot exist.
+- **Streaming, batch and `runText`:** excluded in this version, as the open
+  questions suggested. Streaming needs buffering or chunk-level policy; batch
+  reconcile-time checks double the per-item cost; both are decisions for an
+  adopter with the need. `runText` is a small addition when someone asks.
+- **Cache hits skip the hooks.** The cached object was produced under the
+  guardrails in force when it was written. A pre policy that depends on the
+  caller rather than the prompt needs `cache: false`.
+- **Allow verdicts may carry `reason` and `detail`** so a hook that computed
+  something expensive (TrustGate's confidence blend) can leave it in the
+  ledger even when it let the call through.

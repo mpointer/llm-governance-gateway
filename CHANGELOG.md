@@ -8,6 +8,62 @@ adopters implement, and in practice they have only ever gained capability throug
 *optional* parameters — but they are not yet under a formal semver freeze. 1.0.0
 is gated on a downstream integration proving the SPI holds, not on a date.
 
+## 0.16.0
+
+Pluggable guardrail hooks, the roadmap item that was waiting on adopter
+demand, and a TypeScript port of the TrustGate confidence and routing math
+that had only ever existed in Python. The demand came from the second
+component: it had no TypeScript home, and a post hook is the natural one.
+
+### Added
+
+- **`GatewayConfig.guardrails`** — `pre` and `post` hooks run on every
+  `runStructured` call, in the request path. A verdict is `allow`,
+  `transform` (replace the prompt or the output) or `block` (throws the new
+  `GuardrailError`, which carries the hook, the reason, the hook's `detail`
+  and, for a post block, the generated object). Hooks run in mock mode too.
+- **Verdicts are ledgered.** `UsageEntry.guardrails` carries one record per
+  hook that ran (action, reason, detail, error, `failOpen`, duration). A pre
+  block writes a zero-token row (`provider: "guardrail", model: "pre"`); a
+  post block writes the row with the spent tokens before throwing.
+- **Declared failure policy.** A throwing hook blocks the call by default.
+  `guardrails.failOpen: true` lets it through and records the error and the
+  open gate on the row, so the choice is visible later, not inferred.
+- **`trustGatePostGuardrail`** and its parts (`groundFields`, `groundValue`,
+  `checkBusinessRules`, `computeConfidence`, `routeToHitl`): source grounding,
+  business rules, the weighted confidence blend and per-document-type HITL
+  routing with risk and stake adjustments. The confidence math is numerically
+  identical to the Python original for the cases in `src/trustgate.test.ts`.
+  `onRoute: "allow"` is a calibration mode that ledgers routed decisions
+  without blocking.
+
+### Changed
+
+- **HITL default adjustments differ from the Python original on purpose.**
+  The original's defaults lower the threshold for HIGH risk (-0.15) and for
+  values over 10,000 (-0.10), so a high-stakes item needs LESS confidence to
+  skip review. This package raises the bar instead (+0.10 and +0.10).
+  `ORIGINAL_ADJUSTMENTS` exports the old numbers; the parity tests use them.
+
+### Migration
+
+One nullable column on the usage table. Rows written before 0.16.0 and rows
+from calls with no hooks configured both read NULL.
+
+```sql
+ALTER TABLE ai_usage_log ADD COLUMN guardrails TEXT;   -- jsonb on pg
+```
+
+`ensureTables()` (SQLite quick-start) adds it automatically.
+
+### Known limits
+
+- Hooks apply to `runStructured` only; `streamStructured`, `batch` and
+  `runText` are unchanged. Cache hits do not run hooks.
+- The default grounder is lexical (substring with numeric normalization and a
+  metadata fallback). It catches fabricated values and misses paraphrase.
+  `grounder` is the slot for an embedding or NLI check.
+
 ## 0.15.0
 
 A bug fix and, after the adopter who reported it read the fix and pushed
