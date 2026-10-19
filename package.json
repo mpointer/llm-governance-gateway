@@ -94,7 +94,7 @@
     "hono": "^4.6.0",
     "sql.js": "^1.13.0",
     "typescript": "^5.7.0",
-    "vitest": "^3.0.0"
+    "vitest": "^5.0.2"
   },
   "engines": {
     "node": ">=20"
