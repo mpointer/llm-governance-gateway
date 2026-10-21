@@ -10,7 +10,10 @@ import type { GuardrailConfig } from "./guardrails.js";
 
 const OutSchema = z.object({ answer: z.string() });
 
-function make(guardrails: GuardrailConfig, extra: { cache?: MemoryCacheStore; judge?: boolean } = {}) {
+function make(
+  guardrails: GuardrailConfig,
+  extra: { cache?: MemoryCacheStore; judge?: boolean } = {},
+) {
   const usage = new MemoryUsageStore();
   const gw = new Gateway({
     usage,
@@ -22,7 +25,10 @@ function make(guardrails: GuardrailConfig, extra: { cache?: MemoryCacheStore; ju
     judge: { random: () => 0 },
   });
   gw.registerMockResponder("sum", (input) => ({ answer: `echo:${(input as { t: string }).t}` }));
-  if (extra.judge) gw.registerMockResponder("judge:sum", (obj) => ({ ok: (obj as { answer: string }).answer.includes("scrubbed") ? 5 : 1 }));
+  if (extra.judge)
+    gw.registerMockResponder("judge:sum", (obj) => ({
+      ok: (obj as { answer: string }).answer.includes("scrubbed") ? 5 : 1,
+    }));
   return { gw, usage };
 }
 
@@ -45,12 +51,16 @@ describe("pre guardrail", () => {
     const res = await gw.runStructured(opts());
     expect(res.object.answer).toBe("echo:hello");
     const row = usage.entries.find((e) => e.id === res.usageLogId)!;
-    expect(row.guardrails).toEqual([expect.objectContaining({ hook: "pre", action: "allow", reason: "clean", failOpen: false })]);
+    expect(row.guardrails).toEqual([
+      expect.objectContaining({ hook: "pre", action: "allow", reason: "clean", failOpen: false }),
+    ]);
   });
 
   it("block: no provider call, a zero-token row with the block, GuardrailError thrown", async () => {
     let calls = 0;
-    const { gw, usage } = make({ pre: () => ({ action: "block", reason: "pii in prompt", detail: { kind: "ssn" } }) });
+    const { gw, usage } = make({
+      pre: () => ({ action: "block", reason: "pii in prompt", detail: { kind: "ssn" } }),
+    });
     gw.registerMockResponder("sum", () => {
       calls++;
       return { answer: "x" };
@@ -68,15 +78,32 @@ describe("pre guardrail", () => {
     expect(row.model).toBe("pre");
     expect(row.inputTokens).toBe(0);
     expect(row.estimatedCostCents).toBe(0);
-    expect(row.guardrails).toEqual([expect.objectContaining({ hook: "pre", action: "block", reason: "pii in prompt", detail: { kind: "ssn" } })]);
+    expect(row.guardrails).toEqual([
+      expect.objectContaining({
+        hook: "pre",
+        action: "block",
+        reason: "pii in prompt",
+        detail: { kind: "ssn" },
+      }),
+    ]);
   });
 
   it("transform: the rewritten prompt is what goes out and what is ledgered", async () => {
-    const { gw, usage } = make({ pre: (ctx) => ({ action: "transform", prompt: ctx.prompt.replace("hello", "[redacted]"), reason: "scrub" }) });
+    const { gw, usage } = make({
+      pre: (ctx) => ({
+        action: "transform",
+        prompt: ctx.prompt.replace("hello", "[redacted]"),
+        reason: "scrub",
+      }),
+    });
     const res = await gw.runStructured(opts());
     const row = usage.entries.find((e) => e.id === res.usageLogId)!;
     expect(row.inputText).toBe("Summarize: [redacted]");
-    expect(row.guardrails?.[0]).toMatchObject({ hook: "pre", action: "transform", reason: "scrub" });
+    expect(row.guardrails?.[0]).toMatchObject({
+      hook: "pre",
+      action: "transform",
+      reason: "scrub",
+    });
   });
 
   it("sees the rendered prompt, the input and the identity", async () => {
@@ -88,13 +115,24 @@ describe("pre guardrail", () => {
       },
     });
     await gw.runStructured(opts({ task: undefined }));
-    expect(seen).toMatchObject({ slug: "sum", prompt: "Summarize: hello", input: { t: "hello" }, userId: "u1", route: "test" });
+    expect(seen).toMatchObject({
+      slug: "sum",
+      prompt: "Summarize: hello",
+      input: { t: "hello" },
+      userId: "u1",
+      route: "test",
+    });
   });
 });
 
 describe("post guardrail", () => {
   it("block: the usage row is written with the spent tokens, then GuardrailError carries the object", async () => {
-    const { gw, usage } = make({ post: (ctx) => ({ action: "block", reason: `bad: ${(ctx.output as { answer: string }).answer}` }) });
+    const { gw, usage } = make({
+      post: (ctx) => ({
+        action: "block",
+        reason: `bad: ${(ctx.output as { answer: string }).answer}`,
+      }),
+    });
     const err = await gw.runStructured(opts()).catch((e) => e);
     expect(err).toBeInstanceOf(GuardrailError);
     expect(err.hook).toBe("post");
@@ -103,13 +141,22 @@ describe("post guardrail", () => {
     const row = usage.entries[0]!;
     expect(row.provider).toBe("mock");
     expect(row.inputTokens).toBeGreaterThan(0);
-    expect(row.guardrails?.[0]).toMatchObject({ hook: "post", action: "block", reason: "bad: echo:hello" });
+    expect(row.guardrails?.[0]).toMatchObject({
+      hook: "post",
+      action: "block",
+      reason: "bad: echo:hello",
+    });
   });
 
   it("transform: the caller, the cache and the judge all see the transformed object", async () => {
     const cache = new MemoryCacheStore();
-    const { gw, usage } = make({ post: () => ({ action: "transform", output: { answer: "scrubbed" } }) }, { cache, judge: true });
-    const res = await gw.runStructured(opts({ cache: true, cacheParts: ["k"], judge: { criteria: { ok: "ok" } } }));
+    const { gw, usage } = make(
+      { post: () => ({ action: "transform", output: { answer: "scrubbed" } }) },
+      { cache, judge: true },
+    );
+    const res = await gw.runStructured(
+      opts({ cache: true, cacheParts: ["k"], judge: { criteria: { ok: "ok" } } }),
+    );
     expect(res.object).toEqual({ answer: "scrubbed" });
     // The judge scored the transformed object (the mock judge gives 5 only for "scrubbed").
     expect(usage.judgeScores[0]!.rubric).toEqual({ ok: 5 });
@@ -128,15 +175,25 @@ describe("post guardrail", () => {
   });
 
   it("transform that breaks the schema under failOpen keeps the original object and records the error", async () => {
-    const { gw, usage } = make({ post: () => ({ action: "transform", output: { answer: 42 } }), failOpen: true });
+    const { gw, usage } = make({
+      post: () => ({ action: "transform", output: { answer: 42 } }),
+      failOpen: true,
+    });
     const res = await gw.runStructured(opts());
     expect(res.object).toEqual({ answer: "echo:hello" });
-    expect(usage.entries[0]!.guardrails?.[0]).toMatchObject({ hook: "post", action: "allow", failOpen: true });
+    expect(usage.entries[0]!.guardrails?.[0]).toMatchObject({
+      hook: "post",
+      action: "allow",
+      failOpen: true,
+    });
     expect(usage.entries[0]!.guardrails?.[0]?.error).toMatch(/schema-invalid/);
   });
 
   it("both hooks: the row carries both records in order", async () => {
-    const { gw, usage } = make({ pre: () => ({ action: "allow" }), post: () => ({ action: "allow" }) });
+    const { gw, usage } = make({
+      pre: () => ({ action: "allow" }),
+      post: () => ({ action: "allow" }),
+    });
     const res = await gw.runStructured(opts());
     const row = usage.entries.find((e) => e.id === res.usageLogId)!;
     expect(row.guardrails?.map((g) => g.hook)).toEqual(["pre", "post"]);
@@ -153,7 +210,12 @@ describe("hook failure policy", () => {
     const err = await gw.runStructured(opts()).catch((e) => e);
     expect(err).toBeInstanceOf(GuardrailError);
     expect(err.reason).toMatch(/classifier down/);
-    expect(usage.entries[0]!.guardrails?.[0]).toMatchObject({ hook: "pre", action: "block", error: "classifier down", failOpen: false });
+    expect(usage.entries[0]!.guardrails?.[0]).toMatchObject({
+      hook: "pre",
+      action: "block",
+      error: "classifier down",
+      failOpen: false,
+    });
   });
 
   it("failOpen: a throwing hook lets the call through and the row says the gate was open", async () => {
@@ -165,7 +227,12 @@ describe("hook failure policy", () => {
     });
     const res = await gw.runStructured(opts());
     expect(res.object.answer).toBe("echo:hello");
-    expect(usage.entries[0]!.guardrails?.[0]).toMatchObject({ hook: "post", action: "allow", error: "classifier down", failOpen: true });
+    expect(usage.entries[0]!.guardrails?.[0]).toMatchObject({
+      hook: "post",
+      action: "allow",
+      error: "classifier down",
+      failOpen: true,
+    });
   });
 
   it("an invalid verdict shape is treated as a thrown hook", async () => {

@@ -42,8 +42,7 @@ console.log(`Keyed providers: ${configured.join(", ")}\n`);
 let failures = 0;
 
 for (const provider of configured) {
-  const model =
-    process.env[`SMOKE_MODEL_${provider.toUpperCase()}`] ?? DEFAULT_MODELS[provider];
+  const model = process.env[`SMOKE_MODEL_${provider.toUpperCase()}`] ?? DEFAULT_MODELS[provider];
 
   // Gateway first so discovery syncs vendor pricing (OpenRouter) into the
   // SAME registry the generation step uses for cost estimation.
@@ -63,8 +62,11 @@ for (const provider of configured) {
   try {
     const d = await listProviderModels(gw.registry, provider);
     const note = d.error ? ` (error: ${d.error})` : "";
-    const priced = provider === "openrouter" && gw.registry.hasPricing(model) ? ", pricing synced" : "";
-    console.log(`[${provider}] discovery: ${d.models.length} models, source=${d.source}${note}${priced}`);
+    const priced =
+      provider === "openrouter" && gw.registry.hasPricing(model) ? ", pricing synced" : "";
+    console.log(
+      `[${provider}] discovery: ${d.models.length} models, source=${d.source}${note}${priced}`,
+    );
     if (d.source !== "api") failures++;
   } catch (e) {
     console.error(`[${provider}] discovery FAILED: ${e.message}`);
@@ -89,7 +91,7 @@ for (const provider of configured) {
     // AI SDK errors often carry the real diagnosis outside .message.
     const detail = [
       e.name && e.name !== "Error" ? e.name : null,
-      e.statusCode ?? e.status ? `HTTP ${e.statusCode ?? e.status}` : null,
+      (e.statusCode ?? e.status) ? `HTTP ${e.statusCode ?? e.status}` : null,
       e.message || null,
       e.responseBody ? `body: ${String(e.responseBody).slice(0, 300)}` : null,
       e.cause?.message ? `cause: ${e.cause.message}` : null,

@@ -65,9 +65,9 @@ describe("ids that merely contain a colon are left alone", () => {
   it("keeps a slash-scoped vendor id intact (the discovery path)", () => {
     const r = new ProviderRegistry();
     r.addPricing("meta-llama/Llama-3.3-70B-Instruct-Turbo", RATE);
-    expect(
-      r.estimateCostCents("meta-llama/Llama-3.3-70B-Instruct-Turbo", 1000, 1000),
-    ).toBe(EXPECTED);
+    expect(r.estimateCostCents("meta-llama/Llama-3.3-70B-Instruct-Turbo", 1000, 1000)).toBe(
+      EXPECTED,
+    );
   });
 });
 
@@ -121,17 +121,15 @@ describe("startup preflight", () => {
   it("assertPricingComplete throws listing everything missing", () => {
     const r = new ProviderRegistry();
     r.addPricing("openai:gpt-4.1", RATE);
-    expect(() =>
-      r.assertPricingComplete(["gpt-4.1", "missing-a", "missing-b"]),
-    ).toThrow(/missing-a, missing-b/);
+    expect(() => r.assertPricingComplete(["gpt-4.1", "missing-a", "missing-b"])).toThrow(
+      /missing-a, missing-b/,
+    );
   });
 
   it("passes when every id is priced, in either form", () => {
     const r = new ProviderRegistry();
     r.addPricing("gpt-4.1", RATE);
-    expect(() =>
-      r.assertPricingComplete(["gpt-4.1", "openai:gpt-4.1"]),
-    ).not.toThrow();
+    expect(() => r.assertPricingComplete(["gpt-4.1", "openai:gpt-4.1"])).not.toThrow();
   });
 
   it("missingPricing reports without throwing", () => {

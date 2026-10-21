@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -18,8 +21,13 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
+      - name: Lint and format check (Biome)
+        run: npm run check
       - run: npx tsc --noEmit
-      - run: npx vitest run
+      - name: Typecheck examples
+        run: npm run typecheck:examples
+      - name: Tests with coverage summary
+        run: npm run test:coverage
       - run: npm run build
       - name: Verify publishable contents
         run: npm pack --dry-run

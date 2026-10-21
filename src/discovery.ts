@@ -123,9 +123,7 @@ async function fetchProviderModels(
       // Together returns a raw array (not {data}) with $/1M-token pricing.
       const raw = (await fetchJson("https://api.together.xyz/v1/models", {
         Authorization: `Bearer ${apiKey}`,
-      })) as
-        | TogetherModel[]
-        | { data?: TogetherModel[] };
+      })) as TogetherModel[] | { data?: TogetherModel[] };
       const models = Array.isArray(raw) ? raw : (raw.data ?? []);
       for (const m of models) {
         const pricing = togetherPricingToCents(m.pricing);
@@ -202,8 +200,6 @@ export async function listAllProviderModels(
   registry: ProviderRegistry,
   opts: { includeUnconfigured?: boolean } = {},
 ): Promise<ProviderModels[]> {
-  const providers = opts.includeUnconfigured
-    ? PROVIDER_IDS
-    : registry.configuredProviders();
+  const providers = opts.includeUnconfigured ? PROVIDER_IDS : registry.configuredProviders();
   return Promise.all(providers.map((p) => listProviderModels(registry, p)));
 }

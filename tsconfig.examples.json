@@ -1,0 +1,19 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "allowJs": true,
+    "checkJs": true,
+    "lib": ["ES2022", "DOM"],
+    "baseUrl": ".",
+    "paths": {
+      "llm-governance-gateway": ["./src/index.ts"],
+      "llm-governance-gateway/http": ["./src/http/app.ts"],
+      "llm-governance-gateway/drizzle-sqlite": ["./src/adapters/drizzle-sqlite.ts"],
+      "llm-governance-gateway/drizzle-pg": ["./src/adapters/drizzle-pg.ts"]
+    }
+  },
+  "include": ["examples/**/*.ts", "examples/**/*.mjs", "examples/_types/*.d.ts"],
+  "exclude": ["node_modules", "dist"]
+}

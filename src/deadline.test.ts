@@ -5,10 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { LanguageModel } from "ai";
 import { Gateway } from "./gateway.js";
-import {
-  AttemptTimeoutError,
-  DeadlineExceededError,
-} from "./errors.js";
+import { AttemptTimeoutError, DeadlineExceededError } from "./errors.js";
 import { AttemptBudget, MIN_ATTEMPT_MS, attemptSignal, sleep } from "./deadline.js";
 import { MemoryUsageStore } from "./adapters/memory.js";
 
@@ -63,8 +60,7 @@ function gwWithChain(
     promptDefaults: [{ slug: "q", body: "Q {{q}}", variables: ["q"] }],
     modelConfig: {
       getOverride: async () => null,
-      getChain: async () =>
-        links.map((l) => ({ provider: "anthropic" as const, ...l })),
+      getChain: async () => links.map((l) => ({ provider: "anthropic" as const, ...l })),
     },
     caps: { userDailyCents: 0, anonDailyCents: 0, globalDailyCents: 0 },
     ...(timeouts ? { timeouts } : {}),

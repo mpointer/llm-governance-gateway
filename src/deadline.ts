@@ -39,10 +39,7 @@ export interface AttemptSignal {
  * Create one PER ATTEMPT — a retry deserves a fresh window, not the remains
  * of the previous one.
  */
-export function attemptSignal(
-  timeoutMs: number,
-  callerSignal?: AbortSignal,
-): AttemptSignal {
+export function attemptSignal(timeoutMs: number, callerSignal?: AbortSignal): AttemptSignal {
   const controller = new AbortController();
   let timedOut = false;
   let timer: ReturnType<typeof setTimeout> | undefined;

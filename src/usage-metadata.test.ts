@@ -164,8 +164,7 @@ describe("usage metadata", () => {
     const usage = new MemoryUsageStore();
     const gw = mockGw(usage, {
       observability: {
-        onUsage: (e: { metadata?: Record<string, unknown> | null }) =>
-          void seen.push(e.metadata),
+        onUsage: (e: { metadata?: Record<string, unknown> | null }) => void seen.push(e.metadata),
       },
     });
     await gw.runStructured({ ...RUN, cache: false, metadata: META });

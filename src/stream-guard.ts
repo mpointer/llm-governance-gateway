@@ -130,10 +130,7 @@ export function createConflatedCell<T>(): ConflatedCell<T> {
  * consumer still sees monotonically newer state and always the final value —
  * and memory stays O(1) instead of growing with a stream it isn't reading.
  */
-export function guardStream<T>(
-  source: AsyncIterable<T>,
-  opts: StreamGuardOptions,
-): StreamGuard<T> {
+export function guardStream<T>(source: AsyncIterable<T>, opts: StreamGuardOptions): StreamGuard<T> {
   const { controller, firstChunkMs, stallMs, callerSignal, onTrip, onCallerAbort } = opts;
 
   const cell = createConflatedCell<T>();

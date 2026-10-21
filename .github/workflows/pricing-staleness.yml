@@ -1,0 +1,26 @@
+name: Pricing staleness
+
+# Monthly reminder that the built-in pricing table needs re-checking. Fails
+# when the newest `asOf` in src/providers.ts BUILTIN_PRICING is more than a
+# quarter old. Deliberately a scheduled job, not a test: a check that trips
+# on the calendar must not turn unrelated PRs red.
+on:
+  schedule:
+    - cron: "17 6 1 * *" # 06:17 UTC on the 1st
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: node scripts/pricing-staleness.mjs

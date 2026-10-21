@@ -80,9 +80,9 @@ describe("native Anthropic path", () => {
       usage: new MemoryUsageStore(),
       promptDefaults: [{ slug: "q", body: "Q: {{q}}", variables: ["q"] }],
     });
-    await expect(
-      gw.runStructured({ ...baseOpts, anthropic: { thinking: true } }),
-    ).rejects.toThrow(/GatewayConfig.anthropic is not configured/);
+    await expect(gw.runStructured({ ...baseOpts, anthropic: { thinking: true } })).rejects.toThrow(
+      /GatewayConfig.anthropic is not configured/,
+    );
   });
 
   it("forces tool_use without thinking; captures cache + search usage and costs them", async () => {
@@ -239,7 +239,10 @@ describe("native Anthropic abort signal", () => {
 
   it("passes a live AbortSignal on the runText native path", async () => {
     const { client, options } = signalCapturingClient([
-      { content: [{ type: "text", text: "grounded" }], usage: { input_tokens: 3, output_tokens: 2 } },
+      {
+        content: [{ type: "text", text: "grounded" }],
+        usage: { input_tokens: 3, output_tokens: 2 },
+      },
     ]);
     const gw = makeGw(client);
     const res = await gw.runText({
@@ -263,9 +266,7 @@ describe("native Anthropic abort signal", () => {
           observed = opts?.signal;
           // Never resolves on its own; only the signal ends it.
           return await new Promise<AnthropicMessage>((_resolve, reject) => {
-            opts?.signal?.addEventListener("abort", () =>
-              reject(new Error("request aborted")),
-            );
+            opts?.signal?.addEventListener("abort", () => reject(new Error("request aborted")));
           });
         },
       },

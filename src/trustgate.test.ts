@@ -36,11 +36,17 @@ describe("groundValue", () => {
     expect(out).toMatchObject({ grounded: true, confidence: 1, offset: 18 });
   });
   it("numeric match after stripping formatting", () => {
-    expect(groundValue("total", "1250.00", source)).toMatchObject({ grounded: true, confidence: 0.9 });
+    expect(groundValue("total", "1250.00", source)).toMatchObject({
+      grounded: true,
+      confidence: 0.9,
+    });
     expect(groundValue("total", 1250, source).grounded).toBe(true);
   });
   it("structured metadata fallback", () => {
-    expect(groundValue("po", "PO-77", source, { metadata: { po: "PO-77" } })).toMatchObject({ grounded: true, confidence: 0.95 });
+    expect(groundValue("po", "PO-77", source, { metadata: { po: "PO-77" } })).toMatchObject({
+      grounded: true,
+      confidence: 0.95,
+    });
   });
   it("fabricated values are not grounded; exactOnly disables the fallbacks", () => {
     expect(groundValue("vendor", "Globex", source).grounded).toBe(false);
@@ -51,7 +57,13 @@ describe("groundValue", () => {
     const out = await groundFields({ vendor: "Acme Corp", total: "9999" }, source);
     expect(out.map((o) => o.grounded)).toEqual([true, false]);
     const custom = await groundFields({ a: 1 }, source, {
-      ground: (field, value) => ({ field, value, grounded: true, confidence: 0.6, evidence: ["nli"] }),
+      ground: (field, value) => ({
+        field,
+        value,
+        grounded: true,
+        confidence: 0.6,
+        evidence: ["nli"],
+      }),
     });
     expect(custom[0]).toMatchObject({ grounded: true, confidence: 0.6 });
   });
@@ -59,17 +71,25 @@ describe("groundValue", () => {
 
 describe("checkBusinessRules", () => {
   it("range, allowed values and custom validators; absent fields are skipped", () => {
-    const out = checkBusinessRules(
-      { amount: "1,500", status: "paid", code: "ZZ" },
-      [
-        { id: "amt", field: "amount", range: { min: 0, max: 1000 } },
-        { id: "st", field: "status", allowedValues: ["paid", "open"] },
-        { id: "code", field: "code", validate: (v) => /^[A-Z]{3}$/.test(String(v)) },
-        { id: "missing", field: "nope", range: { min: 0 } },
-        { id: "boom", field: "code", validate: () => { throw new Error("x"); } },
-      ],
-    );
-    expect(out.map((o) => [o.ruleId, o.passed])).toEqual([["amt", false], ["st", true], ["code", false], ["boom", false]]);
+    const out = checkBusinessRules({ amount: "1,500", status: "paid", code: "ZZ" }, [
+      { id: "amt", field: "amount", range: { min: 0, max: 1000 } },
+      { id: "st", field: "status", allowedValues: ["paid", "open"] },
+      { id: "code", field: "code", validate: (v) => /^[A-Z]{3}$/.test(String(v)) },
+      { id: "missing", field: "nope", range: { min: 0 } },
+      {
+        id: "boom",
+        field: "code",
+        validate: () => {
+          throw new Error("x");
+        },
+      },
+    ]);
+    expect(out.map((o) => [o.ruleId, o.passed])).toEqual([
+      ["amt", false],
+      ["st", true],
+      ["code", false],
+      ["boom", false],
+    ]);
     expect(out[0]!.reason).toBe("value 1500 above maximum 1000");
     expect(out[3]!.reason).toBe("validation error: x");
   });
@@ -77,7 +97,12 @@ describe("checkBusinessRules", () => {
 
 describe("computeConfidence parity with the Python original", () => {
   it("all perfect, no judge → 0.975 VERY_HIGH", () => {
-    const c = computeConfidence({ llmConfidence: 0.9, schema: { ok: true }, grounding: [g(true, 1), g(true, 1, 1)], rules: [r(true)] });
+    const c = computeConfidence({
+      llmConfidence: 0.9,
+      schema: { ok: true },
+      grounding: [g(true, 1), g(true, 1, 1)],
+      rules: [r(true)],
+    });
     expect(c.overall).toBeCloseTo(0.975, 10);
     expect(c.level).toBe("VERY_HIGH");
     expect(c.penalties).toEqual([]);
@@ -88,13 +113,23 @@ describe("computeConfidence parity with the Python original", () => {
     expect(c.level).toBe("HIGH");
   });
   it("schema failure → 0.7875 MEDIUM", () => {
-    const c = computeConfidence({ llmConfidence: 0.9, schema: { ok: false }, grounding: [g(true, 1)], rules: [r(true)] });
+    const c = computeConfidence({
+      llmConfidence: 0.9,
+      schema: { ok: false },
+      grounding: [g(true, 1)],
+      rules: [r(true)],
+    });
     expect(c.overall).toBeCloseTo(0.7875, 10);
     expect(c.schema).toBe(0);
     expect(c.penalties).toEqual([{ reason: "Schema validation failed", penalty: 1 }]);
   });
   it("two schema warnings → 0.9375 HIGH", () => {
-    const c = computeConfidence({ llmConfidence: 0.9, schema: { ok: true, warnings: 2 }, grounding: [g(true, 1)], rules: [r(true)] });
+    const c = computeConfidence({
+      llmConfidence: 0.9,
+      schema: { ok: true, warnings: 2 },
+      grounding: [g(true, 1)],
+      rules: [r(true)],
+    });
     expect(c.overall).toBeCloseTo(0.9375, 10);
     expect(c.schema).toBeCloseTo(0.8, 10);
     expect(c.penalties[0]).toMatchObject({ reason: "2 schema warnings" });
@@ -110,7 +145,10 @@ describe("computeConfidence parity with the Python original", () => {
     expect(c.grounding).toBeCloseTo(0.4875, 10);
     expect(c.rules).toBe(0.5);
     expect(c.level).toBe("LOW");
-    expect(c.penalties.map((p) => p.reason)).toEqual(["2 fields not grounded in source", "1 business rules failed"]);
+    expect(c.penalties.map((p) => p.reason)).toEqual([
+      "2 fields not grounded in source",
+      "1 business rules failed",
+    ]);
   });
   it("with a judge → 0.75 MEDIUM; judge penalties are recorded, not applied", () => {
     const c = computeConfidence({
@@ -122,7 +160,10 @@ describe("computeConfidence parity with the Python original", () => {
     });
     expect(c.overall).toBeCloseTo(0.75, 10);
     expect(c.judge).toBe(0.7);
-    expect(c.penalties.map((p) => p.reason)).toEqual(["1 fields not grounded in source", "Judge found 1 unsupported claims"]);
+    expect(c.penalties.map((p) => p.reason)).toEqual([
+      "1 fields not grounded in source",
+      "Judge found 1 unsupported claims",
+    ]);
   });
   it("judge hallucination → 0.85 MEDIUM (level boundary is >= 0.85 on the rounded original, MEDIUM here as there)", () => {
     const c = computeConfidence({
@@ -136,31 +177,159 @@ describe("computeConfidence parity with the Python original", () => {
     expect(c.penalties.map((p) => p.penalty)).toEqual([0.5, 0.3]);
   });
   it("additional negative factors are applied and recorded; non-numeric ones ignored", () => {
-    const c = computeConfidence({ llmConfidence: 0.9, schema: { ok: true }, grounding: [g(true, 1)], rules: [r(true)], penalties: { late_doc: -0.2 } });
+    const c = computeConfidence({
+      llmConfidence: 0.9,
+      schema: { ok: true },
+      grounding: [g(true, 1)],
+      rules: [r(true)],
+      penalties: { late_doc: -0.2 },
+    });
     expect(c.overall).toBeCloseTo(0.775, 10);
     expect(c.penalties).toEqual([{ reason: "late_doc", penalty: 0.2 }]);
   });
 });
 
 describe("routeToHitl", () => {
-  const conf = (overall: number) => ({ overall, level: "MEDIUM" as const, llm: overall, schema: 1, grounding: 1, rules: 1, judge: null, penalties: [] });
+  const conf = (overall: number) => ({
+    overall,
+    level: "MEDIUM" as const,
+    llm: overall,
+    schema: 1,
+    grounding: 1,
+    rules: 1,
+    judge: null,
+    penalties: [],
+  });
 
   describe("parity with the Python original (its negative adjustments passed explicitly)", () => {
-    const thresholds: Record<string, HitlThreshold> = { invoice: { baseThreshold: 0.85, ...ORIGINAL_ADJUSTMENTS } };
-    const cases: Array<[string, number, string, "LOW" | "MEDIUM" | "HIGH", number | undefined, boolean, number, string, string]> = [
-      ["default doc pass", 0.9, "memo", "MEDIUM", undefined, false, 0.85, "LOW", "Default threshold (no config for memo)"],
-      ["default doc route", 0.8, "memo", "MEDIUM", undefined, true, 0.85, "MEDIUM", "Default threshold (no config for memo)"],
-      ["invoice low risk small", 0.84, "invoice", "LOW", 500, true, 0.85, "MEDIUM", "Base threshold for invoice"],
-      ["invoice high risk", 0.72, "invoice", "HIGH", 500, false, 0.7, "LOW", "Base threshold for invoice, risk adjustment -0.15"],
-      ["invoice high value", 0.76, "invoice", "MEDIUM", 20000, false, 0.7, "LOW", "Base threshold for invoice, risk adjustment -0.05, value adjustment -0.10"],
-      ["invoice mid value", 0.76, "invoice", "MEDIUM", 5000, false, 0.75, "LOW", "Base threshold for invoice, risk adjustment -0.05, value adjustment -0.05"],
-      ["critical", 0.4, "invoice", "LOW", undefined, true, 0.85, "CRITICAL", "Base threshold for invoice"],
-      ["high by confidence", 0.6, "memo", "LOW", undefined, true, 0.85, "HIGH", "Default threshold (no config for memo)"],
-      ["high by value", 0.8, "memo", "LOW", 50000, true, 0.85, "HIGH", "Default threshold (no config for memo)"],
+    const thresholds: Record<string, HitlThreshold> = {
+      invoice: { baseThreshold: 0.85, ...ORIGINAL_ADJUSTMENTS },
+    };
+    const cases: Array<
+      [
+        string,
+        number,
+        string,
+        "LOW" | "MEDIUM" | "HIGH",
+        number | undefined,
+        boolean,
+        number,
+        string,
+        string,
+      ]
+    > = [
+      [
+        "default doc pass",
+        0.9,
+        "memo",
+        "MEDIUM",
+        undefined,
+        false,
+        0.85,
+        "LOW",
+        "Default threshold (no config for memo)",
+      ],
+      [
+        "default doc route",
+        0.8,
+        "memo",
+        "MEDIUM",
+        undefined,
+        true,
+        0.85,
+        "MEDIUM",
+        "Default threshold (no config for memo)",
+      ],
+      [
+        "invoice low risk small",
+        0.84,
+        "invoice",
+        "LOW",
+        500,
+        true,
+        0.85,
+        "MEDIUM",
+        "Base threshold for invoice",
+      ],
+      [
+        "invoice high risk",
+        0.72,
+        "invoice",
+        "HIGH",
+        500,
+        false,
+        0.7,
+        "LOW",
+        "Base threshold for invoice, risk adjustment -0.15",
+      ],
+      [
+        "invoice high value",
+        0.76,
+        "invoice",
+        "MEDIUM",
+        20000,
+        false,
+        0.7,
+        "LOW",
+        "Base threshold for invoice, risk adjustment -0.05, value adjustment -0.10",
+      ],
+      [
+        "invoice mid value",
+        0.76,
+        "invoice",
+        "MEDIUM",
+        5000,
+        false,
+        0.75,
+        "LOW",
+        "Base threshold for invoice, risk adjustment -0.05, value adjustment -0.05",
+      ],
+      [
+        "critical",
+        0.4,
+        "invoice",
+        "LOW",
+        undefined,
+        true,
+        0.85,
+        "CRITICAL",
+        "Base threshold for invoice",
+      ],
+      [
+        "high by confidence",
+        0.6,
+        "memo",
+        "LOW",
+        undefined,
+        true,
+        0.85,
+        "HIGH",
+        "Default threshold (no config for memo)",
+      ],
+      [
+        "high by value",
+        0.8,
+        "memo",
+        "LOW",
+        50000,
+        true,
+        0.85,
+        "HIGH",
+        "Default threshold (no config for memo)",
+      ],
     ];
     for (const [name, overall, doc, risk, value, route, threshold, priority, reason] of cases) {
       it(name, () => {
-        const d = routeToHitl(conf(overall), { documentType: doc, riskLevel: risk, estimatedValue: value, failures: overall < 0.5 ? ["x"] : [] }, { thresholds });
+        const d = routeToHitl(
+          conf(overall),
+          {
+            documentType: doc,
+            riskLevel: risk,
+            estimatedValue: value,
+            failures: overall < 0.5 ? ["x"] : [],
+          },
+          { thresholds },
+        );
         expect(d.route).toBe(route);
         expect(d.threshold).toBeCloseTo(threshold, 10);
         expect(d.priority).toBe(priority);
@@ -171,11 +340,21 @@ describe("routeToHitl", () => {
 
   it("the port's defaults raise the bar for risk and value instead of lowering it", () => {
     const thresholds: Record<string, HitlThreshold> = { invoice: {} };
-    const high = routeToHitl(conf(0.9), { documentType: "invoice", riskLevel: "HIGH", estimatedValue: 20000 }, { thresholds });
+    const high = routeToHitl(
+      conf(0.9),
+      { documentType: "invoice", riskLevel: "HIGH", estimatedValue: 20000 },
+      { thresholds },
+    );
     expect(high.threshold).toBeCloseTo(1.0, 10); // 0.85 + 0.10 + 0.10, clamped
     expect(high.route).toBe(true);
-    expect(high.thresholdReason).toBe("Base threshold for invoice, risk adjustment +0.10, value adjustment +0.10");
-    const low = routeToHitl(conf(0.9), { documentType: "invoice", riskLevel: "LOW", estimatedValue: 50 }, { thresholds });
+    expect(high.thresholdReason).toBe(
+      "Base threshold for invoice, risk adjustment +0.10, value adjustment +0.10",
+    );
+    const low = routeToHitl(
+      conf(0.9),
+      { documentType: "invoice", riskLevel: "LOW", estimatedValue: 50 },
+      { thresholds },
+    );
     expect(low.threshold).toBeCloseTo(0.85, 10);
     expect(low.route).toBe(false);
   });
@@ -214,7 +393,7 @@ describe("trustGatePostGuardrail end to end", () => {
     });
 
   const hook = trustGatePostGuardrail<z.infer<typeof Out>>({
-    sourceText: (ctx) => ctx.input ? (ctx.input as { doc: string }).doc : undefined,
+    sourceText: (ctx) => (ctx.input ? (ctx.input as { doc: string }).doc : undefined),
     rules: [{ id: "status", field: "status", allowedValues: ["open", "paid"] }],
     documentType: "invoice",
     riskLevel: "MEDIUM",
@@ -223,7 +402,11 @@ describe("trustGatePostGuardrail end to end", () => {
   });
 
   it("a grounded, rule-passing extraction is allowed and the decision is ledgered", async () => {
-    const { gw, usage } = make(hook, () => ({ vendor: "Acme Corp", total: "$1,250.00", status: "open" }));
+    const { gw, usage } = make(hook, () => ({
+      vendor: "Acme Corp",
+      total: "$1,250.00",
+      status: "open",
+    }));
     const res = await run(gw);
     expect(res.object.vendor).toBe("Acme Corp");
     const rec = usage.entries[0]!.guardrails![0]!;
@@ -233,12 +416,18 @@ describe("trustGatePostGuardrail end to end", () => {
   });
 
   it("a fabricated value is blocked with the full decision in the error and the ledger", async () => {
-    const { gw, usage } = make(hook, () => ({ vendor: "Globex", total: "$1,250.00", status: "open" }));
+    const { gw, usage } = make(hook, () => ({
+      vendor: "Globex",
+      total: "$1,250.00",
+      status: "open",
+    }));
     const err = await run(gw).catch((e) => e);
     expect(err).toBeInstanceOf(GuardrailError);
     expect(err.detail.decision.route).toBe(true);
     expect(err.detail.decision.failures).toEqual(["field not grounded in source: vendor"]);
-    expect(err.detail.grounding.find((x: { field: string }) => x.field === "vendor").grounded).toBe(false);
+    expect(err.detail.grounding.find((x: { field: string }) => x.field === "vendor").grounded).toBe(
+      false,
+    );
     expect(err.output.vendor).toBe("Globex");
     expect(usage.entries[0]!.guardrails![0]).toMatchObject({ hook: "post", action: "block" });
   });
@@ -249,7 +438,11 @@ describe("trustGatePostGuardrail end to end", () => {
       documentType: "invoice",
       onRoute: "allow",
     });
-    const { gw, usage } = make(calibrating, () => ({ vendor: "Globex", total: "999999", status: "void" }));
+    const { gw, usage } = make(calibrating, () => ({
+      vendor: "Globex",
+      total: "999999",
+      status: "void",
+    }));
     const res = await run(gw);
     expect(res.object.vendor).toBe("Globex");
     const rec = usage.entries[0]!.guardrails![0]!;

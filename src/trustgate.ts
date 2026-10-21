@@ -164,11 +164,29 @@ export function checkBusinessRules(
     if ("range" in rule) {
       const n = typeof value === "number" ? value : Number(normalizeNumber(String(value)));
       if (!Number.isFinite(n)) {
-        results.push({ ruleId: rule.id, field: rule.field, value, passed: false, reason: `value cannot be read as a number: ${String(value)}` });
+        results.push({
+          ruleId: rule.id,
+          field: rule.field,
+          value,
+          passed: false,
+          reason: `value cannot be read as a number: ${String(value)}`,
+        });
       } else if (rule.range.min !== undefined && n < rule.range.min) {
-        results.push({ ruleId: rule.id, field: rule.field, value, passed: false, reason: `value ${n} below minimum ${rule.range.min}` });
+        results.push({
+          ruleId: rule.id,
+          field: rule.field,
+          value,
+          passed: false,
+          reason: `value ${n} below minimum ${rule.range.min}`,
+        });
       } else if (rule.range.max !== undefined && n > rule.range.max) {
-        results.push({ ruleId: rule.id, field: rule.field, value, passed: false, reason: `value ${n} above maximum ${rule.range.max}` });
+        results.push({
+          ruleId: rule.id,
+          field: rule.field,
+          value,
+          passed: false,
+          reason: `value ${n} above maximum ${rule.range.max}`,
+        });
       } else {
         results.push({ ruleId: rule.id, field: rule.field, value, passed: true });
       }
@@ -190,7 +208,13 @@ export function checkBusinessRules(
       } catch (err) {
         reason = `validation error: ${err instanceof Error ? err.message : String(err)}`;
       }
-      results.push({ ruleId: rule.id, field: rule.field, value, passed: ok, ...(reason ? { reason } : {}) });
+      results.push({
+        ruleId: rule.id,
+        field: rule.field,
+        value,
+        passed: ok,
+        ...(reason ? { reason } : {}),
+      });
     }
   }
   return results;
@@ -273,7 +297,10 @@ export function computeConfidence(inputs: ConfidenceInputs): ConfidenceScore {
     const groundedCount = inputs.grounding.filter((g) => g.grounded).length;
     grounding = groundedCount / total;
     if (grounding < 1) {
-      penalties.push({ reason: `${total - groundedCount} fields not grounded in source`, penalty: 1 - grounding });
+      penalties.push({
+        reason: `${total - groundedCount} fields not grounded in source`,
+        penalty: 1 - grounding,
+      });
     }
     const avg = inputs.grounding.reduce((s, g) => s + g.confidence, 0) / total;
     grounding = (grounding + avg) / 2;
@@ -294,7 +321,10 @@ export function computeConfidence(inputs: ConfidenceInputs): ConfidenceScore {
       penalties.push({ reason: "Judge detected hallucination", penalty: 0.5 });
     }
     if (inputs.judge.unsupportedClaims && inputs.judge.unsupportedClaims > 0) {
-      penalties.push({ reason: `Judge found ${inputs.judge.unsupportedClaims} unsupported claims`, penalty: 0.3 });
+      penalties.push({
+        reason: `Judge found ${inputs.judge.unsupportedClaims} unsupported claims`,
+        penalty: 0.3,
+      });
     }
   }
 
@@ -355,14 +385,20 @@ export interface HitlThreshold {
  * Higher stakes, higher bar. These are NOT the Python original's defaults;
  * see the header comment. `ORIGINAL_ADJUSTMENTS` has those.
  */
-export const DEFAULT_RISK_ADJUSTMENTS: Record<RiskLevel, number> = { LOW: 0, MEDIUM: 0.05, HIGH: 0.1 };
+export const DEFAULT_RISK_ADJUSTMENTS: Record<RiskLevel, number> = {
+  LOW: 0,
+  MEDIUM: 0.05,
+  HIGH: 0.1,
+};
 export const DEFAULT_VALUE_ADJUSTMENTS: readonly ValueAdjustment[] = [
   { minValue: 0, maxValue: 1_000, adjustment: 0 },
   { minValue: 1_000, maxValue: 10_000, adjustment: 0.05 },
   { minValue: 10_000, maxValue: Number.POSITIVE_INFINITY, adjustment: 0.1 },
 ];
 /** The Python original's defaults, kept for parity tests and for anyone who needs the exact old behaviour. */
-export const ORIGINAL_ADJUSTMENTS: Required<Pick<HitlThreshold, "riskAdjustments" | "valueAdjustments">> = {
+export const ORIGINAL_ADJUSTMENTS: Required<
+  Pick<HitlThreshold, "riskAdjustments" | "valueAdjustments">
+> = {
   riskAdjustments: { LOW: 0, MEDIUM: -0.05, HIGH: -0.15 },
   valueAdjustments: [
     { minValue: 0, maxValue: 1_000, adjustment: 0 },
@@ -422,7 +458,9 @@ export function routeToHitl(
     if (risk !== 0) thresholdReason += `, risk adjustment ${signed(risk)}`;
     if (ctx.estimatedValue !== undefined) {
       const bands = cfg.valueAdjustments ?? DEFAULT_VALUE_ADJUSTMENTS;
-      const band = bands.find((b) => b.minValue <= ctx.estimatedValue! && ctx.estimatedValue! < b.maxValue);
+      const band = bands.find(
+        (b) => b.minValue <= ctx.estimatedValue! && ctx.estimatedValue! < b.maxValue,
+      );
       if (band && band.adjustment !== 0) {
         threshold += band.adjustment;
         thresholdReason += `, value adjustment ${signed(band.adjustment)}`;
@@ -442,7 +480,11 @@ export function routeToHitl(
   if (route) {
     if (confidence.overall < 0.5) priority = "CRITICAL";
     else if (confidence.overall < 0.7) priority = "HIGH";
-    else if (riskLevel === "HIGH" || (ctx.estimatedValue !== undefined && ctx.estimatedValue > 10_000)) priority = "HIGH";
+    else if (
+      riskLevel === "HIGH" ||
+      (ctx.estimatedValue !== undefined && ctx.estimatedValue > 10_000)
+    )
+      priority = "HIGH";
     else priority = "MEDIUM";
   }
 
@@ -474,7 +516,9 @@ export interface TrustGateOptions<O = unknown> {
   /** Fields to ground. Default: every top-level key. */
   fields?: string[];
   grounder?: Grounder;
-  rules?: readonly BusinessRule[] | ((ctx: PostGuardrailContext & { output: O }) => readonly BusinessRule[]);
+  rules?:
+    | readonly BusinessRule[]
+    | ((ctx: PostGuardrailContext & { output: O }) => readonly BusinessRule[]);
   /** The generating model's self-reported confidence. Default 1 (no opinion). */
   llmConfidence?: (ctx: PostGuardrailContext & { output: O }) => number;
   judge?: (ctx: PostGuardrailContext & { output: O }) => JudgeSignal | undefined;
@@ -530,13 +574,18 @@ export function trustGatePostGuardrail<O = Record<string, unknown>>(
       penalties: opts.penalties?.(ctx),
     });
     const failures = [
-      ...grounding.filter((g) => !g.grounded).map((g) => `field not grounded in source: ${g.field}`),
-      ...rules.filter((r) => !r.passed).map((r) => `rule ${r.ruleId} failed: ${r.reason ?? ""}`.trim()),
+      ...grounding
+        .filter((g) => !g.grounded)
+        .map((g) => `field not grounded in source: ${g.field}`),
+      ...rules
+        .filter((r) => !r.passed)
+        .map((r) => `rule ${r.ruleId} failed: ${r.reason ?? ""}`.trim()),
     ];
     const decision = routeToHitl(
       confidence,
       {
-        documentType: typeof opts.documentType === "function" ? opts.documentType(ctx) : opts.documentType,
+        documentType:
+          typeof opts.documentType === "function" ? opts.documentType(ctx) : opts.documentType,
         riskLevel: typeof opts.riskLevel === "function" ? opts.riskLevel(ctx) : opts.riskLevel,
         estimatedValue: opts.estimatedValue?.(ctx),
         failures,
@@ -545,10 +594,18 @@ export function trustGatePostGuardrail<O = Record<string, unknown>>(
     );
     const detail: TrustGateDetail = { decision, grounding, rules };
     if (decision.route && (opts.onRoute ?? "block") === "block") {
-      return { action: "block", reason: decision.routingReason, detail: detail as unknown as Record<string, unknown> };
+      return {
+        action: "block",
+        reason: decision.routingReason,
+        detail: detail as unknown as Record<string, unknown>,
+      };
     }
     // An allow still ledgers the whole decision: the usage row explains why
     // this one did not go to a human.
-    return { action: "allow", reason: decision.routingReason, detail: detail as unknown as Record<string, unknown> } satisfies GuardrailVerdict;
+    return {
+      action: "allow",
+      reason: decision.routingReason,
+      detail: detail as unknown as Record<string, unknown>,
+    } satisfies GuardrailVerdict;
   };
 }

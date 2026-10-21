@@ -4,7 +4,7 @@
 // Code defaults are the fallback; the store — when present — wins.
 
 import { parseModelId } from "./providers.js";
-import type { ProviderId, TaskModelSpec, TaskRoutingConfig } from "./types.js";
+import type { TaskModelSpec, TaskRoutingConfig } from "./types.js";
 
 const DEFAULT_OVERRIDE_TTL_MS = 30_000;
 
@@ -113,9 +113,7 @@ export class TaskRouter {
     const spec = overridden ?? this.cfg.defaults[task];
     const source: ResolvedTaskModel["source"] = overridden ? "override" : "default";
     if (spec === undefined) {
-      throw new Error(
-        `Unknown AI task "${task}". Known tasks: ${this.tasks().join(", ")}`,
-      );
+      throw new Error(`Unknown AI task "${task}". Known tasks: ${this.tasks().join(", ")}`);
     }
     const ids = (Array.isArray(spec) ? spec : [spec]).filter((id) => !!id);
     if (ids.length === 0) {

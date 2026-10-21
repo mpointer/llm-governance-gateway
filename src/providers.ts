@@ -3,12 +3,7 @@ import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createOpenAI } from "@ai-sdk/openai";
 import type { LanguageModel } from "ai";
 import { InvalidModelHintError } from "./errors.js";
-import type {
-  ChainLinkConfig,
-  ModelPricing,
-  ProviderConfig,
-  ProviderId,
-} from "./types.js";
+import type { ChainLinkConfig, ModelPricing, ProviderConfig, ProviderId } from "./types.js";
 
 export interface ResolvedModel {
   provider: ProviderId;
@@ -90,20 +85,45 @@ const BUILTIN_TIERS: Partial<Record<ProviderId, { fast: string; power: string }>
 };
 
 // Cents per 1K tokens. Extend/override via ProviderConfig.pricing.
-const BUILTIN_PRICING: Record<string, ModelPricing> = {
-  "claude-sonnet-4-6": { in: 0.3, out: 1.5 },
-  "claude-opus-4-8": { in: 1.5, out: 7.5 },
-  "claude-haiku-4-5-20251001": { in: 0.08, out: 0.4 },
-  "gemini-2.5-pro": { in: 0.125, out: 0.5 },
-  "gemini-2.5-flash": { in: 0.015, out: 0.06 },
-  "gemini-3.1-flash-lite": { in: 0.025, out: 0.15 }, // paid-tier ceiling, ai.google.dev pricing 2026-07
-  "gpt-4.1": { in: 0.2, out: 0.8 },
-  "gpt-4.1-mini": { in: 0.04, out: 0.16 },
-  "gpt-4.1-nano": { in: 0.01, out: 0.04 },
+//
+// Every row carries `asOf`, the date the rate was last checked against the
+// vendor's price page. The monthly pricing-staleness workflow fails once the
+// NEWEST of these is more than a quarter old, which is the reminder to
+// re-check the whole table. When you verify a rate, bump its date even if the
+// number did not move; the date records the check, not the change.
+//
+// Exported for that script and for the test that pins the invariant; it is
+// not part of the package's public API (not re-exported from index.ts).
+export const BUILTIN_PRICING: Record<string, ModelPricing> = {
+  "claude-sonnet-4-6": { in: 0.3, out: 1.5, asOf: "2026-07-19" },
+  "claude-opus-4-8": { in: 1.5, out: 7.5, asOf: "2026-07-19" },
+  "claude-haiku-4-5-20251001": { in: 0.08, out: 0.4, asOf: "2026-07-19" },
+  "gemini-2.5-pro": { in: 0.125, out: 0.5, asOf: "2026-07-19" },
+  "gemini-2.5-flash": { in: 0.015, out: 0.06, asOf: "2026-07-19" },
+  // Paid-tier ceiling, ai.google.dev pricing.
+  "gemini-3.1-flash-lite": { in: 0.025, out: 0.15, asOf: "2026-07-24" },
+  "gpt-4.1": { in: 0.2, out: 0.8, asOf: "2026-07-19" },
+  "gpt-4.1-mini": { in: 0.04, out: 0.16, asOf: "2026-07-19" },
+  "gpt-4.1-nano": { in: 0.01, out: 0.04, asOf: "2026-07-19" },
   // Embeddings (no output tokens).
-  "text-embedding-3-small": { in: 0.002, out: 0 },
-  "text-embedding-3-large": { in: 0.013, out: 0 },
+  "text-embedding-3-small": { in: 0.002, out: 0, asOf: "2026-07-24" },
+  "text-embedding-3-large": { in: 0.013, out: 0, asOf: "2026-07-24" },
 };
+
+/** Days after which the built-in table counts as stale. One quarter. */
+export const PRICING_STALE_AFTER_DAYS = 90;
+
+/**
+ * The most recent `asOf` across the built-in table, or undefined when no row
+ * carries one. `scripts/pricing-staleness.mjs` and the pricing test use it.
+ */
+export function newestBuiltinPricingDate(): string | undefined {
+  let newest: string | undefined;
+  for (const rate of Object.values(BUILTIN_PRICING)) {
+    if (rate.asOf && (!newest || rate.asOf > newest)) newest = rate.asOf;
+  }
+  return newest;
+}
 
 /**
  * Pricing is keyed on the BARE model id, because that is what a chain link
@@ -282,9 +302,7 @@ export class ProviderRegistry {
     const baseURL = cfg?.baseURL ?? LOCAL_PRESETS[name];
     if (!baseURL) return null;
     const apiKey =
-      cfg?.apiKey ??
-      (cfg?.apiKeyEnv ? process.env[cfg.apiKeyEnv] : undefined) ??
-      "local-no-key"; // local servers typically ignore auth; SDK requires a string
+      cfg?.apiKey ?? (cfg?.apiKeyEnv ? process.env[cfg.apiKeyEnv] : undefined) ?? "local-no-key"; // local servers typically ignore auth; SDK requires a string
     return createOpenAI({ apiKey, baseURL }).chat(model);
   }
 
@@ -318,9 +336,7 @@ export class ProviderRegistry {
   knownModels(provider: ProviderId): string[] {
     const prefix = PROVIDER_MODEL_PREFIXES[provider];
     const fromTiers = Object.values(BUILTIN_TIERS[provider] ?? {});
-    const fromPricing = prefix
-      ? Object.keys(this.pricing).filter((m) => m.startsWith(prefix))
-      : [];
+    const fromPricing = prefix ? Object.keys(this.pricing).filter((m) => m.startsWith(prefix)) : [];
     return Array.from(new Set([...fromTiers, ...fromPricing]));
   }
 
@@ -413,10 +429,7 @@ export class ProviderRegistry {
    * otherwise `undefined` so the caller falls through to its own default
    * instead of forwarding a tier label to the provider.
    */
-  resolveModelHint(
-    hint: string | undefined,
-    provider?: ProviderId,
-  ): ResolvedModelHint | undefined {
+  resolveModelHint(hint: string | undefined, provider?: ProviderId): ResolvedModelHint | undefined {
     const raw = hint?.trim();
     // No hint at all is not an invalid hint: nothing to reject, nothing to
     // throw, the caller just uses its own default.
@@ -474,11 +487,7 @@ export class ProviderRegistry {
     return BUILTIN_TIERS[provider]?.[tier];
   }
 
-  buildLanguageModel(
-    provider: ProviderId,
-    model: string,
-    apiKey?: string,
-  ): LanguageModel | null {
+  buildLanguageModel(provider: ProviderId, model: string, apiKey?: string): LanguageModel | null {
     const key = apiKey ?? this.apiKey(provider);
     if (!key) return null;
     switch (provider) {
@@ -571,23 +580,47 @@ export class ProviderRegistry {
       if (!name) continue; // one of provider/endpoint/factory is required
       if (link.languageModel) {
         // BYO model: tier re-routing doesn't apply (we can't rebuild it).
-        out.push({ provider: name, model: link.model, languageModel: link.languageModel, temperature: link.temperature });
+        out.push({
+          provider: name,
+          model: link.model,
+          languageModel: link.languageModel,
+          temperature: link.temperature,
+        });
         continue;
       }
       if (link.factory) {
         const lm = this.buildFactoryModel(link.factory, link.model);
-        if (lm) out.push({ provider: link.factory, model: link.model, languageModel: lm, temperature: link.temperature });
+        if (lm)
+          out.push({
+            provider: link.factory,
+            model: link.model,
+            languageModel: lm,
+            temperature: link.temperature,
+          });
         continue;
       }
       if (link.endpoint) {
         const lm = this.buildEndpointModel(link.endpoint, link.model);
-        if (lm) out.push({ provider: link.endpoint, model: link.model, languageModel: lm, temperature: link.temperature });
+        if (lm)
+          out.push({
+            provider: link.endpoint,
+            model: link.model,
+            languageModel: lm,
+            temperature: link.temperature,
+          });
         continue;
       }
       const model = (tier ? this.tierModel(link.provider!, tier) : undefined) ?? link.model;
       const lm = this.buildLanguageModel(link.provider!, model, link.apiKey);
-      if (lm) out.push({ provider: link.provider!, model, languageModel: lm, temperature: link.temperature });
-      else if (keepKeyless?.includes(link.provider!)) out.push({ provider: link.provider!, model, temperature: link.temperature });
+      if (lm)
+        out.push({
+          provider: link.provider!,
+          model,
+          languageModel: lm,
+          temperature: link.temperature,
+        });
+      else if (keepKeyless?.includes(link.provider!))
+        out.push({ provider: link.provider!, model, temperature: link.temperature });
     }
     return out;
   }
@@ -607,6 +640,14 @@ export class ProviderRegistry {
   /** True when `model` has real pricing. Accepts bare or prefixed ids. */
   hasPricing(model: string): boolean {
     return pricingKey(model) in this.pricing;
+  }
+
+  /**
+   * The `asOf` date of `model`'s rate, or undefined when the rate is missing
+   * or was registered without one. Accepts bare or prefixed ids.
+   */
+  pricingAsOf(model: string): string | undefined {
+    return this.pricing[pricingKey(model)]?.asOf;
   }
 
   /**
@@ -674,8 +715,7 @@ export class ProviderRegistry {
         (extras?.cacheCreateTokens ?? 0) * cacheWriteRate +
         (extras?.cacheReadTokens ?? 0) * cacheReadRate) /
       1000;
-    const searchCents =
-      (extras?.webSearches ?? 0) * (this.cfg.webSearchCentsPerCall ?? 1);
+    const searchCents = (extras?.webSearches ?? 0) * (this.cfg.webSearchCentsPerCall ?? 1);
     return tokenCents + searchCents;
   }
 }

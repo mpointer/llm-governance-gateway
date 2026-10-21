@@ -120,9 +120,9 @@ describe("org scoping: ledger and spend caps", () => {
     gw.registerMockResponder("q", () => ({ answer: "a" }));
 
     // orgA is blocked...
-    await expect(
-      gw.runStructured({ ...base, orgId: "orgA", cacheParts: ["1"] }),
-    ).rejects.toThrow(SpendCapError);
+    await expect(gw.runStructured({ ...base, orgId: "orgA", cacheParts: ["1"] })).rejects.toThrow(
+      SpendCapError,
+    );
     // ...and orgB is entirely unaffected. This is the isolation failure that
     // org scoping exists to prevent.
     const b = await gw.runStructured({ ...base, orgId: "orgB", cacheParts: ["2"] });
@@ -202,8 +202,18 @@ describe("org scoping: chains, prompts and task overrides", () => {
       modelConfig: store,
       caps: { userDailyCents: 0, anonDailyCents: 0, globalDailyCents: 0 },
     });
-    const a = await gw.runStructured({ ...base, cache: false, cacheParts: undefined, orgId: "orgA" });
-    const b = await gw.runStructured({ ...base, cache: false, cacheParts: undefined, orgId: "orgB" });
+    const a = await gw.runStructured({
+      ...base,
+      cache: false,
+      cacheParts: undefined,
+      orgId: "orgA",
+    });
+    const b = await gw.runStructured({
+      ...base,
+      cache: false,
+      cacheParts: undefined,
+      orgId: "orgB",
+    });
     expect(a.object).toEqual({ answer: "from-A" });
     expect(b.object).toEqual({ answer: "from-B" });
     expect(usage.entries[0]!.model).toBe("a-model");

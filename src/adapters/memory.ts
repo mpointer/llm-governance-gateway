@@ -30,18 +30,16 @@ export class MemoryUsageStore implements UsageStore {
     return id;
   }
 
-  async sumSpendCents(
-    since: Date,
-    userId?: string | null,
-    orgId?: string | null,
-  ): Promise<number> {
-    return this.entries
-      .filter((e) => !e.cacheHit && e.createdAt >= since)
-      .filter((e) => (userId === undefined ? true : (e.userId ?? null) === userId))
-      // undefined orgId = unscoped, summing every tenant, which is what a
-      // single-tenant deployment wants and what this did before.
-      .filter((e) => (orgId === undefined ? true : (e.orgId ?? null) === (orgId ?? null)))
-      .reduce((sum, e) => sum + e.estimatedCostCents, 0);
+  async sumSpendCents(since: Date, userId?: string | null, orgId?: string | null): Promise<number> {
+    return (
+      this.entries
+        .filter((e) => !e.cacheHit && e.createdAt >= since)
+        .filter((e) => (userId === undefined ? true : (e.userId ?? null) === userId))
+        // undefined orgId = unscoped, summing every tenant, which is what a
+        // single-tenant deployment wants and what this did before.
+        .filter((e) => (orgId === undefined ? true : (e.orgId ?? null) === (orgId ?? null)))
+        .reduce((sum, e) => sum + e.estimatedCostCents, 0)
+    );
   }
 
   async recordSpendCapEvent(event: SpendCapEvent): Promise<void> {

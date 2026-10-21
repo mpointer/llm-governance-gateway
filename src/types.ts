@@ -101,11 +101,7 @@ export interface UsageStore {
    * keeps working as a single-tenant store. When set, the "global" circuit
    * breaker becomes per-org — one tenant's spend must never trip another's.
    */
-  sumSpendCents(
-    since: Date,
-    userId?: string | null,
-    orgId?: string | null,
-  ): Promise<number>;
+  sumSpendCents(since: Date, userId?: string | null, orgId?: string | null): Promise<number>;
   recordSpendCapEvent(event: SpendCapEvent): Promise<void>;
   saveJudgeScore(score: JudgeScore): Promise<void>;
   /** Per-user daily cap override in cents, or undefined to use config default. */
@@ -249,6 +245,14 @@ export interface ModelPricing {
   cacheWrite?: number;
   /** Cents per 1K cache-read tokens. Default: 0.1 × in (Anthropic ratio). */
   cacheRead?: number;
+  /**
+   * ISO date (YYYY-MM-DD) the rate was last checked against the vendor's
+   * price page. Optional on rates you register; every built-in rate carries
+   * one, and `scripts/pricing-staleness.mjs` fails the monthly workflow when
+   * the newest built-in date is more than a quarter old. A spend cap
+   * enforced against stale rates caps the wrong number.
+   */
+  asOf?: string;
 }
 
 export interface ProviderConfig {

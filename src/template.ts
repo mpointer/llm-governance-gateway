@@ -10,10 +10,7 @@ const PLACEHOLDER = /\{\{(\w+)\}\}/g;
  * placeholders are left verbatim (and surfaced by missingPlaceholders at the
  * prompt-load guard) rather than silently blanked.
  */
-export function renderTemplate(
-  template: string,
-  vars: Record<string, string>,
-): string {
+export function renderTemplate(template: string, vars: Record<string, string>): string {
   return template.replace(PLACEHOLDER, (match, name: string) =>
     name in vars ? vars[name]! : match,
   );
@@ -25,9 +22,6 @@ export function renderTemplate(
  * the caller must fall back to the code default rather than send a prompt
  * that's missing its inputs.
  */
-export function missingPlaceholders(
-  template: string,
-  requiredVars: string[],
-): string[] {
+export function missingPlaceholders(template: string, requiredVars: string[]): string[] {
   return requiredVars.filter((name) => !template.includes(`{{${name}}}`));
 }

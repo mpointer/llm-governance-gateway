@@ -57,7 +57,11 @@ describe("judge tier resolution", () => {
       modelConfig: {
         getOverride: async () => null,
         getChain: async () => [
-          { provider: "anthropic" as const, model: "main", languageModel: lm({ answer: "a" }, "main", calls) },
+          {
+            provider: "anthropic" as const,
+            model: "main",
+            languageModel: lm({ answer: "a" }, "main", calls),
+          },
         ],
         // The point of the finding: the judge lives on a DIFFERENT provider
         // than the generation chain, pinned by the admin store.
@@ -86,7 +90,11 @@ describe("judge tier resolution", () => {
       modelConfig: {
         getOverride: async () => null,
         getChain: async () => [
-          { provider: "anthropic" as const, model: "main", languageModel: lm({ answer: "a" }, "main", calls) },
+          {
+            provider: "anthropic" as const,
+            model: "main",
+            languageModel: lm({ answer: "a" }, "main", calls),
+          },
         ],
         getJudgeModel: async () => "admin:j",
       },
@@ -117,7 +125,11 @@ describe("judge tier resolution", () => {
         // No getJudgeModel at all — the pre-3.4 store shape.
         getOverride: async () => null,
         getChain: async () => [
-          { provider: "anthropic" as const, model: "main", languageModel: lm({ answer: "a" }, "main", calls) },
+          {
+            provider: "anthropic" as const,
+            model: "main",
+            languageModel: lm({ answer: "a" }, "main", calls),
+          },
         ],
       },
       providers: { factories: { cfg: { model: () => lm({ accuracy: 3 }, "cfg-judge", calls) } } },
@@ -138,7 +150,11 @@ describe("judge tier resolution", () => {
       modelConfig: {
         getOverride: async () => null,
         getChain: async () => [
-          { provider: "anthropic" as const, model: "main", languageModel: lm({ answer: "a" }, "main", calls) },
+          {
+            provider: "anthropic" as const,
+            model: "main",
+            languageModel: lm({ answer: "a" }, "main", calls),
+          },
         ],
         getJudgeModel: async () => {
           throw new Error("db down");
@@ -191,7 +207,11 @@ describe("judge tier preserves existing governance", () => {
       modelConfig: {
         getOverride: async () => null,
         getChain: async () => [
-          { provider: "anthropic" as const, model: "main", languageModel: lm({ answer: "a" }, "main", calls) },
+          {
+            provider: "anthropic" as const,
+            model: "main",
+            languageModel: lm({ answer: "a" }, "main", calls),
+          },
         ],
         getJudgeModel: async () => "leaky:j",
       },
@@ -220,7 +240,11 @@ describe("judge tier preserves existing governance", () => {
       modelConfig: {
         getOverride: async () => null,
         getChain: async () => [
-          { provider: "anthropic" as const, model: "main", languageModel: lm({ answer: "a" }, "main", calls) },
+          {
+            provider: "anthropic" as const,
+            model: "main",
+            languageModel: lm({ answer: "a" }, "main", calls),
+          },
         ],
         getJudgeModel: async () => "j:j",
       },

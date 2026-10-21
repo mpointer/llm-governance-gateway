@@ -5,9 +5,7 @@ import { sanitizeIdentity, sanitized } from "./sanitize.js";
 
 describe("template", () => {
   it("substitutes known placeholders and leaves unknown verbatim", () => {
-    expect(renderTemplate("Hi {{name}}, {{unknown}}", { name: "Jo" })).toBe(
-      "Hi Jo, {{unknown}}",
-    );
+    expect(renderTemplate("Hi {{name}}, {{unknown}}", { name: "Jo" })).toBe("Hi Jo, {{unknown}}");
   });
   it("reports missing required placeholders", () => {
     expect(missingPlaceholders("Hi {{name}}", ["name", "role"])).toEqual(["role"]);

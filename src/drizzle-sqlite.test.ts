@@ -8,11 +8,7 @@ import { drizzle } from "drizzle-orm/sql-js";
 import { z } from "zod";
 import { Gateway } from "./gateway.js";
 import { SpendCapError } from "./errors.js";
-import {
-  DrizzleSqliteUsageStore,
-  ensureTables,
-  aiUsageLog,
-} from "./adapters/drizzle-sqlite.js";
+import { DrizzleSqliteUsageStore, ensureTables, aiUsageLog } from "./adapters/drizzle-sqlite.js";
 
 const OutSchema = z.object({ answer: z.string() });
 

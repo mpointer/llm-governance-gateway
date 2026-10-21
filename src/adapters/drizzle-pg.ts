@@ -19,12 +19,7 @@ import {
 } from "drizzle-orm/pg-core";
 import type { PgDatabase } from "drizzle-orm/pg-core";
 import type { GuardrailRecord } from "../guardrails.js";
-import type {
-  JudgeScore,
-  SpendCapEvent,
-  UsageEntry,
-  UsageStore,
-} from "../types.js";
+import type { JudgeScore, SpendCapEvent, UsageEntry, UsageStore } from "../types.js";
 
 export const aiUsageLog = pgTable("ai_usage_log", {
   id: serial("id").primaryKey(),
@@ -115,26 +110,15 @@ export class DrizzlePgUsageStore implements UsageStore {
     return rows[0]!.id;
   }
 
-  async sumSpendCents(
-    since: Date,
-    userId?: string | null,
-    orgId?: string | null,
-  ): Promise<number> {
-    const conditions = [
-      eq(aiUsageLog.cacheHit, false),
-      gte(aiUsageLog.createdAt, since),
-    ];
+  async sumSpendCents(since: Date, userId?: string | null, orgId?: string | null): Promise<number> {
+    const conditions = [eq(aiUsageLog.cacheHit, false), gte(aiUsageLog.createdAt, since)];
     if (userId !== undefined) {
-      conditions.push(
-        userId === null ? isNull(aiUsageLog.userId) : eq(aiUsageLog.userId, userId),
-      );
+      conditions.push(userId === null ? isNull(aiUsageLog.userId) : eq(aiUsageLog.userId, userId));
     }
     // undefined = unscoped: no org predicate at all, so the query is byte for
     // byte what it was before org scoping existed.
     if (orgId !== undefined) {
-      conditions.push(
-        orgId === null ? isNull(aiUsageLog.orgId) : eq(aiUsageLog.orgId, orgId),
-      );
+      conditions.push(orgId === null ? isNull(aiUsageLog.orgId) : eq(aiUsageLog.orgId, orgId));
     }
     const rows = await this.db
       .select({

@@ -49,7 +49,9 @@ export function anthropicBatchClient(sdk: {
     batches: {
       create(p: { requests: { custom_id: string; params: unknown }[] }): Promise<{ id: string }>;
       retrieve(id: string): Promise<{ processing_status: string }>;
-      results(id: string): Promise<AsyncIterable<{ custom_id: string; result: BatchResultOutcome }>>;
+      results(
+        id: string,
+      ): Promise<AsyncIterable<{ custom_id: string; result: BatchResultOutcome }>>;
     };
   };
 }): BatchClient {
@@ -71,12 +73,7 @@ export function anthropicBatchClient(sdk: {
   };
 }
 
-export type BatchJobStatus =
-  | "submitted"
-  | "ended"
-  | "reconciling"
-  | "reconciled"
-  | "failed";
+export type BatchJobStatus = "submitted" | "ended" | "reconciling" | "reconciled" | "failed";
 
 export interface BatchJob {
   batchId: string;
@@ -179,7 +176,12 @@ export interface SubmitBatchResult {
 
 export type BatchItemResult<O> =
   | { id: string; ok: true; object: O }
-  | { id: string; ok: false; reason: "schema" | "errored" | "canceled" | "expired"; error?: string };
+  | {
+      id: string;
+      ok: false;
+      reason: "schema" | "errored" | "canceled" | "expired";
+      error?: string;
+    };
 
 export interface ReconcileResult<O> {
   results: BatchItemResult<O>[];
