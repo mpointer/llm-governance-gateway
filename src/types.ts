@@ -245,6 +245,14 @@ export interface ModelPricing {
   cacheWrite?: number;
   /** Cents per 1K cache-read tokens. Default: 0.1 × in (Anthropic ratio). */
   cacheRead?: number;
+  /**
+   * ISO date (YYYY-MM-DD) the rate was last checked against the vendor's
+   * price page. Optional on rates you register; every built-in rate carries
+   * one, and `scripts/pricing-staleness.mjs` fails the monthly workflow when
+   * the newest built-in date is more than a quarter old. A spend cap
+   * enforced against stale rates caps the wrong number.
+   */
+  asOf?: string;
 }
 
 export interface ProviderConfig {

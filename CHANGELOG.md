@@ -8,6 +8,39 @@ adopters implement, and in practice they have only ever gained capability throug
 *optional* parameters — but they are not yet under a formal semver freeze. 1.0.0
 is gated on a downstream integration proving the SPI holds, not on a date.
 
+## Unreleased
+
+Repository hygiene. Nothing here changes runtime behavior.
+
+### Added
+
+- **`ModelPricing.asOf`** — optional ISO date a rate was last checked.
+  Every built-in rate now carries one, `ProviderRegistry.pricingAsOf()`
+  reads it back, and a monthly `Pricing staleness` workflow fails when the
+  newest built-in date is more than a quarter old. It is a scheduled job
+  rather than a test so that the calendar never turns an unrelated PR red.
+  `npm run pricing:check` runs it locally.
+- **Biome** for lint and format (`npm run check`, `lint`, `format`), run
+  first in CI and in `prepublishOnly`. One mechanical format commit; the
+  five lint errors it surfaced were fixed with types, not suppressions.
+- **Coverage summary in CI** via `@vitest/coverage-v8` (`npm run
+  test:coverage`). No threshold yet; the baseline is 83.6% statements.
+- **Examples typecheck in CI** (`npm run typecheck:examples`), with
+  `examples/_types/app-stubs.d.ts` standing in for the app-side modules.
+
+### Changed
+
+- README: a table of contents, a short comparison against LiteLLM, Portkey,
+  Helicone and the AI SDK, and the Status section now points at the
+  control-plane package spec instead of the admin-UI sketch it supersedes.
+  ROADMAP's open admin line says the same.
+- `SECURITY.md` is a real policy instead of GitHub's unfilled template.
+
+### Removed
+
+- A stray `llm-governance-gateway-0.6.0.tgz` committed with 0.7.0. `*.tgz`
+  is now ignored.
+
 ## 0.16.0
 
 Pluggable guardrail hooks, the roadmap item that was waiting on adopter
