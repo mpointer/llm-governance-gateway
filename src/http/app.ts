@@ -13,6 +13,7 @@
 // Errors: 401 unauthorized, 400 validation, 429 rate limit, 402 spend cap.
 
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { jsonSchema } from "ai";
 import { z } from "zod";
 import type { Gateway } from "../gateway.js";
@@ -163,8 +164,7 @@ export function createGatewayApp(opts: GatewayAppOptions): Hono<{ Variables: Var
   return app;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function errorResponse(c: any, err: unknown) {
+function errorResponse(c: Context, err: unknown) {
   if (err instanceof RateLimitError) {
     return c.json(
       { error: "Rate limit exceeded", limit: err.limit, remaining: err.remaining },

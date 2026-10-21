@@ -292,8 +292,12 @@ describe("streamStructured stall clocks", () => {
     });
     let settled = false;
     void res.object.then(
-      () => (settled = true),
-      () => (settled = true),
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
     );
     await vi.advanceTimersByTimeAsync(600_000);
     expect(settled).toBe(false);

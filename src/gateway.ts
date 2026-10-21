@@ -62,6 +62,7 @@ import type {
   SpendCapEvent,
   JudgeScore,
   UsageEntry,
+  StoredPrompt,
 } from "./types.js";
 import {
   MemoryCacheStore,
@@ -717,7 +718,7 @@ export class Gateway {
         opts.deadlineMs ?? this.timeouts?.deadlineMs,
         opts.signal,
       ).attempt(opts.attemptMs ?? this.timeouts?.attemptMs ?? DEFAULT_ATTEMPT_MS);
-      let res;
+      let res: Awaited<ReturnType<typeof embedMany>>;
       try {
         res = await embedMany({
         model: em,
@@ -984,7 +985,6 @@ export class Gateway {
       const start = Date.now();
       let lastErr: unknown;
       let done = false;
-      let attemptTimedOut = false;
       text = "";
       inputTokens = 0;
       outputTokens = 0;
@@ -1048,9 +1048,6 @@ export class Gateway {
           // so a 400 burned a call on the next provider too.
           const advance = isRetryable(err) || err instanceof AttemptTimeoutError;
           if (!advance) throw err;
-          if (err instanceof AttemptTimeoutError) {
-            attemptTimedOut = true;
-          }
           console.warn(
             `[llm-gateway] runText "${link.provider}/${link.model}" failed (${
               err instanceof AttemptTimeoutError ? "attempt-timeout" : "retryable"
@@ -1925,7 +1922,7 @@ export class Gateway {
   private async loadPrompt(slug: string, orgId?: string | null): Promise<PromptConfig> {
     const def = this.promptDefaults.find((d) => d.slug === slug);
 
-    let row;
+    let row: StoredPrompt | undefined;
     try {
       row = await this.prompts.getPrompt(slug, orgId);
     } catch (err) {
@@ -2709,7 +2706,7 @@ export class Gateway {
       // response. Consequence, accepted: total wall-clock can exceed the
       // caller's deadlineMs by up to this budget.
       const judgeBudget = new AttemptBudget(JUDGE_DEADLINE_MS);
-      let result;
+      let result: AttemptResult<z.infer<typeof scoreSchema>>;
       try {
         result = await attemptGenerate(
           lm,
@@ -2804,7 +2801,7 @@ export class Gateway {
       durationMs = 0;
     } else {
       // Routing: explicit model id > task > static/env default.
-      let resolvedProvider;
+      let resolvedProvider: string;
       let resolvedModel: string;
       let lm: LanguageModel | undefined;
       if (opts.model) {
@@ -2834,7 +2831,7 @@ export class Gateway {
       const attempt = new AttemptBudget().attempt(
         this.timeouts?.attemptMs ?? DEFAULT_ATTEMPT_MS,
       );
-      let res;
+      let res: Awaited<ReturnType<typeof generateText>>;
       try {
         res = await generateText({
           model: lm,

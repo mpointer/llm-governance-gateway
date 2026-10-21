@@ -4,7 +4,7 @@
 // Code defaults are the fallback; the store — when present — wins.
 
 import { parseModelId } from "./providers.js";
-import type { ProviderId, TaskModelSpec, TaskRoutingConfig } from "./types.js";
+import type { TaskModelSpec, TaskRoutingConfig } from "./types.js";
 
 const DEFAULT_OVERRIDE_TTL_MS = 30_000;
 
