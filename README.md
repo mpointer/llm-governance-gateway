@@ -9,7 +9,7 @@ rate limit → spend caps (per-user + global circuit breaker) → cache
 → schema-validated provider failover → usage log → LLM-judge
 ```
 
-No sidecar proxy to deploy. No hosted control plane. No sprawling dependency tree and five runtime deps (the [Vercel AI SDK](https://sdk.vercel.ai), three provider adapters, Zod), everything else optional peers. It runs *in your process*, enforces caps against *your* database, and the whole pipeline from caps, cache, failover, to judge, runs deterministically in CI with zero API keys.
+No sidecar proxy to deploy. No hosted control plane. Five runtime dependencies (the [Vercel AI SDK](https://sdk.vercel.ai), three provider adapters, Zod); everything else is an optional peer. It runs *in your process*, enforces caps against *your* database, and the whole pipeline from caps, cache, failover, to judge, runs deterministically in CI with zero API keys.
 
 Providers: Anthropic, Google, OpenAI, OpenRouter, Venice, Together.ai, Hugging Face, plus self-hosted endpoints (Ollama, vLLM, LM Studio, or any OpenAI-compatible server) and enterprise clouds (Bedrock, Azure, Vertex AI, watsonx.ai) via BYO-SDK [provider factories](./examples/enterprise-recipes.md), all mixable in one failover chain.
 
@@ -25,6 +25,51 @@ Spend controls in this space are usually observed (dashboards that tell you *aft
 - **Task-based routing.** Name your call sites (`"enrich"`, `"dedup_judge"`, `"editorial"`), assign each a default model in code, and let an admin store override models per task at runtime — with TTL caching and graceful degradation to code defaults when the store is down.
 - **Live model discovery.** `listAllProviderModels()` queries each vendor's models API for every provider with an API key configured; keyless or erroring providers fall back to static lists so admin UIs stay usable offline.
 - **Prompt test runs.** `runPromptTest()` executes an edited (even unsaved) prompt body with sample variables against any model, bypassing the cache but *not* usage logging.  The test spend shows up in the cost dashboard under `admin:prompt-test`.
+
+## Contents
+
+- [Why](#why)
+- [How it compares](#how-it-compares)
+- [Quickstart](#quickstart)
+  - [API key setup](#api-key-setup)
+  - [Testing without API keys](#testing-without-api-keys)
+  - [Production storage](#production-storage)
+  - [Trialling caps before enforcing them](#trialling-caps-before-enforcing-them)
+  - [Multi-tenancy (optional)](#multi-tenancy-optional)
+  - [Failover chains and tiers](#failover-chains-and-tiers)
+  - [Timeouts and deadlines](#timeouts-and-deadlines)
+  - [Task-based routing](#task-based-routing)
+  - [Model discovery](#model-discovery)
+  - [Prompt test runs](#prompt-test-runs)
+  - [Local / self-hosted endpoints](#local--self-hosted-endpoints)
+  - [Enterprise clouds (Bedrock, Azure, Vertex, watsonx)](#enterprise-clouds-bedrock-azure-vertex-watsonx)
+  - [ZDR-aware routing (zero data retention)](#zdr-aware-routing-zero-data-retention)
+  - [Native Anthropic features (opt-in)](#native-anthropic-features-opt-in)
+  - [Governed embeddings](#governed-embeddings)
+  - [Per-link temperature](#per-link-temperature)
+  - [Judge in the request path](#judge-in-the-request-path)
+  - [Batch processing (50% token cost)](#batch-processing-50-token-cost)
+  - [Streaming](#streaming)
+  - [Editable prompts and the cache](#editable-prompts-and-the-cache)
+  - [Model-id conventions, and the one place they differ](#model-id-conventions-and-the-one-place-they-differ)
+  - [Attribution beyond userId](#attribution-beyond-userid)
+  - [Observability export (OTel, Langfuse, metrics)](#observability-export-otel-langfuse-metrics)
+  - [HTTP service (multi-app deployments)](#http-service-multi-app-deployments)
+- [Guardrail hooks (pre/post)](#guardrail-hooks-prepost)
+  - [TrustGate: confidence and human-in-the-loop routing as a post hook](#trustgate-confidence-and-human-in-the-loop-routing-as-a-post-hook)
+- [Design notes](#design-notes)
+- [Status](#status)
+- [License](#license)
+
+## How it compares
+
+| Tool | What it is | Where this library differs |
+| --- | --- | --- |
+| [LiteLLM](https://github.com/BerriAI/litellm) | Python proxy and SDK, 100+ providers, budgets and keys managed in the proxy's own database | TypeScript, in-process, governance-first. Seven providers built in plus bring-your-own SDK factories, not a universal adapter. Caps and the ledger live in *your* database. |
+| [Portkey](https://portkey.ai), [Helicone](https://helicone.ai) | Gateways you route traffic through (hosted, or self-hosted on their terms); governance and observability live in their control plane | No extra network hop and no control plane to operate. Judge, guardrails and caps run before the provider call, in the same process as your app. Export to Langfuse or OTel if you want dashboards. |
+| [Vercel AI SDK](https://sdk.vercel.ai) | The provider abstraction and structured-output layer this library is built on | Adds what the SDK leaves to you: enforced spend caps, a usage ledger, schema-validation-aware failover ([vercel/ai#9950](https://github.com/vercel/ai/issues/9950)), a sampled judge, and a deterministic mock provider for CI. |
+
+If you need a hundred providers or a hosted dashboard, use one of the first two. If you need governance you can read, test offline, and keep in your own process and database, this is the one.
 
 ## Quickstart
 
@@ -739,7 +784,7 @@ sends fewer high-stakes items to a human; this package raises it instead.
 
 Extracted from a production system (three independent in-house implementations converged on this design). Pre-1.0, so the API may still shift — though in practice the store interfaces (`UsageStore`, `PromptStore`, `ModelConfigStore`, `TaskOverrideStore`, `RateLimiter`, `CacheStore`) have only ever gained capability through *optional* parameters, and existing implementations keep compiling. 1.0.0 is gated on a downstream integration proving that holds, not on a date. See [CHANGELOG.md](./CHANGELOG.md).
 
-Next up ([ROADMAP](./ROADMAP.md)): an admin UI reference, gated on real adopter demand rather than speculation.
+Next up ([ROADMAP](./ROADMAP.md)): a sibling control-plane package (store adapters and headless admin operations first, UI last if ever), specified in [docs/design/admin-control-plane-package.md](./docs/design/admin-control-plane-package.md). It supersedes the earlier admin-UI sketch.
 
 ## License
 
