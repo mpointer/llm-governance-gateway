@@ -2,11 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { Gateway } from "./gateway.js";
 import { RateLimitError, SpendCapError } from "./errors.js";
-import {
-  MemoryCacheStore,
-  MemoryRateLimiter,
-  MemoryUsageStore,
-} from "./adapters/memory.js";
+import { MemoryCacheStore, MemoryRateLimiter, MemoryUsageStore } from "./adapters/memory.js";
 import type { PromptDefault } from "./types.js";
 
 const OutSchema = z.object({ answer: z.string() });
@@ -19,11 +15,13 @@ const PROMPTS: PromptDefault[] = [
   },
 ];
 
-function makeGateway(over: {
-  usage?: MemoryUsageStore;
-  rateLimiter?: MemoryRateLimiter;
-  caps?: { userDailyCents?: number; anonDailyCents?: number; globalDailyCents?: number };
-} = {}) {
+function makeGateway(
+  over: {
+    usage?: MemoryUsageStore;
+    rateLimiter?: MemoryRateLimiter;
+    caps?: { userDailyCents?: number; anonDailyCents?: number; globalDailyCents?: number };
+  } = {},
+) {
   const usage = over.usage ?? new MemoryUsageStore();
   const gw = new Gateway({
     usage,
@@ -83,9 +81,9 @@ describe("Gateway.runStructured (mock mode)", () => {
   });
 
   it("requires cacheParts unless cache:false", async () => {
-    await expect(
-      gw.runStructured(runOpts({ cacheParts: undefined })),
-    ).rejects.toThrow(/cacheParts is required/);
+    await expect(gw.runStructured(runOpts({ cacheParts: undefined }))).rejects.toThrow(
+      /cacheParts is required/,
+    );
   });
 
   it("throws RateLimitError when the limiter denies", async () => {
@@ -170,9 +168,9 @@ describe("Gateway.runStructured (mock mode)", () => {
   });
 
   it("throws for an unknown prompt slug", async () => {
-    await expect(
-      gw.runStructured(runOpts({ slug: "nope", cacheParts: ["x"] })),
-    ).rejects.toThrow(/not found/);
+    await expect(gw.runStructured(runOpts({ slug: "nope", cacheParts: ["x"] }))).rejects.toThrow(
+      /not found/,
+    );
   });
 
   it("throws when mock mode has no responder for the slug", async () => {

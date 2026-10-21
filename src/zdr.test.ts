@@ -123,9 +123,7 @@ describe("ZDR routing enforcement", () => {
       },
       caps: { userDailyCents: 0, anonDailyCents: 0, globalDailyCents: 0 },
     });
-    await expect(gw2.runStructured({ ...opts, task: "intake" })).rejects.toThrow(
-      ZdrViolationError,
-    );
+    await expect(gw2.runStructured({ ...opts, task: "intake" })).rejects.toThrow(ZdrViolationError);
     void gw;
   });
 
@@ -143,9 +141,9 @@ describe("ZDR routing enforcement", () => {
       },
       caps: { userDailyCents: 0, anonDailyCents: 0, globalDailyCents: 0 },
     });
-    await expect(
-      gw.streamStructured({ ...opts, requireZdr: true }),
-    ).rejects.toThrow(ZdrViolationError);
+    await expect(gw.streamStructured({ ...opts, requireZdr: true })).rejects.toThrow(
+      ZdrViolationError,
+    );
   });
 
   it("batch submit refuses a non-ZDR model when required", async () => {

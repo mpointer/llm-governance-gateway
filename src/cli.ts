@@ -35,7 +35,8 @@ const KEY_HINTS: Record<ProviderId, string> = {
   google: "aistudio.google.com/apikey",
   openai: "platform.openai.com/api-keys (sk-...)",
   openrouter: "openrouter.ai/keys (sk-or-...)",
-  venice: "venice.ai/settings/api — must be an INFERENCE-scoped key (admin keys pass doctor but 401 on generation)",
+  venice:
+    "venice.ai/settings/api — must be an INFERENCE-scoped key (admin keys pass doctor but 401 on generation)",
   together: "api.together.ai/settings/api-keys",
   huggingface: "huggingface.co/settings/tokens (hf_..., inference permission)",
 };
@@ -80,7 +81,9 @@ async function doctor(): Promise<number> {
 
 async function init(): Promise<number> {
   console.log("Provider key setup — writes .env.local (never committed; .gitignore covers it).");
-  console.log("Press Enter to skip a provider. Existing values are kept unless you re-enter them.\n");
+  console.log(
+    "Press Enter to skip a provider. Existing values are kept unless you re-enter them.\n",
+  );
 
   const existing: Record<string, string> = existsSync(".env.local")
     ? parseEnvFile(readFileSync(".env.local", "utf8"))
@@ -107,7 +110,9 @@ async function init(): Promise<number> {
   } catch {
     // Windows: chmod is a no-op; NTFS ACLs apply instead.
   }
-  console.log(`\nWrote .env.local (${lines.length} entr${lines.length === 1 ? "y" : "ies"}, mode 600). Validating...\n`);
+  console.log(
+    `\nWrote .env.local (${lines.length} entr${lines.length === 1 ? "y" : "ies"}, mode 600). Validating...\n`,
+  );
   return doctor();
 }
 

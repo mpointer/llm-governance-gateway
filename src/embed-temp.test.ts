@@ -123,7 +123,10 @@ describe("governed embeddings", () => {
       embeddingModel: fake,
       userId: "u1",
     });
-    expect(res.embeddings).toEqual([[0.6, 0.8], [0.6, 0.8]]);
+    expect(res.embeddings).toEqual([
+      [0.6, 0.8],
+      [0.6, 0.8],
+    ]);
     expect(res.inputTokens).toBe(42);
     // 42 tokens at 0.002¢/1K
     expect(usage.entries[0]!.estimatedCostCents).toBeCloseTo((42 * 0.002) / 1000, 12);
@@ -174,13 +177,7 @@ describe("embed cancellation", () => {
       modelId: "text-embedding-3-small",
       maxEmbeddingsPerCall: 100,
       supportsParallelCalls: true,
-      async doEmbed({
-        values,
-        abortSignal,
-      }: {
-        values: string[];
-        abortSignal?: AbortSignal;
-      }) {
+      async doEmbed({ values, abortSignal }: { values: string[]; abortSignal?: AbortSignal }) {
         observed = abortSignal;
         return { embeddings: values.map(() => [1, 0]), usage: { tokens: 3 } };
       },

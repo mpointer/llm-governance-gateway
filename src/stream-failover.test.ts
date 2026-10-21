@@ -187,8 +187,16 @@ describe("streaming failover", () => {
       modelConfig: {
         getOverride: async () => null,
         getChain: async () => [
-          { provider: "openai" as const, model: "leaky", languageModel: streamingLm("leaky", [`{"answer":"no"}`], "finish", calls) },
-          { provider: "anthropic" as const, model: "safe", languageModel: streamingLm("safe", [`{"answer":"yes"}`], "finish", calls) },
+          {
+            provider: "openai" as const,
+            model: "leaky",
+            languageModel: streamingLm("leaky", [`{"answer":"no"}`], "finish", calls),
+          },
+          {
+            provider: "anthropic" as const,
+            model: "safe",
+            languageModel: streamingLm("safe", [`{"answer":"yes"}`], "finish", calls),
+          },
         ],
       },
       providers: { retention: { anthropic: { zdr: true } } },
@@ -204,9 +212,9 @@ describe("streaming failover", () => {
     const { gw } = gwChain([
       { model: "a", languageModel: streamingLm("a", [`{"answer":"x"}`], "finish", calls) },
     ]);
-    await expect(
-      gw.streamStructured({ ...opts, requireZdr: true }),
-    ).rejects.toThrow(ZdrViolationError);
+    await expect(gw.streamStructured({ ...opts, requireZdr: true })).rejects.toThrow(
+      ZdrViolationError,
+    );
     expect(calls).toEqual([]);
   });
 });
@@ -220,8 +228,14 @@ describe("streaming failover: stalls", () => {
     const calls: string[] = [];
     const { gw, usage } = gwChain(
       [
-        { model: "stalls", languageModel: streamingLm("stalls", [`{"answer":"par`], "hang", calls) },
-        { model: "good", languageModel: streamingLm("good", [`{"answer":"done"}`], "finish", calls) },
+        {
+          model: "stalls",
+          languageModel: streamingLm("stalls", [`{"answer":"par`], "hang", calls),
+        },
+        {
+          model: "good",
+          languageModel: streamingLm("good", [`{"answer":"done"}`], "finish", calls),
+        },
       ],
       { timeouts: { streamFirstChunkMs: 5_000, streamStallMs: 5_000 } },
     );

@@ -10,7 +10,10 @@ import { z } from "zod";
 
 const schema = z.object({ s: z.string() });
 
-function make(hooks: ConstructorParameters<typeof Gateway>[0]["observability"], caps?: { globalDailyCents?: number }) {
+function make(
+  hooks: ConstructorParameters<typeof Gateway>[0]["observability"],
+  caps?: { globalDailyCents?: number },
+) {
   const usage = new MemoryUsageStore();
   const gw = new Gateway({
     usage,
@@ -55,9 +58,7 @@ describe("observability hooks", () => {
     const r2 = await gw.runStructured({ ...opts, cache: false });
     expect(r1.object.s).toBe("ok");
     expect(r2.object.s).toBe("ok");
-    const obsWarnings = warn.mock.calls.filter((c) =>
-      String(c[0]).includes("observability hook"),
-    );
+    const obsWarnings = warn.mock.calls.filter((c) => String(c[0]).includes("observability hook"));
     expect(obsWarnings).toHaveLength(1); // suppressed after the first
     warn.mockRestore();
   });

@@ -6,11 +6,7 @@ import { z } from "zod";
 import { Gateway } from "./gateway.js";
 import { SpendCapError } from "./errors.js";
 import { MemoryCacheStore, MemoryUsageStore } from "./adapters/memory.js";
-import {
-  MemoryBatchJobStore,
-  type BatchClient,
-  type BatchResultItem,
-} from "./batch.js";
+import { MemoryBatchJobStore, type BatchClient, type BatchResultItem } from "./batch.js";
 
 const OutSchema = z.object({ answer: z.string() });
 
@@ -150,11 +146,7 @@ describe("governed batch", () => {
     const { gw, usage } = makeGw(client, { cache });
     const { cacheKey } = await import("./gateway.js");
     for (const it2 of items) {
-      await cache.set(
-        cacheKey("extract", [JSON.stringify(it2.variables)]),
-        { answer: "c" },
-        3600,
-      );
+      await cache.set(cacheKey("extract", [JSON.stringify(it2.variables)]), { answer: "c" }, 3600);
     }
     const res = await gw.submitBatch(OutSchema, {
       slug: "extract",

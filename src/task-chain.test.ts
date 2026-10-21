@@ -98,14 +98,11 @@ const textOpts = {
 describe("per-task failover chains: runStructured", () => {
   it("walks past a retryable failure to the next link in the task chain", async () => {
     const calls: string[] = [];
-    const { gw, usage } = gwWithTaskChain(
-      ["primary:m", "fallback:m", "backup2:m"],
-      {
-        primary: recordingLm("retryable", "", calls, "primary"),
-        fallback: recordingLm("ok", "from-fallback", calls, "fallback"),
-        backup2: recordingLm("ok", "from-backup2", calls, "backup2"),
-      },
-    );
+    const { gw, usage } = gwWithTaskChain(["primary:m", "fallback:m", "backup2:m"], {
+      primary: recordingLm("retryable", "", calls, "primary"),
+      fallback: recordingLm("ok", "from-fallback", calls, "fallback"),
+      backup2: recordingLm("ok", "from-backup2", calls, "backup2"),
+    });
     const res = await gw.runStructured(runOpts);
     expect(res.object).toEqual({ answer: "from-fallback" });
     // primary retried twice internally, then the chain advanced. backup2
@@ -174,9 +171,9 @@ describe("per-task failover chains: runStructured", () => {
       a: recordingLm("ok", "x", calls, "a"),
       b: recordingLm("ok", "y", calls, "b"),
     });
-    await expect(
-      gw.runStructured({ ...runOpts, requireZdr: true }),
-    ).rejects.toThrow(ZdrViolationError);
+    await expect(gw.runStructured({ ...runOpts, requireZdr: true })).rejects.toThrow(
+      ZdrViolationError,
+    );
     expect(calls).toEqual([]);
   });
 });

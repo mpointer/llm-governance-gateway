@@ -6,7 +6,11 @@ import { Gateway } from "./gateway.js";
 import { RateLimitError } from "./errors.js";
 import { MemoryRateLimiter, MemoryUsageStore } from "./adapters/memory.js";
 
-function fakeTextLm(text: string, finishReason = "stop", fail = 0): { lm: LanguageModel; calls: number[] } {
+function fakeTextLm(
+  text: string,
+  finishReason = "stop",
+  fail = 0,
+): { lm: LanguageModel; calls: number[] } {
   const calls: number[] = [];
   let n = 0;
   return {
@@ -129,7 +133,10 @@ describe("runText", () => {
 // ---------------------------------------------------------------------------
 
 describe("runText failover alignment", () => {
-  function failingLm(status: number | undefined, id: string): {
+  function failingLm(
+    status: number | undefined,
+    id: string,
+  ): {
     lm: LanguageModel;
     calls: () => number;
   } {

@@ -89,9 +89,7 @@ export class DeadlineExceededError extends Error {
     /** What the budget was doing when it ran out, for diagnosis. */
     public readonly phase: "before-link" | "before-retry" | "in-flight" = "in-flight",
   ) {
-    super(
-      `Operation exceeded its ${deadlineMs}ms deadline after ${elapsedMs}ms (${phase})`,
-    );
+    super(`Operation exceeded its ${deadlineMs}ms deadline after ${elapsedMs}ms (${phase})`);
     this.name = "DeadlineExceededError";
   }
 }

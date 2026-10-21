@@ -10,8 +10,10 @@ import {
 describe("openRouterPricingToCents", () => {
   it("converts USD/token strings to cents per 1K tokens", () => {
     // gpt-4o-mini class pricing: $0.15/M in, $0.60/M out
-    expect(openRouterPricingToCents({ prompt: "0.00000015", completion: "0.0000006" }))
-      .toEqual({ in: 0.015, out: 0.06 });
+    expect(openRouterPricingToCents({ prompt: "0.00000015", completion: "0.0000006" })).toEqual({
+      in: 0.015,
+      out: 0.06,
+    });
   });
   it("rejects missing, non-numeric, and negative (dynamic) pricing", () => {
     expect(openRouterPricingToCents(undefined)).toBeUndefined();
@@ -43,13 +45,17 @@ describe("together discovery handles raw-array response + pricing sync", () => {
     const { vi } = await import("vitest");
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () =>
-        new Response(
-          JSON.stringify([
-            { id: "meta-llama/Llama-3.3-70B-Instruct-Turbo", pricing: { input: 0.88, output: 0.88 } },
-          ]),
-          { status: 200 },
-        ),
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify([
+              {
+                id: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+                pricing: { input: 0.88, output: 0.88 },
+              },
+            ]),
+            { status: 200 },
+          ),
       ),
     );
     try {
@@ -74,16 +80,20 @@ describe("openrouter discovery pricing sync", () => {
     __resetModelsListCache();
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () =>
-        new Response(
-          JSON.stringify({
-            data: [
-              { id: "openai/gpt-4o-mini", pricing: { prompt: "0.00000015", completion: "0.0000006" } },
-              { id: "some/dynamic-model", pricing: { prompt: "-1", completion: "-1" } },
-            ],
-          }),
-          { status: 200 },
-        ),
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              data: [
+                {
+                  id: "openai/gpt-4o-mini",
+                  pricing: { prompt: "0.00000015", completion: "0.0000006" },
+                },
+                { id: "some/dynamic-model", pricing: { prompt: "-1", completion: "-1" } },
+              ],
+            }),
+            { status: 200 },
+          ),
       ),
     );
     const registry = new ProviderRegistry({ apiKeys: { openrouter: "sk-or-test" } });

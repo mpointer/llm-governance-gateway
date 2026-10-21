@@ -9,9 +9,7 @@ export const MAX_DELAY_MS = 8_000;
 // `statusCode` (AI SDK) and `status` (@anthropic-ai/sdk).
 export function isRetryable(err: unknown): boolean {
   if (err == null || typeof err !== "object") return false;
-  const s =
-    (err as { statusCode?: number }).statusCode ??
-    (err as { status?: number }).status;
+  const s = (err as { statusCode?: number }).statusCode ?? (err as { status?: number }).status;
   if (typeof s !== "number") return false;
   return s === 429 || (s >= 500 && s < 600);
 }

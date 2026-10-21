@@ -68,9 +68,9 @@ describe("streamStructured", () => {
 
   it("cacheParts required unless cache:false", async () => {
     const { gw } = makeMock();
-    await expect(
-      gw.streamStructured({ ...opts, cacheParts: undefined }),
-    ).rejects.toThrow(/cacheParts is required/);
+    await expect(gw.streamStructured({ ...opts, cacheParts: undefined })).rejects.toThrow(
+      /cacheParts is required/,
+    );
   });
 
   it("streams real partials through streamObject over a fake V2 model", async () => {
@@ -366,8 +366,8 @@ describe("streamStructured stall clocks", () => {
 // is not. This is the one case where the fake-timer tests could hide a real
 // regression, so it pays the ~300ms to run against the real clock.
 describe("streamStructured stall clocks (real timers)", () => {
-  const GAP_MS = 30;      // each gap well under the window
-  const WINDOW_MS = 300;  // total run (~150ms) far exceeds it
+  const GAP_MS = 30; // each gap well under the window
+  const WINDOW_MS = 300; // total run (~150ms) far exceeds it
 
   it("a slow-but-alive stream outlives the stall window", async () => {
     // The core claim of chunk-relative clocks: this stream's TOTAL duration

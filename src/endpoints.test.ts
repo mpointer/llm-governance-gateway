@@ -38,7 +38,10 @@ describe("custom endpoints", () => {
     expect(r.parseAny("openai:gpt-4.1")).toMatchObject({ provider: "openai", endpoint: false });
     expect(r.parseAny("ollama:llama3.3")).toMatchObject({ provider: "ollama", endpoint: true });
     expect(r.parseAny("gpubox:qwen2.5-72b")).toMatchObject({ provider: "gpubox", endpoint: true });
-    expect(r.parseAny("claude-sonnet-4-6")).toMatchObject({ provider: "anthropic", endpoint: false });
+    expect(r.parseAny("claude-sonnet-4-6")).toMatchObject({
+      provider: "anthropic",
+      endpoint: false,
+    });
     // Unknown prefix that is neither builtin nor endpoint → anthropic passthrough
     expect(r.parseAny("mystery:thing")).toMatchObject({ provider: "anthropic", endpoint: false });
   });
@@ -71,7 +74,11 @@ describe("custom endpoints", () => {
         getOverride: async () => null,
         getChain: async () => [
           { endpoint: "vllm", model: "qwen2.5-72b", languageModel: fakeLm("local") },
-          { provider: "anthropic" as const, model: "claude-sonnet-4-6", languageModel: fakeLm("cloud") },
+          {
+            provider: "anthropic" as const,
+            model: "claude-sonnet-4-6",
+            languageModel: fakeLm("cloud"),
+          },
         ],
       },
       caps: { userDailyCents: 0, anonDailyCents: 0, globalDailyCents: 0 },

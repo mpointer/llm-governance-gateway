@@ -101,11 +101,7 @@ export interface UsageStore {
    * keeps working as a single-tenant store. When set, the "global" circuit
    * breaker becomes per-org — one tenant's spend must never trip another's.
    */
-  sumSpendCents(
-    since: Date,
-    userId?: string | null,
-    orgId?: string | null,
-  ): Promise<number>;
+  sumSpendCents(since: Date, userId?: string | null, orgId?: string | null): Promise<number>;
   recordSpendCapEvent(event: SpendCapEvent): Promise<void>;
   saveJudgeScore(score: JudgeScore): Promise<void>;
   /** Per-user daily cap override in cents, or undefined to use config default. */

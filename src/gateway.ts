@@ -64,11 +64,7 @@ import type {
   UsageEntry,
   StoredPrompt,
 } from "./types.js";
-import {
-  MemoryCacheStore,
-  MemoryPromptStore,
-  MemoryRateLimiter,
-} from "./adapters/memory.js";
+import { MemoryCacheStore, MemoryPromptStore, MemoryRateLimiter } from "./adapters/memory.js";
 
 const SNAPSHOT_LIMIT = 2000;
 // Streaming clocks. Silence for a minute is never legitimate; a stream that
@@ -87,9 +83,7 @@ const DEFAULT_CACHE_TTL_SECONDS = 60 * 60 * 24;
 
 function truncate(text: string | null | undefined): string | null {
   if (!text) return null;
-  return text.length > SNAPSHOT_LIMIT
-    ? text.slice(0, SNAPSHOT_LIMIT) + "...[truncated]"
-    : text;
+  return text.length > SNAPSHOT_LIMIT ? text.slice(0, SNAPSHOT_LIMIT) + "...[truncated]" : text;
 }
 
 interface AttemptResult<O> {
@@ -157,8 +151,7 @@ async function attemptGenerate<O>(
       if (budget.callerSignal?.aborted) throw budget.callerSignal.reason;
       if (isSchemaValidationError(err) && !repaired) {
         repaired = true;
-        const detail =
-          err instanceof Error ? err.message.slice(0, 500) : String(err).slice(0, 500);
+        const detail = err instanceof Error ? err.message.slice(0, 500) : String(err).slice(0, 500);
         currentPrompt =
           prompt +
           "\n\nIMPORTANT: Your previous response failed schema validation with this error:\n" +
@@ -167,10 +160,7 @@ async function attemptGenerate<O>(
         continue;
       }
       if (!isRetryable(err) || transientRetries >= 2) throw err;
-      await sleep(
-        budget.clampDelay(backoffMs(transientRetries, err)),
-        budget.callerSignal,
-      );
+      await sleep(budget.clampDelay(backoffMs(transientRetries, err)), budget.callerSignal);
       transientRetries++;
     } finally {
       attempt.dispose();
@@ -437,10 +427,7 @@ export function cacheKey(
   /** See promptFingerprint. Omitted = the exact pre-0.13 key shape. */
   promptFp?: string,
 ): string {
-  const hash = createHash("sha256")
-    .update(parts.join(" "))
-    .digest("hex")
-    .slice(0, 32);
+  const hash = createHash("sha256").update(parts.join(" ")).digest("hex").slice(0, 32);
   const base = orgId ? `aicache:org:${orgId}:${slug}:${hash}` : `aicache:${slug}:${hash}`;
   return promptFp ? `${base}:p${promptFp}` : base;
 }
@@ -532,7 +519,11 @@ export class Gateway {
 
   /** Fire an observability hook without letting it break the request path:
    *  sync throws and async rejections are swallowed, warned once per hook. */
-  private emitObs<T>(name: string, fn: ((payload: T) => void | Promise<void>) | undefined, payload: T): void {
+  private emitObs<T>(
+    name: string,
+    fn: ((payload: T) => void | Promise<void>) | undefined,
+    payload: T,
+  ): void {
     if (!fn) return;
     const warn = (err: unknown) => {
       if (this.obsWarned.has(name)) return;
@@ -590,11 +581,10 @@ export class Gateway {
    * other knob: per call > config > built-in default. `deadlineMs` has no
    * built-in default — unbounded is the pre-S4 behavior and stays the default.
    */
-  private newBudget(opts: {
-    signal?: AbortSignal;
-    attemptMs?: number;
-    deadlineMs?: number;
-  }): { budget: AttemptBudget; attemptMs: number } {
+  private newBudget(opts: { signal?: AbortSignal; attemptMs?: number; deadlineMs?: number }): {
+    budget: AttemptBudget;
+    attemptMs: number;
+  } {
     const deadlineMs = opts.deadlineMs ?? this.timeouts?.deadlineMs;
     return {
       budget: new AttemptBudget(deadlineMs, opts.signal),
@@ -683,9 +673,7 @@ export class Gateway {
     await this.checkSpendCap(opts.userId, opts.route, 0, orgId);
 
     const modelId = opts.model ?? DEFAULT_EMBEDDING_MODEL;
-    const { provider, model } = parseEmbeddingModelId(modelId, (id) =>
-      this.registry.parseAny(id),
-    );
+    const { provider, model } = parseEmbeddingModelId(modelId, (id) => this.registry.parseAny(id));
     if (opts.requireZdr && !this.mock && !this.registry.isZdr(provider, model)) {
       throw new ZdrViolationError(provider, model, "embed");
     }
@@ -702,8 +690,7 @@ export class Gateway {
       usedProvider = "mock";
       usedModel = "mock";
     } else {
-      const em =
-        opts.embeddingModel ?? buildEmbeddingModel(this.registry, provider, model);
+      const em = opts.embeddingModel ?? buildEmbeddingModel(this.registry, provider, model);
       if (!em) {
         throw new Error(
           `embed: no embedding model for "${provider}/${model}". Natively supported: ` +
@@ -721,14 +708,14 @@ export class Gateway {
       let res: Awaited<ReturnType<typeof embedMany>>;
       try {
         res = await embedMany({
-        model: em,
-        values: texts,
-        // The AI SDK's own maxRetries (default 2) is left alone: embed() has
-        // no gateway-level retry loop, so it is the only one there is.
-        abortSignal: embedAttempt.signal,
-        ...(opts.dimensions !== undefined
-          ? { providerOptions: { openai: { dimensions: opts.dimensions } } }
-          : {}),
+          model: em,
+          values: texts,
+          // The AI SDK's own maxRetries (default 2) is left alone: embed() has
+          // no gateway-level retry loop, so it is the only one there is.
+          abortSignal: embedAttempt.signal,
+          ...(opts.dimensions !== undefined
+            ? { providerOptions: { openai: { dimensions: opts.dimensions } } }
+            : {}),
         });
       } catch (err) {
         if (embedAttempt.timedOut()) {
@@ -763,7 +750,14 @@ export class Gateway {
       zdrEnforced: opts.requireZdr ? true : null,
     });
 
-    return { embeddings, provider: usedProvider, model: usedModel, inputTokens, traceId, usageLogId };
+    return {
+      embeddings,
+      provider: usedProvider,
+      model: usedModel,
+      inputTokens,
+      traceId,
+      usageLogId,
+    };
   }
 
   // ===========================================================================
@@ -906,7 +900,9 @@ export class Gateway {
             prompt,
             ...(opts.system ? { system: opts.system } : {}),
             ...(effTemp !== undefined ? { temperature: effTemp } : {}),
-            ...(opts.maxOutputTokens !== undefined ? { maxOutputTokens: opts.maxOutputTokens } : {}),
+            ...(opts.maxOutputTokens !== undefined
+              ? { maxOutputTokens: opts.maxOutputTokens }
+              : {}),
             abortSignal: attempt.signal,
           });
           return res;
@@ -978,7 +974,11 @@ export class Gateway {
           links = eligible;
         }
       }
-      if (links.length === 1 && requireZdr && !this.registry.isZdr(links[0]!.provider, links[0]!.model)) {
+      if (
+        links.length === 1 &&
+        requireZdr &&
+        !this.registry.isZdr(links[0]!.provider, links[0]!.model)
+      ) {
         throw new ZdrViolationError(links[0]!.provider, links[0]!.model, "runText link");
       }
 
@@ -992,8 +992,7 @@ export class Gateway {
       model = "";
       durationMs = 0;
       for (const link of links) {
-        const nativeApplies =
-          opts.anthropic && link.provider === "anthropic" && this.anthropicCfg;
+        const nativeApplies = opts.anthropic && link.provider === "anthropic" && this.anthropicCfg;
         if (!link.languageModel && !nativeApplies) {
           lastErr = new Error(
             `No API key for provider "${link.provider}" (and native execution does not apply).`,
@@ -1070,7 +1069,13 @@ export class Gateway {
       model,
       inputTokens,
       outputTokens,
-      estimatedCostCents: this.registry.estimateForLink(provider, model, inputTokens, outputTokens, extras),
+      estimatedCostCents: this.registry.estimateForLink(
+        provider,
+        model,
+        inputTokens,
+        outputTokens,
+        extras,
+      ),
       cacheHit: false,
       traceId,
       durationMs,
@@ -1185,7 +1190,14 @@ export class Gateway {
     const prompt = renderTemplate(promptConfig.body, opts.variables(opts.input));
     const temperature = opts.temperature ?? promptConfig.temperature;
 
-    const finalize = async (object: O, inTok: number, outTok: number, provider: string, model: string, durationMs: number) => {
+    const finalize = async (
+      object: O,
+      inTok: number,
+      outTok: number,
+      provider: string,
+      model: string,
+      durationMs: number,
+    ) => {
       if (key) await this.cache.set(key, object, this.cacheTtlSeconds);
       await this.logUsage({
         metadata: opts.metadata,
@@ -1213,7 +1225,14 @@ export class Gateway {
         throw new Error(`Mock mode is on but no responder registered for "${opts.slug}".`);
       }
       const object = opts.schema.parse(responder(opts.input));
-      await finalize(object, Math.ceil(prompt.length / 4), Math.ceil(JSON.stringify(object).length / 4), "mock", "mock", 0);
+      await finalize(
+        object,
+        Math.ceil(prompt.length / 4),
+        Math.ceil(JSON.stringify(object).length / 4),
+        "mock",
+        "mock",
+        0,
+      );
       return {
         cached: false,
         traceId,
@@ -1248,11 +1267,7 @@ export class Gateway {
     if (streamRequireZdr) {
       const eligible = links.filter((l) => this.registry.isZdr(l.provider, l.model));
       if (eligible.length === 0) {
-        throw new ZdrViolationError(
-          links[0]!.provider,
-          links[0]!.model,
-          "streaming chain",
-        );
+        throw new ZdrViolationError(links[0]!.provider, links[0]!.model, "streaming chain");
       }
       links = eligible;
     }
@@ -1263,11 +1278,8 @@ export class Gateway {
 
     const start = Date.now();
     const firstChunkMs =
-      opts.streamFirstChunkMs ??
-      this.timeouts?.streamFirstChunkMs ??
-      DEFAULT_STREAM_FIRST_CHUNK_MS;
-    const stallMs =
-      opts.streamStallMs ?? this.timeouts?.streamStallMs ?? DEFAULT_STREAM_STALL_MS;
+      opts.streamFirstChunkMs ?? this.timeouts?.streamFirstChunkMs ?? DEFAULT_STREAM_FIRST_CHUNK_MS;
+    const stallMs = opts.streamStallMs ?? this.timeouts?.streamStallMs ?? DEFAULT_STREAM_STALL_MS;
 
     // The consumer-facing channel. The driver below owns iteration for the
     // same reason guardStream does: streamObject runs eagerly, so a consumer
@@ -1459,9 +1471,7 @@ export class Gateway {
       model = d.model;
     }
     if (provider !== "anthropic") {
-      throw new Error(
-        `Batch supports Anthropic models only (resolved "${provider}/${model}").`,
-      );
+      throw new Error(`Batch supports Anthropic models only (resolved "${provider}/${model}").`);
     }
     if (opts.requireZdr && !this.registry.isZdr(provider, model)) {
       throw new ZdrViolationError(provider, model, "batch submit");
@@ -1510,12 +1520,7 @@ export class Gateway {
         `Batch estimate ${estimateCents.toFixed(2)}¢ exceeds maxCostCents ${opts.maxCostCents}¢ (${misses.length} items). Split the batch or raise the ceiling.`,
       );
     }
-    await this.checkSpendCap(
-      opts.userId,
-      opts.route ?? `batch:${opts.slug}`,
-      estimateCents,
-      orgId,
-    );
+    await this.checkSpendCap(opts.userId, opts.route ?? `batch:${opts.slug}`, estimateCents, orgId);
 
     const requests = misses.map((m) => ({
       customId: m.id,
@@ -1584,10 +1589,7 @@ export class Gateway {
    * of batch results is a caller concern in v1 — the job store doesn't
    * persist per-item cache keys.)
    */
-  async reconcileBatch<O>(
-    batchId: string,
-    schema: z.ZodType<O>,
-  ): Promise<ReconcileResult<O>> {
+  async reconcileBatch<O>(batchId: string, schema: z.ZodType<O>): Promise<ReconcileResult<O>> {
     const cfg = this.requireBatch();
     const discount = cfg.discount ?? 0.5;
     const job = await cfg.store.getJob(batchId);
@@ -1617,15 +1619,10 @@ export class Gateway {
       const msg = item.result.message;
       const u = msg.usage ?? {};
       const cents =
-        this.registry.estimateCostCents(
-          job.model,
-          u.input_tokens ?? 0,
-          u.output_tokens ?? 0,
-          {
-            cacheCreateTokens: u.cache_creation_input_tokens ?? 0,
-            cacheReadTokens: u.cache_read_input_tokens ?? 0,
-          },
-        ) * discount;
+        this.registry.estimateCostCents(job.model, u.input_tokens ?? 0, u.output_tokens ?? 0, {
+          cacheCreateTokens: u.cache_creation_input_tokens ?? 0,
+          cacheReadTokens: u.cache_read_input_tokens ?? 0,
+        }) * discount;
       totalCents += cents;
       usageRows.push({
         userId: null,
@@ -1681,7 +1678,12 @@ export class Gateway {
   // same repair/transient semantics as attemptGenerate.
   // ---------------------------------------------------------------------------
   private async execLink<O>(
-    link: { provider: string; model: string; languageModel?: LanguageModel; temperature?: number | null },
+    link: {
+      provider: string;
+      model: string;
+      languageModel?: LanguageModel;
+      temperature?: number | null;
+    },
     schema: OutputSchema<O>,
     prompt: string,
     system: string | undefined,
@@ -1690,7 +1692,11 @@ export class Gateway {
     /** Whole-operation clock; supplies each attempt's signal. */
     budget: AttemptBudget = new AttemptBudget(),
     attemptMs = DEFAULT_ATTEMPT_MS,
-  ): Promise<AttemptResult<O> & { extras?: { cacheCreateTokens: number; cacheReadTokens: number; webSearches: number } }> {
+  ): Promise<
+    AttemptResult<O> & {
+      extras?: { cacheCreateTokens: number; cacheReadTokens: number; webSearches: number };
+    }
+  > {
     // Per-link temperature: link (incl. null = never send) > call > prompt.
     const temperature =
       link.temperature === null ? undefined : (link.temperature ?? callTemperature);
@@ -1718,9 +1724,7 @@ export class Gateway {
             try {
               object = schema.parse(res.object);
             } catch (err) {
-              throw new NativeSchemaError(
-                err instanceof Error ? err.message : String(err),
-              );
+              throw new NativeSchemaError(err instanceof Error ? err.message : String(err));
             }
           } else {
             object = res.object as O;
@@ -1752,10 +1756,7 @@ export class Gateway {
             continue;
           }
           if (!isRetryable(err) || transientRetries >= 2) throw err;
-          await sleep(
-            budget.clampDelay(backoffMs(transientRetries, err)),
-            budget.callerSignal,
-          );
+          await sleep(budget.clampDelay(backoffMs(transientRetries, err)), budget.callerSignal);
           transientRetries++;
         } finally {
           attempt.dispose();
@@ -1824,8 +1825,7 @@ export class Gateway {
     // which is the isolation failure org scoping exists to prevent.
     const globalCap = this.caps.globalDailyCents ?? DEFAULT_GLOBAL_CAP_CENTS;
     if (globalCap) {
-      const total =
-        (await this.usage.sumSpendCents(todayUtc, undefined, orgId)) + projectedCents;
+      const total = (await this.usage.sumSpendCents(todayUtc, undefined, orgId)) + projectedCents;
       if (total >= globalCap) {
         await breach(
           {
@@ -1842,8 +1842,7 @@ export class Gateway {
 
     // Optional explicit per-org cap, on top of the org-scoped breaker.
     if (orgId) {
-      const orgCap =
-        (await this.usage.getOrgDailyCapCents?.(orgId)) ?? this.caps.orgDailyCents;
+      const orgCap = (await this.usage.getOrgDailyCapCents?.(orgId)) ?? this.caps.orgDailyCents;
       if (orgCap) {
         const orgSpent =
           (await this.usage.sumSpendCents(todayUtc, undefined, orgId)) + projectedCents;
@@ -1936,9 +1935,7 @@ export class Gateway {
 
     if (!row) {
       if (!def) {
-        throw new Error(
-          `prompt "${slug}" not found in store or promptDefaults.`,
-        );
+        throw new Error(`prompt "${slug}" not found in store or promptDefaults.`);
       }
       await this.prompts
         .seedPrompt?.(def, orgId)
@@ -2035,8 +2032,7 @@ export class Gateway {
   }
 
   private async logUsage(f: Omit<UsageEntry, "createdAt">): Promise<string | number> {
-    const enc = (t: string | null) =>
-      t != null && this.encrypt ? this.encrypt(t) : t;
+    const enc = (t: string | null) => (t != null && this.encrypt ? this.encrypt(t) : t);
     const entry: UsageEntry = {
       ...f,
       app: f.app ?? this.appId,
@@ -2054,13 +2050,10 @@ export class Gateway {
     return id;
   }
 
-  async runStructured<I, O>(
-    opts: RunStructuredOptions<I, O>,
-  ): Promise<RunStructuredResult<O>> {
+  async runStructured<I, O>(opts: RunStructuredOptions<I, O>): Promise<RunStructuredResult<O>> {
     const traceId = randomUUID();
     const orgId = this.org(opts);
-    const identifier =
-      opts.userId ?? (opts.anonKey ? `anon:${opts.anonKey}` : "anon");
+    const identifier = opts.userId ?? (opts.anonKey ? `anon:${opts.anonKey}` : "anon");
     const requireZdr =
       opts.requireZdr === true ||
       (opts.task !== undefined && (this.tasks?.requiresZdr(opts.task) ?? false));
@@ -2080,9 +2073,7 @@ export class Gateway {
     // 3. Cache read
     const useCache = opts.cache !== false;
     if (useCache && !opts.cacheParts) {
-      throw new Error(
-        "runStructured: cacheParts is required unless cache:false is set.",
-      );
+      throw new Error("runStructured: cacheParts is required unless cache:false is set.");
     }
     const prefetched = await this.prefetchPromptForKey(opts, orgId, useCache);
     const key = useCache
@@ -2228,16 +2219,19 @@ export class Gateway {
     let provider: string;
     let model: string;
     let durationMs: number;
-    let extras: { cacheCreateTokens: number; cacheReadTokens: number; webSearches: number } | undefined;
+    let extras:
+      | { cacheCreateTokens: number; cacheReadTokens: number; webSearches: number }
+      | undefined;
 
     if (this.mock) {
       const responder = this.mockResponders.get(opts.slug);
       if (!responder) {
-        throw new Error(
-          `Mock mode is on but no responder registered for "${opts.slug}".`,
-        );
+        throw new Error(`Mock mode is on but no responder registered for "${opts.slug}".`);
       }
-      { const raw = responder(opts.input); object = isZodSchema(opts.schema) ? opts.schema.parse(raw) : (raw as O); }
+      {
+        const raw = responder(opts.input);
+        object = isZodSchema(opts.schema) ? opts.schema.parse(raw) : (raw as O);
+      }
       inputTokens = Math.ceil(prompt.length / 4);
       outputTokens = Math.ceil(JSON.stringify(object).length / 4);
       provider = "mock";
@@ -2284,8 +2278,7 @@ export class Gateway {
 
         const usable = taskLinks.filter(
           (l) =>
-            l.languageModel ||
-            (opts.anthropic && l.provider === "anthropic" && this.anthropicCfg),
+            l.languageModel || (opts.anthropic && l.provider === "anthropic" && this.anthropicCfg),
         );
         if (usable.length === 0) {
           throw new Error(
@@ -2314,10 +2307,7 @@ export class Gateway {
       } else if (adminOverride) {
         // The hint is validated against the admin's pinned provider, so it
         // can only name a model for that provider — the pin stays in force.
-        const adminHint = this.validatedModelHint(
-          promptConfig.modelHint,
-          adminOverride.provider,
-        );
+        const adminHint = this.validatedModelHint(promptConfig.modelHint, adminOverride.provider);
         const resolved = this.registry.resolveDefault({
           provider: adminOverride.provider,
           model: adminHint?.model ?? adminOverride.model,
@@ -2329,20 +2319,17 @@ export class Gateway {
           throw new Error(`No API key for provider "${resolved.provider}".`);
         }
         const start = Date.now();
-        const result = await ledgerOnAttemptTimeout(
-          resolved.provider,
-          resolved.model,
-          () =>
-            this.execLink(
-              resolved,
-              opts.schema,
-              prompt,
-              opts.system,
-              temperature,
-              opts.anthropic,
-              budget,
-              attemptMs,
-            ),
+        const result = await ledgerOnAttemptTimeout(resolved.provider, resolved.model, () =>
+          this.execLink(
+            resolved,
+            opts.schema,
+            prompt,
+            opts.system,
+            temperature,
+            opts.anthropic,
+            budget,
+            attemptMs,
+          ),
         );
         object = result.object;
         inputTokens = result.usage.inputTokens;
@@ -2400,20 +2387,17 @@ export class Gateway {
             );
           }
           const start = Date.now();
-          const result = await ledgerOnAttemptTimeout(
-            resolved.provider,
-            resolved.model,
-            () =>
-              this.execLink(
-                resolved,
-                opts.schema,
-                prompt,
-                opts.system,
-                temperature,
-                opts.anthropic,
-                budget,
-                attemptMs,
-              ),
+          const result = await ledgerOnAttemptTimeout(resolved.provider, resolved.model, () =>
+            this.execLink(
+              resolved,
+              opts.schema,
+              prompt,
+              opts.system,
+              temperature,
+              opts.anthropic,
+              budget,
+              attemptMs,
+            ),
           );
           object = result.object;
           inputTokens = result.usage.inputTokens ?? 0;
@@ -2507,7 +2491,13 @@ export class Gateway {
           model,
           inputTokens,
           outputTokens,
-          estimatedCostCents: this.registry.estimateForLink(provider, model, inputTokens, outputTokens, extras),
+          estimatedCostCents: this.registry.estimateForLink(
+            provider,
+            model,
+            inputTokens,
+            outputTokens,
+            extras,
+          ),
           cacheHit: false,
           traceId,
           durationMs,
@@ -2538,7 +2528,13 @@ export class Gateway {
       model,
       inputTokens,
       outputTokens,
-      estimatedCostCents: this.registry.estimateForLink(provider, model, inputTokens, outputTokens, extras),
+      estimatedCostCents: this.registry.estimateForLink(
+        provider,
+        model,
+        inputTokens,
+        outputTokens,
+        extras,
+      ),
       cacheHit: false,
       traceId,
       durationMs,
@@ -2555,8 +2551,7 @@ export class Gateway {
     if (opts.judgeRubric) {
       const rubric = opts.judgeRubric(object);
       const values = Object.values(rubric);
-      const overall =
-        values.length > 0 ? values.reduce((a, b) => a + b, 0) / values.length : 0;
+      const overall = values.length > 0 ? values.reduce((a, b) => a + b, 0) / values.length : 0;
       await this.saveJudge({
         usageLogId,
         rubric,
@@ -2679,9 +2674,7 @@ export class Gateway {
     if (this.mock) {
       const responder = this.mockResponders.get(`judge:${opts.slug}`);
       if (!responder) {
-        console.warn(
-          `[llm-gateway] mock mode: no "judge:${opts.slug}" responder — judge skipped`,
-        );
+        console.warn(`[llm-gateway] mock mode: no "judge:${opts.slug}" responder — judge skipped`);
         return;
       }
       scores = scoreSchema.parse(responder(object));
@@ -2723,9 +2716,7 @@ export class Gateway {
         // main response fails — that would make a governance check the thing
         // that breaks the request it was watching.
         if (err instanceof AttemptTimeoutError || err instanceof DeadlineExceededError) {
-          console.warn(
-            `[llm-gateway] judge skipped for "${opts.slug}": ${err.message}`,
-          );
+          console.warn(`[llm-gateway] judge skipped for "${opts.slug}": ${err.message}`);
           return;
         }
         throw err;
@@ -2752,7 +2743,12 @@ export class Gateway {
       model: judgeModel,
       inputTokens,
       outputTokens,
-      estimatedCostCents: this.registry.estimateForLink(judgeProvider, judgeModel, inputTokens, outputTokens),
+      estimatedCostCents: this.registry.estimateForLink(
+        judgeProvider,
+        judgeModel,
+        inputTokens,
+        outputTokens,
+      ),
       cacheHit: false,
       traceId: randomUUID(),
       durationMs,
@@ -2821,16 +2817,12 @@ export class Gateway {
         lm = r.languageModel;
       }
       if (!lm) {
-        throw new Error(
-          `Prompt test: no API key for provider "${resolvedProvider}".`,
-        );
+        throw new Error(`Prompt test: no API key for provider "${resolvedProvider}".`);
       }
       const start = Date.now();
       // One composition mechanism across the codebase, so nobody later wires
       // this one into an AbortSignal.any (see src/deadline.ts for why).
-      const attempt = new AttemptBudget().attempt(
-        this.timeouts?.attemptMs ?? DEFAULT_ATTEMPT_MS,
-      );
+      const attempt = new AttemptBudget().attempt(this.timeouts?.attemptMs ?? DEFAULT_ATTEMPT_MS);
       let res: Awaited<ReturnType<typeof generateText>>;
       try {
         res = await generateText({

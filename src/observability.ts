@@ -29,8 +29,7 @@ export function toOtelAttributes(
   if (entry.durationMs != null) attrs["llm_gateway.duration_ms"] = entry.durationMs;
   if (entry.cacheCreateTokens != null)
     attrs["llm_gateway.cache_create_tokens"] = entry.cacheCreateTokens;
-  if (entry.cacheReadTokens != null)
-    attrs["llm_gateway.cache_read_tokens"] = entry.cacheReadTokens;
+  if (entry.cacheReadTokens != null) attrs["llm_gateway.cache_read_tokens"] = entry.cacheReadTokens;
   if (entry.webSearches != null) attrs["llm_gateway.web_searches"] = entry.webSearches;
   if (entry.zdrEnforced != null) attrs["llm_gateway.zdr_enforced"] = entry.zdrEnforced;
   return attrs;

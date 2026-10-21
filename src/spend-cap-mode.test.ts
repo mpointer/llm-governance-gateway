@@ -57,9 +57,7 @@ describe("spend cap mode: enforce (default)", () => {
     const usage = await storeWithSpend(300);
     const gw = mockGateway(usage, { userDailyCents: 200, globalDailyCents: 0 });
 
-    await expect(gw.runStructured({ ...base, userId: "u1" })).rejects.toThrow(
-      SpendCapError,
-    );
+    await expect(gw.runStructured({ ...base, userId: "u1" })).rejects.toThrow(SpendCapError);
 
     expect(usage.capEvents).toHaveLength(1);
     expect(usage.capEvents[0]!.wouldBlock).toBe(true);
@@ -73,9 +71,7 @@ describe("spend cap mode: enforce (default)", () => {
       globalDailyCents: 0,
       mode: "enforce" as const,
     });
-    await expect(gw.runStructured({ ...base, userId: "u1" })).rejects.toThrow(
-      SpendCapError,
-    );
+    await expect(gw.runStructured({ ...base, userId: "u1" })).rejects.toThrow(SpendCapError);
     expect(usage.capEvents[0]!.enforced).toBe(true);
   });
 });
@@ -154,9 +150,7 @@ describe("spend cap mode: observe", () => {
       globalDailyCents: 400,
     });
 
-    await expect(gw.runStructured({ ...base, userId: "u1" })).rejects.toThrow(
-      SpendCapError,
-    );
+    await expect(gw.runStructured({ ...base, userId: "u1" })).rejects.toThrow(SpendCapError);
     expect(usage.capEvents).toHaveLength(1);
     expect(usage.capEvents[0]!.route).toBe("global");
   });

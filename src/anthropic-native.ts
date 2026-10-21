@@ -101,9 +101,7 @@ export function extractEmitToolInput(msg: AnthropicMessage): unknown {
       b.type === "tool_use" && (b as { name?: string }).name === EMIT_TOOL,
   );
   if (!toolUse) {
-    throw new NativeSchemaError(
-      `Anthropic response contained no ${EMIT_TOOL} tool call`,
-    );
+    throw new NativeSchemaError(`Anthropic response contained no ${EMIT_TOOL} tool call`);
   }
   return toolUse.input;
 }
@@ -161,8 +159,7 @@ export async function callNativeAnthropic(
     tools.push({
       type: "web_search_20250305",
       name: "web_search",
-      max_uses:
-        typeof args.native.webSearch === "object" ? args.native.webSearch.maxUses : 4,
+      max_uses: typeof args.native.webSearch === "object" ? args.native.webSearch.maxUses : 4,
     });
   }
 
@@ -183,27 +180,28 @@ export async function callNativeAnthropic(
       ]
     : undefined;
 
-  const msg = await cfg.client.messages.create({
-    model: args.model,
-    max_tokens: cfg.maxTokens ?? 8192,
-    ...(system ? { system } : {}),
-    messages: [{ role: "user", content: prompt }],
-    tools,
-    tool_choice: forceTool ? { type: "tool", name: EMIT_TOOL } : { type: "auto" },
-    ...(thinking ? { thinking } : {}),
-    ...(args.temperature !== undefined && !wantsThinking
-      ? { temperature: args.temperature } // thinking requires temperature 1
-      : {}),
-  }, { signal: args.signal });
+  const msg = await cfg.client.messages.create(
+    {
+      model: args.model,
+      max_tokens: cfg.maxTokens ?? 8192,
+      ...(system ? { system } : {}),
+      messages: [{ role: "user", content: prompt }],
+      tools,
+      tool_choice: forceTool ? { type: "tool", name: EMIT_TOOL } : { type: "auto" },
+      ...(thinking ? { thinking } : {}),
+      ...(args.temperature !== undefined && !wantsThinking
+        ? { temperature: args.temperature } // thinking requires temperature 1
+        : {}),
+    },
+    { signal: args.signal },
+  );
 
   const toolUse = msg.content.find(
     (b): b is { type: "tool_use"; name: string; input: unknown } =>
       b.type === "tool_use" && (b as { name?: string }).name === EMIT_TOOL,
   );
   if (!toolUse) {
-    throw new NativeSchemaError(
-      `Native Anthropic response contained no ${EMIT_TOOL} tool call`,
-    );
+    throw new NativeSchemaError(`Native Anthropic response contained no ${EMIT_TOOL} tool call`);
   }
 
   const u = msg.usage ?? {};
@@ -269,8 +267,7 @@ export async function callNativeAnthropicText(
     tools.push({
       type: "web_search_20250305",
       name: "web_search",
-      max_uses:
-        typeof args.native.webSearch === "object" ? args.native.webSearch.maxUses : 4,
+      max_uses: typeof args.native.webSearch === "object" ? args.native.webSearch.maxUses : 4,
     });
   }
 
@@ -284,17 +281,20 @@ export async function callNativeAnthropicText(
       ]
     : undefined;
 
-  const msg = await cfg.client.messages.create({
-    model: args.model,
-    max_tokens: args.maxTokens ?? cfg.maxTokens ?? 8192,
-    ...(system ? { system } : {}),
-    messages: [{ role: "user", content: args.prompt }],
-    ...(tools.length > 0 ? { tools } : {}),
-    ...(thinking ? { thinking } : {}),
-    ...(args.temperature !== undefined && !wantsThinking
-      ? { temperature: args.temperature } // thinking requires temperature 1
-      : {}),
-  }, { signal: args.signal });
+  const msg = await cfg.client.messages.create(
+    {
+      model: args.model,
+      max_tokens: args.maxTokens ?? cfg.maxTokens ?? 8192,
+      ...(system ? { system } : {}),
+      messages: [{ role: "user", content: args.prompt }],
+      ...(tools.length > 0 ? { tools } : {}),
+      ...(thinking ? { thinking } : {}),
+      ...(args.temperature !== undefined && !wantsThinking
+        ? { temperature: args.temperature } // thinking requires temperature 1
+        : {}),
+    },
+    { signal: args.signal },
+  );
 
   const text = msg.content
     .filter((b): b is { type: "text"; text: string } => b.type === "text")

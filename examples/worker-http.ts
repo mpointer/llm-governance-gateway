@@ -18,9 +18,7 @@ export default {
     const gateway = new Gateway({
       usage: new MemoryUsageStore(), // replace with DrizzleSqliteUsageStore(turso)
       providers: { apiKeys: { anthropic: env.ANTHROPIC_API_KEY } },
-      promptDefaults: [
-        { slug: "classify", body: "Classify: {{text}}", variables: ["text"] },
-      ],
+      promptDefaults: [{ slug: "classify", body: "Classify: {{text}}", variables: ["text"] }],
       caps: { userDailyCents: 100, globalDailyCents: 2000 },
     });
 

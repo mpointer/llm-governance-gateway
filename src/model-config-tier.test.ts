@@ -78,7 +78,11 @@ function streamLm(answer: string, id = "sm"): LanguageModel {
         { type: "text-start", id: "1" },
         { type: "text-delta", id: "1", delta: JSON.stringify({ answer }) },
         { type: "text-end", id: "1" },
-        { type: "finish", finishReason: "stop", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } },
+        {
+          type: "finish",
+          finishReason: "stop",
+          usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        },
       ];
       return {
         stream: new ReadableStream({
@@ -183,7 +187,11 @@ describe("ModelConfigStore.getOverride() tier parameter", () => {
         return tier ? null : { provider: "anthropic", model: "pinned-model" };
       },
       getChain: async () => [
-        { provider: "anthropic" as const, model: "chain-model", languageModel: textLm("from-chain") },
+        {
+          provider: "anthropic" as const,
+          model: "chain-model",
+          languageModel: textLm("from-chain"),
+        },
       ],
     };
     const gw = new Gateway({
@@ -214,7 +222,11 @@ describe("ModelConfigStore.getOverride() tier parameter", () => {
         return tier ? null : { provider: "anthropic", model: "pinned-model" };
       },
       getChain: async () => [
-        { provider: "anthropic" as const, model: "chain-model", languageModel: streamLm("from-chain") },
+        {
+          provider: "anthropic" as const,
+          model: "chain-model",
+          languageModel: streamLm("from-chain"),
+        },
       ],
     };
     const gw = new Gateway({

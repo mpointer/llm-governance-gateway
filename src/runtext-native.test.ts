@@ -68,7 +68,10 @@ function fakeTextLm(text: string): LanguageModel {
   } as unknown as LanguageModel;
 }
 
-function make(client: ReturnType<typeof fakeAnthropicClient>["client"] | null, chain?: () => Promise<unknown[]>) {
+function make(
+  client: ReturnType<typeof fakeAnthropicClient>["client"] | null,
+  chain?: () => Promise<unknown[]>,
+) {
   const usage = new MemoryUsageStore();
   const gw = new Gateway({
     usage,
@@ -78,7 +81,8 @@ function make(client: ReturnType<typeof fakeAnthropicClient>["client"] | null, c
     providers: { webSearchCentsPerCall: 1 },
     modelConfig: {
       getOverride: async () => null,
-      getChain: (chain ?? (async () => [{ provider: "anthropic", model: "claude-sonnet-5" }])) as never,
+      getChain: (chain ??
+        (async () => [{ provider: "anthropic", model: "claude-sonnet-5" }])) as never,
     },
     caps: { userDailyCents: 0, anonDailyCents: 0, globalDailyCents: 0 },
   });

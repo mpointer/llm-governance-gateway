@@ -7,20 +7,10 @@
 // quick-start/dev setups.
 
 import { and, eq, gte, isNull, sql } from "drizzle-orm";
-import {
-  integer,
-  real,
-  sqliteTable,
-  text,
-} from "drizzle-orm/sqlite-core";
+import { integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
 import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 import type { GuardrailRecord } from "../guardrails.js";
-import type {
-  JudgeScore,
-  SpendCapEvent,
-  UsageEntry,
-  UsageStore,
-} from "../types.js";
+import type { JudgeScore, SpendCapEvent, UsageEntry, UsageStore } from "../types.js";
 
 export const aiUsageLog = sqliteTable("ai_usage_log", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -111,26 +101,15 @@ export class DrizzleSqliteUsageStore implements UsageStore {
     return rows[0]!.id;
   }
 
-  async sumSpendCents(
-    since: Date,
-    userId?: string | null,
-    orgId?: string | null,
-  ): Promise<number> {
-    const conditions = [
-      eq(aiUsageLog.cacheHit, false),
-      gte(aiUsageLog.createdAt, since),
-    ];
+  async sumSpendCents(since: Date, userId?: string | null, orgId?: string | null): Promise<number> {
+    const conditions = [eq(aiUsageLog.cacheHit, false), gte(aiUsageLog.createdAt, since)];
     if (userId !== undefined) {
-      conditions.push(
-        userId === null ? isNull(aiUsageLog.userId) : eq(aiUsageLog.userId, userId),
-      );
+      conditions.push(userId === null ? isNull(aiUsageLog.userId) : eq(aiUsageLog.userId, userId));
     }
     // undefined = unscoped: no org predicate at all, so the query is byte for
     // byte what it was before org scoping existed.
     if (orgId !== undefined) {
-      conditions.push(
-        orgId === null ? isNull(aiUsageLog.orgId) : eq(aiUsageLog.orgId, orgId),
-      );
+      conditions.push(orgId === null ? isNull(aiUsageLog.orgId) : eq(aiUsageLog.orgId, orgId));
     }
     const rows = await this.db
       .select({
@@ -176,9 +155,9 @@ async function addColumnIfMissing(
   column: string,
   columnDdl: string,
 ): Promise<void> {
-  const info = (await db.all(
-    sql.raw(`PRAGMA table_info(${table})`),
-  )) as unknown as { name?: string }[];
+  const info = (await db.all(sql.raw(`PRAGMA table_info(${table})`))) as unknown as {
+    name?: string;
+  }[];
   const present = info.some((c) =>
     // sql.js returns positional arrays for PRAGMA; drizzle drivers return
     // objects. Handle both rather than assuming one shape.

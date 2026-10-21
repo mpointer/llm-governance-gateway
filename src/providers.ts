@@ -3,12 +3,7 @@ import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createOpenAI } from "@ai-sdk/openai";
 import type { LanguageModel } from "ai";
 import { InvalidModelHintError } from "./errors.js";
-import type {
-  ChainLinkConfig,
-  ModelPricing,
-  ProviderConfig,
-  ProviderId,
-} from "./types.js";
+import type { ChainLinkConfig, ModelPricing, ProviderConfig, ProviderId } from "./types.js";
 
 export interface ResolvedModel {
   provider: ProviderId;
@@ -282,9 +277,7 @@ export class ProviderRegistry {
     const baseURL = cfg?.baseURL ?? LOCAL_PRESETS[name];
     if (!baseURL) return null;
     const apiKey =
-      cfg?.apiKey ??
-      (cfg?.apiKeyEnv ? process.env[cfg.apiKeyEnv] : undefined) ??
-      "local-no-key"; // local servers typically ignore auth; SDK requires a string
+      cfg?.apiKey ?? (cfg?.apiKeyEnv ? process.env[cfg.apiKeyEnv] : undefined) ?? "local-no-key"; // local servers typically ignore auth; SDK requires a string
     return createOpenAI({ apiKey, baseURL }).chat(model);
   }
 
@@ -318,9 +311,7 @@ export class ProviderRegistry {
   knownModels(provider: ProviderId): string[] {
     const prefix = PROVIDER_MODEL_PREFIXES[provider];
     const fromTiers = Object.values(BUILTIN_TIERS[provider] ?? {});
-    const fromPricing = prefix
-      ? Object.keys(this.pricing).filter((m) => m.startsWith(prefix))
-      : [];
+    const fromPricing = prefix ? Object.keys(this.pricing).filter((m) => m.startsWith(prefix)) : [];
     return Array.from(new Set([...fromTiers, ...fromPricing]));
   }
 
@@ -413,10 +404,7 @@ export class ProviderRegistry {
    * otherwise `undefined` so the caller falls through to its own default
    * instead of forwarding a tier label to the provider.
    */
-  resolveModelHint(
-    hint: string | undefined,
-    provider?: ProviderId,
-  ): ResolvedModelHint | undefined {
+  resolveModelHint(hint: string | undefined, provider?: ProviderId): ResolvedModelHint | undefined {
     const raw = hint?.trim();
     // No hint at all is not an invalid hint: nothing to reject, nothing to
     // throw, the caller just uses its own default.
@@ -474,11 +462,7 @@ export class ProviderRegistry {
     return BUILTIN_TIERS[provider]?.[tier];
   }
 
-  buildLanguageModel(
-    provider: ProviderId,
-    model: string,
-    apiKey?: string,
-  ): LanguageModel | null {
+  buildLanguageModel(provider: ProviderId, model: string, apiKey?: string): LanguageModel | null {
     const key = apiKey ?? this.apiKey(provider);
     if (!key) return null;
     switch (provider) {
@@ -571,23 +555,47 @@ export class ProviderRegistry {
       if (!name) continue; // one of provider/endpoint/factory is required
       if (link.languageModel) {
         // BYO model: tier re-routing doesn't apply (we can't rebuild it).
-        out.push({ provider: name, model: link.model, languageModel: link.languageModel, temperature: link.temperature });
+        out.push({
+          provider: name,
+          model: link.model,
+          languageModel: link.languageModel,
+          temperature: link.temperature,
+        });
         continue;
       }
       if (link.factory) {
         const lm = this.buildFactoryModel(link.factory, link.model);
-        if (lm) out.push({ provider: link.factory, model: link.model, languageModel: lm, temperature: link.temperature });
+        if (lm)
+          out.push({
+            provider: link.factory,
+            model: link.model,
+            languageModel: lm,
+            temperature: link.temperature,
+          });
         continue;
       }
       if (link.endpoint) {
         const lm = this.buildEndpointModel(link.endpoint, link.model);
-        if (lm) out.push({ provider: link.endpoint, model: link.model, languageModel: lm, temperature: link.temperature });
+        if (lm)
+          out.push({
+            provider: link.endpoint,
+            model: link.model,
+            languageModel: lm,
+            temperature: link.temperature,
+          });
         continue;
       }
       const model = (tier ? this.tierModel(link.provider!, tier) : undefined) ?? link.model;
       const lm = this.buildLanguageModel(link.provider!, model, link.apiKey);
-      if (lm) out.push({ provider: link.provider!, model, languageModel: lm, temperature: link.temperature });
-      else if (keepKeyless?.includes(link.provider!)) out.push({ provider: link.provider!, model, temperature: link.temperature });
+      if (lm)
+        out.push({
+          provider: link.provider!,
+          model,
+          languageModel: lm,
+          temperature: link.temperature,
+        });
+      else if (keepKeyless?.includes(link.provider!))
+        out.push({ provider: link.provider!, model, temperature: link.temperature });
     }
     return out;
   }
@@ -674,8 +682,7 @@ export class ProviderRegistry {
         (extras?.cacheCreateTokens ?? 0) * cacheWriteRate +
         (extras?.cacheReadTokens ?? 0) * cacheReadRate) /
       1000;
-    const searchCents =
-      (extras?.webSearches ?? 0) * (this.cfg.webSearchCentsPerCall ?? 1);
+    const searchCents = (extras?.webSearches ?? 0) * (this.cfg.webSearchCentsPerCall ?? 1);
     return tokenCents + searchCents;
   }
 }

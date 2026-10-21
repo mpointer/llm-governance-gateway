@@ -187,7 +187,9 @@ const noAdminPin: ModelConfigStore = {
 // flows through `promptDefaults`, only through a `PromptStore` row, which is
 // how it actually reaches the Gateway in production (CP's
 // `DrizzleCpPromptStore` forwards `row.providerOverride` verbatim).
-function storeWith(rows: Record<string, { modelHint?: string; providerOverride?: string }>): PromptStore {
+function storeWith(
+  rows: Record<string, { modelHint?: string; providerOverride?: string }>,
+): PromptStore {
   return {
     getPrompt: async (slug: string): Promise<StoredPrompt | undefined> => {
       const row = rows[slug];
@@ -205,9 +207,7 @@ describe("Gateway.runStructured no longer forwards a bad modelHint to resolveDef
     };
     const gw = new Gateway({
       usage: new MemoryUsageStore(),
-      promptDefaults: [
-        { slug: "q", body: "Q {{q}}", variables: ["q"], modelHint: "standard" },
-      ],
+      promptDefaults: [{ slug: "q", body: "Q {{q}}", variables: ["q"], modelHint: "standard" }],
       modelConfig: store,
       caps: { userDailyCents: 0, anonDailyCents: 0, globalDailyCents: 0 },
     });
@@ -316,9 +316,7 @@ describe("Gateway.runStructured no longer forwards a bad modelHint to resolveDef
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const gw = new Gateway({
       usage: new MemoryUsageStore(),
-      promptDefaults: [
-        { slug: "q", body: "Q {{q}}", variables: ["q"], modelHint: "standard" },
-      ],
+      promptDefaults: [{ slug: "q", body: "Q {{q}}", variables: ["q"], modelHint: "standard" }],
       modelConfig: noAdminPin,
       caps: { userDailyCents: 0, anonDailyCents: 0, globalDailyCents: 0 },
     });
@@ -362,7 +360,6 @@ describe("Gateway.runStructured no longer forwards a bad modelHint to resolveDef
   });
 });
 
-
 // CareerPointers asked for this: their hint vocabulary is two known static
 // values they control, and their staging deployment already carries an
 // aiModelConfig pin row — so "drop the hint and fall through" concretely
@@ -376,9 +373,7 @@ describe("ProviderConfig.throwOnInvalidModelHint", () => {
   describe("registry level", () => {
     it("throws InvalidModelHintError instead of returning undefined", () => {
       const reg = new ProviderRegistry({ ...loud, defaultProvider: "anthropic" });
-      expect(() => reg.resolveModelHint("standard", "anthropic")).toThrow(
-        InvalidModelHintError,
-      );
+      expect(() => reg.resolveModelHint("standard", "anthropic")).toThrow(InvalidModelHintError);
     });
 
     it("carries the hint as written and the provider it was checked against", () => {
@@ -453,9 +448,7 @@ describe("ProviderConfig.throwOnInvalidModelHint", () => {
       };
       const gw = new Gateway({
         usage: new MemoryUsageStore(),
-        promptDefaults: [
-          { slug: "q", body: "Q {{q}}", variables: ["q"], modelHint: "standard" },
-        ],
+        promptDefaults: [{ slug: "q", body: "Q {{q}}", variables: ["q"], modelHint: "standard" }],
         modelConfig: store,
         providers: loud,
         caps: { userDailyCents: 0, anonDailyCents: 0, globalDailyCents: 0 },

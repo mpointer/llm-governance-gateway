@@ -64,10 +64,7 @@ export const EMBEDDING_PRICING: Record<string, { in: number; out: number }> = {
  * new dependency — the pattern the registry already uses for its aggregator
  * chat providers (openrouter/venice/together/huggingface).
  */
-const EMBEDDING_PROVIDERS: Record<
-  string,
-  { baseURL?: string; envVar: string }
-> = {
+const EMBEDDING_PROVIDERS: Record<string, { baseURL?: string; envVar: string }> = {
   openai: { envVar: "OPENAI_API_KEY" },
   voyage: { baseURL: "https://api.voyageai.com/v1", envVar: "VOYAGE_API_KEY" },
 };

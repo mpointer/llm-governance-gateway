@@ -14,12 +14,14 @@ const CRITERIA = {
   brevity: "No filler or repetition",
 };
 
-function make(over: {
-  random?: () => number;
-  caps?: object;
-  judgeScores?: Record<string, number>;
-  registerJudge?: boolean;
-} = {}) {
+function make(
+  over: {
+    random?: () => number;
+    caps?: object;
+    judgeScores?: Record<string, number>;
+    registerJudge?: boolean;
+  } = {},
+) {
   const usage = new MemoryUsageStore();
   const gw = new Gateway({
     usage,
@@ -99,9 +101,7 @@ describe("judge-in-path", () => {
     gw.registerMockResponder("judge:sum", () => ({ accuracy: 5, brevity: 5 }));
 
     // Priced model → nonzero estimate → skip. Main call must still succeed.
-    const res = await gw.runStructured(
-      opts({ criteria: CRITERIA, model: "claude-sonnet-4-6" }),
-    );
+    const res = await gw.runStructured(opts({ criteria: CRITERIA, model: "claude-sonnet-4-6" }));
     expect(res.object.answer).toBe("short");
     expect(usage.judgeScores).toHaveLength(0);
   });
