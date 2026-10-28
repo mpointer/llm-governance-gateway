@@ -450,6 +450,12 @@ export interface TaskRoutingConfig {
   /** Per-task governance constraints (e.g. { intake: { requireZdr: true } }). */
   constraints?: Record<string, { requireZdr?: boolean }>;
   store?: TaskOverrideStore;
+  /**
+   * When true, a task with an entry in `store` outranks a
+   * `ModelConfigStore.getOverride()` pin. Code defaults still lose to the pin.
+   * Default false: the pin skips the task layer and the store is never read.
+   */
+  overridesBeatPin?: boolean;
   /** Override cache TTL ms (default 30s). */
   overrideTtlMs?: number;
 }
