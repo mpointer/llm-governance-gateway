@@ -392,6 +392,19 @@ describe("streamText: caller abort", () => {
     expect(store.entries).toHaveLength(1);
     expect(store.entries[0]!.outputTokens).toBeGreaterThan(0);
     expect(store.entries[0]!.degraded ?? false).toBe(false);
+    expect(store.entries[0]!.aborted).toBe(true);
+  });
+
+  it("a non-Error abort reason reaches result unchanged (#78)", async () => {
+    const a = scriptedModel([partial(["Part"], "hang")]);
+    const { gw } = makeGw([{ model: a.model }]);
+    const ctl = new AbortController();
+    const res = await gw.streamText({ ...base, signal: ctl.signal });
+    const reading = (async () => {
+      for await (const _ of res.textStream) ctl.abort("user-cancel");
+    })();
+    await expect(res.result).rejects.toBe("user-cancel");
+    await reading.catch(() => {});
   });
 
   it("abort before any part: rejects, one zero-token row, no failover", async () => {
