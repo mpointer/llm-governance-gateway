@@ -241,6 +241,12 @@ Then delete the app's retry/failover code. Leaving both in place gives you two
 retry loops multiplying each other's attempts — a 3-link chain inside a 3-try
 loop is 9 provider calls for one logical request, and the ledger will show it.
 
+The deletion is conditional on every consumer migrating. One call site that
+cannot move keeps the app's whole old resolution layer alive. Streaming chat
+with tools used to be that call site; `streamText` now covers it on the AI SDK
+path. Native Anthropic streaming (`.messages.stream()`) is still open on #14,
+so an app that needs it keeps its own path for that call until it lands.
+
 #### If an admin picks models at runtime — implement `TaskOverrideStore` now
 
 `tasks.defaults` is **code**. If your model choice currently lives in a

@@ -1,6 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
-import { embedMany, generateObject, generateText, streamObject } from "ai";
-import type { LanguageModel, Schema } from "ai";
+import {
+  embedMany,
+  generateObject,
+  generateText,
+  streamObject,
+  streamText as aiStreamText,
+} from "ai";
+import type { LanguageModel, ModelMessage, Schema, StopCondition, ToolSet } from "ai";
 import { z } from "zod";
 import { backoffMs, isRetryable, isSchemaValidationError } from "./backoff.js";
 import {
@@ -13,7 +19,7 @@ import {
   StreamStallError,
   ZdrViolationError,
 } from "./errors.js";
-import { createConflatedCell, guardStream } from "./stream-guard.js";
+import { createConflatedCell, createQueuedCell, guardStream } from "./stream-guard.js";
 import {
   guardrailError,
   runGuardrail,
@@ -370,6 +376,91 @@ export interface StreamStructuredResult<O> {
   failovers: StreamFailover[];
 }
 
+/** Appended to a streamText turn that fails after its point of no return. */
+export const DEFAULT_DEGRADED_NOTICE =
+  "Sorry, I lost my connection partway through that answer. Please try again.";
+
+export interface StreamTextOptions {
+  /** Names the call: routing, ledger, guardrails, ZDR. Required. */
+  slug: string;
+  /** Caller-assembled system prompt; the gateway does not render it. */
+  system?: string;
+  /** Must end with a user message. */
+  messages: ModelMessage[];
+  /** Passed through; the AI SDK executes them. */
+  tools?: ToolSet;
+  stopWhen?: StopCondition<ToolSet> | StopCondition<ToolSet>[];
+  tier?: "fast" | "power";
+  task?: string;
+  orgId?: string;
+  /** Identity and cap scope: same semantics as RunTextOptions. */
+  userId?: string;
+  anonKey?: string;
+  route?: string;
+  app?: string;
+  temperature?: number;
+  requireZdr?: boolean;
+  signal?: AbortSignal;
+  metadata?: Record<string, unknown>;
+  /** Overrides DEFAULT_DEGRADED_NOTICE. */
+  degradedNotice?: string;
+  /** Time allowed to the first stream part. Overrides GatewayConfig.timeouts. */
+  streamFirstChunkMs?: number;
+  /** Time allowed between parts (paused while a tool runs). */
+  streamStallMs?: number;
+  /**
+   * Bound on the whole turn, tools included (the stall clock is paused while
+   * a tool runs, so this is the only bound on tool runtime). Overrides
+   * GatewayConfig.timeouts.deadlineMs.
+   */
+  deadlineMs?: number;
+}
+
+export interface StreamTextOutcome {
+  /** Everything the user saw, notice included (post-guardrail transform applied). */
+  text: string;
+  toolCalls: unknown[];
+  toolResults: unknown[];
+  usage: { inputTokens: number; outputTokens: number };
+  provider: string;
+  model: string;
+  degraded: boolean;
+  failovers: StreamFailover[];
+}
+
+export interface StreamTextResult {
+  traceId: string;
+  /** Text deltas. Never throws after the point of no return. */
+  textStream: AsyncIterable<string>;
+  /** Resolves AFTER the ledger row is written. */
+  result: Promise<StreamTextOutcome>;
+}
+
+/** Plain text of a message: string content, or its text parts joined. */
+function messageText(m: ModelMessage): string {
+  if (typeof m.content === "string") return m.content;
+  return (m.content as { type: string; text?: string }[])
+    .filter((p) => p.type === "text")
+    .map((p) => p.text ?? "")
+    .join("");
+}
+
+/** The SDK's fullStream minus its own "start" part, which it emits before the
+ *  model responds and would otherwise disarm the first-chunk clock. */
+async function* modelParts<T extends { type: string }>(src: AsyncIterable<T>): AsyncGenerator<T> {
+  for await (const p of src) if (p.type !== "start") yield p;
+}
+
+/** `m` with its text replaced by `text`, keeping any image/file parts. */
+function withText(m: ModelMessage, text: string): ModelMessage {
+  if (typeof m.content === "string") return { ...m, content: text } as ModelMessage;
+  const parts = m.content as { type: string }[];
+  const at = parts.findIndex((p) => p.type === "text");
+  const rest = parts.filter((p) => p.type !== "text");
+  rest.splice(at < 0 ? 0 : Math.min(at, rest.length), 0, { type: "text", text } as never);
+  return { ...m, content: rest } as ModelMessage;
+}
+
 async function* singleEmission<T>(value: T): AsyncGenerator<T> {
   yield value;
 }
@@ -627,6 +718,41 @@ export class Gateway {
       );
     }
     return resolved;
+  }
+
+  /**
+   * Link resolution shared by the streaming paths: admin pin (single, hard
+   * pin) > task chain > config chain > default, then the ZDR filter.
+   */
+  private async resolveStreamLinks(
+    orgId: string | undefined,
+    opts: { tier?: "fast" | "power"; task?: string },
+    requireZdr: boolean,
+  ): Promise<ChainLink[]> {
+    const adminOverride = await this.adminPin(orgId, opts.tier, opts.task);
+    let links: ChainLink[];
+    if (adminOverride) {
+      links = [this.registry.resolveDefault(adminOverride)];
+    } else if (opts.task && this.tasks) {
+      const taskChain = await this.tasks.chainForTask(opts.task, orgId);
+      links = taskChain.map((t) => ({
+        provider: t.provider,
+        model: t.model,
+        languageModel: this.registry.buildAny(t.provider, t.model) ?? undefined,
+      }));
+    } else {
+      const chainCfg = (await this.modelConfig?.getChain(orgId)) ?? [];
+      const built = this.registry.buildChain(chainCfg, opts.tier);
+      links = built.length > 0 ? built : [this.registry.resolveDefault()];
+    }
+    if (requireZdr) {
+      const eligible = links.filter((l) => this.registry.isZdr(l.provider, l.model));
+      if (eligible.length === 0) {
+        throw new ZdrViolationError(links[0]!.provider, links[0]!.model, "streaming chain");
+      }
+      links = eligible;
+    }
+    return links;
   }
 
   /** Per call > gateway config > unscoped. */
@@ -1268,33 +1394,7 @@ export class Gateway {
       };
     }
 
-    // Resolution: adminOverride (single, hard pin) > task chain > config
-    // chain > default. Everything but the admin pin can be multi-link.
-    const adminOverride = await this.adminPin(orgId, opts.tier, opts.task);
-    let links: { provider: string; model: string; languageModel?: LanguageModel }[];
-    if (adminOverride) {
-      links = [this.registry.resolveDefault(adminOverride)];
-    } else if (opts.task && this.tasks) {
-      const taskChain = await this.tasks.chainForTask(opts.task, orgId);
-      links = taskChain.map((t) => ({
-        provider: t.provider,
-        model: t.model,
-        languageModel: this.registry.buildAny(t.provider, t.model) ?? undefined,
-      }));
-    } else {
-      const chainCfg = (await this.modelConfig?.getChain(orgId)) ?? [];
-      const built = this.registry.buildChain(chainCfg, opts.tier);
-      links = built.length > 0 ? built : [this.registry.resolveDefault()];
-    }
-
-    const streamRequireZdr = fd.requireZdr;
-    if (streamRequireZdr) {
-      const eligible = links.filter((l) => this.registry.isZdr(l.provider, l.model));
-      if (eligible.length === 0) {
-        throw new ZdrViolationError(links[0]!.provider, links[0]!.model, "streaming chain");
-      }
-      links = eligible;
-    }
+    let links = await this.resolveStreamLinks(orgId, opts, fd.requireZdr);
     links = links.filter((l) => l.languageModel);
     if (links.length === 0) {
       throw new Error("No API key for any streaming link.");
@@ -1460,6 +1560,370 @@ export class Gateway {
       object: objectPromise,
       failovers,
     };
+  }
+
+  // ===========================================================================
+  // streamText — governed text stream with tool calling (#14, Scout half).
+  // See docs/design/streaming-text.md. No cache, no judge.
+  // ===========================================================================
+
+  async streamText(opts: StreamTextOptions): Promise<StreamTextResult> {
+    const last = opts.messages.at(-1);
+    const lastUserText = last?.role === "user" ? messageText(last) : "";
+    if (!lastUserText) throw new Error("streamText: messages must end with a user message");
+
+    const validate = (raw: unknown): string => {
+      if (typeof raw !== "string")
+        throw new Error("a streamText post hook must transform to a string");
+      return raw;
+    };
+    // The front door renders `promptBody` as the prompt: here, the last user
+    // message, so the pre-guardrail sees it and a transform replaces it.
+    const fdOpts: FrontDoorOptions<undefined> = {
+      ...opts,
+      input: undefined,
+      variables: () => ({}),
+      promptBody: lastUserText,
+      cache: false,
+    };
+    const fd = await this.frontDoor<undefined, string>("streamText", fdOpts, validate);
+    const { traceId, orgId, prompt, temperature, guardrailRecords, failOpen } = fd;
+    const messages: ModelMessage[] = [
+      ...opts.messages.slice(0, -1),
+      prompt === lastUserText ? last! : withText(last!, prompt),
+    ];
+
+    const row = (f: {
+      provider: string;
+      model: string;
+      inTok: number;
+      outTok: number;
+      durationMs: number;
+      text: string;
+      toolCalls: number;
+      degraded?: boolean;
+    }) => ({
+      metadata: { ...opts.metadata, toolCalls: f.toolCalls },
+      ...(f.degraded ? { degraded: true } : {}),
+      guardrails: guardrailRecords.length > 0 ? guardrailRecords : null,
+      orgId,
+      app: opts.app,
+      userId: opts.userId ?? null,
+      route: opts.route ?? null,
+      promptSlug: opts.slug,
+      provider: f.provider,
+      model: f.model,
+      inputTokens: f.inTok,
+      outputTokens: f.outTok,
+      estimatedCostCents: this.registry.estimateCostCents(f.model, f.inTok, f.outTok),
+      cacheHit: false,
+      traceId,
+      durationMs: f.durationMs,
+      inputText: prompt,
+      outputText: f.text,
+    });
+
+    if (this.mock) {
+      const responder = this.mockResponders.get(opts.slug);
+      if (!responder) {
+        throw new Error(`Mock mode is on but no responder registered for "${opts.slug}".`);
+      }
+      const text = String(responder({ system: opts.system, messages } as never));
+      const usage = {
+        inputTokens: Math.ceil(prompt.length / 4),
+        outputTokens: Math.ceil(text.length / 4),
+      };
+      await this.logUsage(
+        row({
+          provider: "mock",
+          model: "mock",
+          inTok: usage.inputTokens,
+          outTok: usage.outputTokens,
+          durationMs: 0,
+          text,
+          toolCalls: 0,
+        }),
+      );
+      return {
+        traceId,
+        textStream: singleEmission(text),
+        result: Promise.resolve({
+          text,
+          toolCalls: [],
+          toolResults: [],
+          usage,
+          provider: "mock",
+          model: "mock",
+          degraded: false,
+          failovers: [],
+        }),
+      };
+    }
+
+    const links = (await this.resolveStreamLinks(orgId, opts, fd.requireZdr)).filter(
+      (l) => l.languageModel,
+    );
+    if (links.length === 0) throw new Error("No API key for any streaming link.");
+
+    const start = Date.now();
+    const firstChunkMs =
+      opts.streamFirstChunkMs ?? this.timeouts?.streamFirstChunkMs ?? DEFAULT_STREAM_FIRST_CHUNK_MS;
+    const stallMs = opts.streamStallMs ?? this.timeouts?.streamStallMs ?? DEFAULT_STREAM_STALL_MS;
+
+    const out = createQueuedCell<string>();
+    let resolveResult!: (o: StreamTextOutcome) => void;
+    let rejectResult!: (e: unknown) => void;
+    const result = new Promise<StreamTextOutcome>((res, rej) => {
+      resolveResult = res;
+      rejectResult = rej;
+    });
+    void result.catch(() => {});
+    const failovers: StreamFailover[] = [];
+
+    // Input size of the first model call, for estimating a cut-off step's
+    // cost. Later steps also carry every earlier step's output and tool I/O.
+    const inputChars = (opts.system ?? "").length + messages.map(messageText).join("").length;
+    const deadlineMs = opts.deadlineMs ?? this.timeouts?.deadlineMs;
+
+    // Ledger-first, as in streamStructured: an abandoned link still spent.
+    const ledgerFailedLink = async (provider: string, model: string, ms: number) => {
+      await this.logUsage(
+        row({ provider, model, inTok: 0, outTok: 0, durationMs: ms, text: "", toolCalls: 0 }),
+      );
+    };
+
+    void (async () => {
+      let lastErr: unknown;
+      for (let i = 0; i < links.length; i++) {
+        const link = links[i]!;
+        const linkStart = Date.now();
+        const controller = new AbortController();
+        const stream = aiStreamText({
+          model: link.languageModel!,
+          messages,
+          abortSignal: controller.signal,
+          maxRetries: 0, // the gateway owns failover
+          onError: () => {}, // surfaced via the part stream; the SDK default logs it again
+          ...(opts.system ? { system: opts.system } : {}),
+          ...(opts.tools ? { tools: opts.tools } : {}),
+          ...(opts.stopWhen ? { stopWhen: opts.stopWhen } : {}),
+          ...(temperature !== undefined ? { temperature } : {}),
+        });
+        const guard = guardStream(modelParts(stream.fullStream), {
+          controller,
+          firstChunkMs,
+          stallMs,
+          mode: "queue",
+          ...(opts.signal ? { callerSignal: opts.signal } : {}),
+          onTrip: (phase, waitedMs) =>
+            new StreamStallError(phase, waitedMs, link.provider, link.model),
+          onCallerAbort: (reason) =>
+            reason instanceof Error ? reason : new Error("Stream aborted by caller"),
+        });
+        let text = "";
+        let stepText = ""; // output of the step in flight, for the cut-off estimate
+        const toolCalls: unknown[] = [];
+        const toolResults: unknown[] = [];
+        let total = { inputTokens: 0, outputTokens: 0 };
+        const done = { inputTokens: 0, outputTokens: 0 }; // completed steps
+        // After the first text delta or tool call, a new link would repeat
+        // text the user saw or run a tool twice: degrade instead (spec).
+        let pastNoReturn = false;
+        let pendingTools = 0;
+        let carried = 0; // chars earlier steps add to the next step's input
+        let stepChars = 0;
+        let streamDone = false;
+        let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const deadline =
+            deadlineMs === undefined
+              ? new Promise<never>(() => {})
+              : new Promise<never>((_, reject) => {
+                  const elapsed = Date.now() - start;
+                  deadlineTimer = setTimeout(
+                    () => {
+                      const err = new DeadlineExceededError(deadlineMs, Date.now() - start);
+                      controller.abort(err);
+                      reject(err);
+                    },
+                    Math.max(0, deadlineMs - elapsed),
+                  );
+                });
+          await Promise.race([
+            deadline,
+            (async () => {
+              for await (const part of guard.stream) {
+                if (part.type === "text-delta") {
+                  pastNoReturn = true;
+                  text += part.text;
+                  stepText += part.text;
+                  stepChars += part.text.length;
+                  out.publish(part.text);
+                } else if (part.type === "tool-call") {
+                  pastNoReturn = true;
+                  toolCalls.push(part);
+                  stepChars += JSON.stringify(part.input ?? null).length;
+                  // A running tool is not a silent provider.
+                  if (pendingTools++ === 0) guard.pauseClock();
+                } else if (part.type === "tool-result" || part.type === "tool-error") {
+                  if (part.type === "tool-result") {
+                    toolResults.push(part);
+                    stepChars += JSON.stringify(part.output ?? null).length;
+                  }
+                  if (--pendingTools === 0) guard.resumeClock();
+                } else if (part.type === "finish-step") {
+                  done.inputTokens += part.usage.inputTokens ?? 0;
+                  done.outputTokens += part.usage.outputTokens ?? 0;
+                  stepText = "";
+                  carried += stepChars;
+                  stepChars = 0;
+                } else if (part.type === "finish")
+                  total = {
+                    inputTokens: part.totalUsage.inputTokens ?? 0,
+                    outputTokens: part.totalUsage.outputTokens ?? 0,
+                  };
+                else if (part.type === "error") throw part.error;
+              }
+            })(),
+            guard.tripped.then((err) => {
+              throw err;
+            }),
+          ]);
+          streamDone = true;
+          // Post hook on the final text. The deltas are already out, so a
+          // block can only reject `result`; a transform changes result.text.
+          let finalText = text;
+          let blocked: GuardrailError | undefined;
+          if (this.guardrails?.post) {
+            const post = await this.applyPostGuardrail(
+              this.postCtx(fdOpts, prompt, traceId, orgId, text, link.provider, link.model),
+              text,
+              validate,
+              failOpen,
+              guardrailRecords,
+            );
+            finalText = post.value;
+            if (post.blocked) blocked = guardrailError(post.blocked, text);
+          }
+          await this.logUsage(
+            row({
+              provider: link.provider,
+              model: link.model,
+              inTok: total.inputTokens,
+              outTok: total.outputTokens,
+              durationMs: Date.now() - start,
+              text: finalText,
+              toolCalls: toolCalls.length,
+            }),
+          );
+          out.close();
+          if (blocked) {
+            rejectResult(blocked);
+            return;
+          }
+          resolveResult({
+            text: finalText,
+            toolCalls,
+            toolResults,
+            usage: total,
+            provider: link.provider,
+            model: link.model,
+            degraded: false,
+            failovers,
+          });
+          return;
+        } catch (err) {
+          if (streamDone) {
+            // The model finished; the failure is ours (post hook, ledger).
+            // Not a link failure: no notice, no failover.
+            out.close();
+            rejectResult(err);
+            return;
+          }
+          lastErr = err;
+          const callerAborted = opts.signal?.aborted === true;
+          const used = {
+            inputTokens: done.inputTokens + Math.ceil((inputChars + carried) / 4),
+            outputTokens: done.outputTokens + Math.ceil(stepText.length / 4),
+          };
+          if (pastNoReturn && callerAborted) {
+            // They asked to stop: no notice, but the spend is real.
+            await this.logUsage(
+              row({
+                provider: link.provider,
+                model: link.model,
+                inTok: used.inputTokens,
+                outTok: used.outputTokens,
+                durationMs: Date.now() - start,
+                text,
+                toolCalls: toolCalls.length,
+              }),
+            );
+            break;
+          }
+          if (pastNoReturn) {
+            const notice = opts.degradedNotice ?? DEFAULT_DEGRADED_NOTICE;
+            const delta = text ? `\n\n${notice}` : notice;
+            out.publish(delta);
+            text += delta;
+            await this.logUsage(
+              row({
+                provider: link.provider,
+                model: link.model,
+                inTok: used.inputTokens,
+                outTok: used.outputTokens,
+                durationMs: Date.now() - start,
+                text,
+                toolCalls: toolCalls.length,
+                degraded: true,
+              }),
+            );
+            out.close();
+            resolveResult({
+              text,
+              toolCalls,
+              toolResults,
+              usage: used,
+              provider: link.provider,
+              model: link.model,
+              degraded: true,
+              failovers,
+            });
+            return;
+          }
+          await ledgerFailedLink(link.provider, link.model, Date.now() - linkStart);
+          const advanceable =
+            !callerAborted && (err instanceof StreamStallError || isRetryable(err));
+          if (advanceable && i < links.length - 1) {
+            const failover: StreamFailover = {
+              provider: link.provider,
+              model: link.model,
+              reason: err instanceof StreamStallError ? "stall" : "retryable",
+              hadPartialOutput: false,
+            };
+            failovers.push(failover);
+            this.emitObs("onStreamFailover", this.obs?.onStreamFailover, { traceId, ...failover });
+            continue;
+          }
+          break;
+        } finally {
+          clearTimeout(deadlineTimer);
+          guard.dispose();
+        }
+      }
+      const e =
+        lastErr instanceof Error ? lastErr : new Error("streamText: no link produced a result");
+      out.fail(e);
+      rejectResult(e);
+    })().catch((e: unknown) => {
+      // Last resort (e.g. the ledger itself failing on an error path): settle
+      // both ends rather than leave the consumer hanging.
+      const err = e instanceof Error ? e : new Error(String(e));
+      out.fail(err);
+      rejectResult(err);
+    });
+
+    return { traceId, textStream: out.stream, result };
   }
 
   // ===========================================================================
@@ -2177,7 +2641,7 @@ export class Gateway {
   // ===========================================================================
 
   private async frontDoor<I, V>(
-    kind: "runStructured" | "runText" | "streamStructured",
+    kind: "runStructured" | "runText" | "streamStructured" | "streamText",
     opts: FrontDoorOptions<I>,
     validate: (raw: unknown) => V,
   ): Promise<FrontDoor<V>> {
