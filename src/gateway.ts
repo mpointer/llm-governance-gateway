@@ -1,5 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
-import { embedMany, generateObject, generateText, streamObject } from "ai";
+import {
+  embedMany,
+  generateObject,
+  generateText,
+  streamObject,
+  streamText as aiStreamText,
+} from "ai";
 import type { LanguageModel, ModelMessage, Schema, StopCondition, ToolSet } from "ai";
 import { z } from "zod";
 import { backoffMs, isRetryable, isSchemaValidationError } from "./backoff.js";
@@ -13,7 +19,7 @@ import {
   StreamStallError,
   ZdrViolationError,
 } from "./errors.js";
-import { createConflatedCell, guardStream } from "./stream-guard.js";
+import { createConflatedCell, createQueuedCell, guardStream } from "./stream-guard.js";
 import {
   guardrailError,
   runGuardrail,
@@ -422,6 +428,15 @@ export interface StreamTextResult {
   textStream: AsyncIterable<string>;
   /** Resolves AFTER the ledger row is written. */
   result: Promise<StreamTextOutcome>;
+}
+
+/** Plain text of a message: string content, or its text parts joined. */
+function messageText(m: ModelMessage): string {
+  if (typeof m.content === "string") return m.content;
+  return (m.content as { type: string; text?: string }[])
+    .filter((p) => p.type === "text")
+    .map((p) => p.text ?? "")
+    .join("");
 }
 
 async function* singleEmission<T>(value: T): AsyncGenerator<T> {
@@ -1523,6 +1538,189 @@ export class Gateway {
       object: objectPromise,
       failovers,
     };
+  }
+
+  // ===========================================================================
+  // streamText — governed text stream with tool calling (#14, Scout half).
+  // See docs/design/streaming-text.md. No cache, no judge.
+  // ===========================================================================
+
+  async streamText(opts: StreamTextOptions): Promise<StreamTextResult> {
+    const last = opts.messages.at(-1);
+    const lastUserText = last?.role === "user" ? messageText(last) : "";
+    if (!lastUserText) throw new Error("streamText: messages must end with a user message");
+
+    const validate = (raw: unknown): string => {
+      if (typeof raw !== "string") throw new Error("a streamText post hook must transform to a string");
+      return raw;
+    };
+    // The front door renders `promptBody` as the prompt: here, the last user
+    // message, so the pre-guardrail sees it and a transform replaces it.
+    const fdOpts: FrontDoorOptions<undefined> = {
+      ...opts,
+      input: undefined,
+      variables: () => ({}),
+      promptBody: lastUserText,
+      cache: false,
+    };
+    const fd = await this.frontDoor<undefined, string>("streamText", fdOpts, validate);
+    const { traceId, orgId, prompt, temperature } = fd;
+    const messages: ModelMessage[] = [
+      ...opts.messages.slice(0, -1),
+      { role: "user", content: prompt },
+    ];
+
+    const row = (f: {
+      provider: string;
+      model: string;
+      inTok: number;
+      outTok: number;
+      durationMs: number;
+      text: string;
+      toolCalls: number;
+    }) => ({
+      metadata: { ...opts.metadata, toolCalls: f.toolCalls },
+      orgId,
+      app: opts.app,
+      userId: opts.userId ?? null,
+      route: opts.route ?? null,
+      promptSlug: opts.slug,
+      provider: f.provider,
+      model: f.model,
+      inputTokens: f.inTok,
+      outputTokens: f.outTok,
+      estimatedCostCents: this.registry.estimateCostCents(f.model, f.inTok, f.outTok),
+      cacheHit: false,
+      traceId,
+      durationMs: f.durationMs,
+      inputText: prompt,
+      outputText: f.text,
+    });
+
+    if (this.mock) {
+      const responder = this.mockResponders.get(opts.slug);
+      if (!responder) {
+        throw new Error(`Mock mode is on but no responder registered for "${opts.slug}".`);
+      }
+      const text = String(responder({ system: opts.system, messages } as never));
+      const usage = { inputTokens: Math.ceil(prompt.length / 4), outputTokens: Math.ceil(text.length / 4) };
+      await this.logUsage(
+        row({ provider: "mock", model: "mock", inTok: usage.inputTokens, outTok: usage.outputTokens, durationMs: 0, text, toolCalls: 0 }),
+      );
+      return {
+        traceId,
+        textStream: singleEmission(text),
+        result: Promise.resolve({
+          text,
+          toolCalls: [],
+          toolResults: [],
+          usage,
+          provider: "mock",
+          model: "mock",
+          degraded: false,
+          failovers: [],
+        }),
+      };
+    }
+
+    const links = (await this.resolveStreamLinks(orgId, opts, fd.requireZdr)).filter(
+      (l) => l.languageModel,
+    );
+    if (links.length === 0) throw new Error("No API key for any streaming link.");
+
+    const start = Date.now();
+    const firstChunkMs =
+      opts.streamFirstChunkMs ?? this.timeouts?.streamFirstChunkMs ?? DEFAULT_STREAM_FIRST_CHUNK_MS;
+    const stallMs = opts.streamStallMs ?? this.timeouts?.streamStallMs ?? DEFAULT_STREAM_STALL_MS;
+
+    const out = createQueuedCell<string>();
+    let resolveResult!: (o: StreamTextOutcome) => void;
+    let rejectResult!: (e: unknown) => void;
+    const result = new Promise<StreamTextOutcome>((res, rej) => {
+      resolveResult = res;
+      rejectResult = rej;
+    });
+    void result.catch(() => {});
+    const failovers: StreamFailover[] = [];
+
+    void (async () => {
+      const link = links[0]!;
+      const controller = new AbortController();
+      const stream = aiStreamText({
+        model: link.languageModel!,
+        messages,
+        abortSignal: controller.signal,
+        ...(opts.system ? { system: opts.system } : {}),
+        ...(opts.tools ? { tools: opts.tools } : {}),
+        ...(opts.stopWhen ? { stopWhen: opts.stopWhen } : {}),
+        ...(temperature !== undefined ? { temperature } : {}),
+      });
+      const guard = guardStream(stream.fullStream, {
+        controller,
+        firstChunkMs,
+        stallMs,
+        mode: "queue",
+        ...(opts.signal ? { callerSignal: opts.signal } : {}),
+        onTrip: (phase, waitedMs) => new StreamStallError(phase, waitedMs, link.provider, link.model),
+        onCallerAbort: (reason) => (reason instanceof Error ? reason : new Error("Stream aborted by caller")),
+      });
+      let text = "";
+      const toolCalls: unknown[] = [];
+      const toolResults: unknown[] = [];
+      let total = { inputTokens: 0, outputTokens: 0 };
+      try {
+        await Promise.race([
+          (async () => {
+            for await (const part of guard.stream) {
+              if (part.type === "text-delta") {
+                text += part.text;
+                out.publish(part.text);
+              } else if (part.type === "tool-call") toolCalls.push(part);
+              else if (part.type === "tool-result") toolResults.push(part);
+              else if (part.type === "finish")
+                total = {
+                  inputTokens: part.totalUsage.inputTokens ?? 0,
+                  outputTokens: part.totalUsage.outputTokens ?? 0,
+                };
+              else if (part.type === "error") throw part.error;
+            }
+          })(),
+          guard.tripped.then((err) => {
+            throw err;
+          }),
+        ]);
+        await this.logUsage(
+          row({
+            provider: link.provider,
+            model: link.model,
+            inTok: total.inputTokens,
+            outTok: total.outputTokens,
+            durationMs: Date.now() - start,
+            text,
+            toolCalls: toolCalls.length,
+          }),
+        );
+        out.close();
+        resolveResult({
+          text,
+          toolCalls,
+          toolResults,
+          usage: total,
+          provider: link.provider,
+          model: link.model,
+          degraded: false,
+          failovers,
+        });
+      } catch (err) {
+        const e = err instanceof Error ? err : new Error(String(err));
+        out.fail(e);
+        rejectResult(e);
+      } finally {
+        guard.dispose();
+      }
+    })();
+
+    return { traceId, textStream: out.stream, result };
   }
 
   // ===========================================================================
