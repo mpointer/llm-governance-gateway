@@ -4,12 +4,12 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { stepCountIs, tool, type LanguageModel, type ModelMessage } from "ai";
-import { Gateway, type StreamTextOptions } from "./gateway.js";
+import { DEFAULT_DEGRADED_NOTICE, Gateway, type StreamTextOptions } from "./gateway.js";
 import { RateLimitError } from "./errors.js";
 import { MemoryRateLimiter, MemoryUsageStore } from "./adapters/memory.js";
 import type { GatewayConfig } from "./types.js";
 
-type Step = { parts: unknown[] } | "hang" | Error;
+type Step = { parts: unknown[]; then?: "hang" | Error } | "hang" | Error;
 
 const usage = (i: number, o: number) => ({ inputTokens: i, outputTokens: o, totalTokens: i + o });
 
@@ -42,7 +42,14 @@ export function scriptedModel(steps: Step[], id = "fake-model") {
         stream: new ReadableStream({
           start(c) {
             for (const p of step.parts) c.enqueue(p);
-            c.close();
+            // Error on a later tick: c.error() discards chunks still queued.
+            if (step.then instanceof Error) {
+              const err = step.then;
+              setTimeout(() => c.error(err), 0);
+            }
+            else if (step.then === "hang")
+              opts.abortSignal?.addEventListener("abort", () => c.error(new Error("aborted")));
+            else c.close();
           },
         }),
       };
@@ -264,5 +271,105 @@ describe("streamText: failover before the point of no return", () => {
     const out = await (await gw.streamText({ ...base, requireZdr: true })).result;
     expect(out.text).toBe("b");
     expect(a.state.calls).toBe(0);
+  });
+});
+
+/** Text deltas with no finish, then `then`. */
+const partial = (deltas: string[], then: "hang" | Error): Step => ({
+  parts: [
+    { type: "stream-start", warnings: [] },
+    { type: "text-start", id: "t" },
+    ...deltas.map((delta) => ({ type: "text-delta", id: "t", delta })),
+  ],
+  then,
+});
+
+describe("streamText: degrade after the point of no return", () => {
+  it("a stall after text degrades with the default notice", async () => {
+    const a = scriptedModel([partial(["Part"], "hang")]);
+    const b = scriptedModel([textStep(["never"])]);
+    const { gw, store } = makeGw([{ model: a.model }, { model: b.model }]);
+    const res = await gw.streamText({ ...base, streamStallMs: 50 });
+    expect(await collect(res.textStream)).toEqual(["Part", "\n\n" + DEFAULT_DEGRADED_NOTICE]);
+    const out = await res.result;
+    expect(out.degraded).toBe(true);
+    expect(out.text).toBe("Part\n\n" + DEFAULT_DEGRADED_NOTICE);
+    expect(b.state.calls).toBe(0);
+    expect(store.entries).toHaveLength(1);
+    expect(store.entries[0]!.degraded).toBe(true);
+    expect(store.entries[0]!.estimatedCostCents).toBeGreaterThan(0);
+  });
+
+  it.each([503, 400])("an error (%i) after text degrades without failover", async (status) => {
+    const a = scriptedModel([partial(["Part"], httpError(status))]);
+    const b = scriptedModel([textStep(["never"])]);
+    const { gw } = makeGw([{ model: a.model }, { model: b.model }]);
+    const res = await gw.streamText(base);
+    expect(await collect(res.textStream)).toEqual(["Part", "\n\n" + DEFAULT_DEGRADED_NOTICE]);
+    expect((await res.result).degraded).toBe(true);
+    expect(b.state.calls).toBe(0);
+  });
+
+  it("degradedNotice overrides the default", async () => {
+    const a = scriptedModel([partial(["Part"], httpError(503))]);
+    const { gw } = makeGw([{ model: a.model }]);
+    const res = await gw.streamText({ ...base, degradedNotice: "Oops." });
+    expect(await collect(res.textStream)).toEqual(["Part", "\n\nOops."]);
+  });
+
+  it("a failure after a tool call but before text degrades to notice-only", async () => {
+    const a = scriptedModel([toolStep("lookup", { q: "x" }), httpError(503)]);
+    const b = scriptedModel([textStep(["never"])]);
+    const { gw } = makeGw([{ model: a.model }, { model: b.model }]);
+    let executed = 0;
+    const res = await gw.streamText({
+      ...base,
+      tools: {
+        lookup: tool({
+          inputSchema: z.object({ q: z.string() }),
+          execute: async () => {
+            executed++;
+            return { ok: true };
+          },
+        }),
+      },
+      stopWhen: stepCountIs(4),
+    });
+    expect(await collect(res.textStream)).toEqual([DEFAULT_DEGRADED_NOTICE]);
+    expect((await res.result).degraded).toBe(true);
+    expect(executed).toBe(1);
+    expect(b.state.calls).toBe(0);
+  });
+
+  it("a slow tool between text steps does not trip the stall clock", async () => {
+    const step1: Step = {
+      parts: [
+        { type: "stream-start", warnings: [] },
+        { type: "text-start", id: "t" },
+        { type: "text-delta", id: "t", delta: "a" },
+        { type: "text-end", id: "t" },
+        { type: "tool-call", toolCallId: "c1", toolName: "slow", input: "{}" },
+        { type: "finish", finishReason: "tool-calls", usage: usage(1, 1) },
+      ],
+    };
+    const a = scriptedModel([step1, textStep(["b"])]);
+    const { gw } = makeGw([{ model: a.model }]);
+    const res = await gw.streamText({
+      ...base,
+      streamStallMs: 50,
+      tools: {
+        slow: tool({
+          inputSchema: z.object({}),
+          execute: async () => {
+            await new Promise((r) => setTimeout(r, 200));
+            return { ok: true };
+          },
+        }),
+      },
+      stopWhen: stepCountIs(4),
+    });
+    const out = await res.result;
+    expect(out.degraded).toBe(false);
+    expect(out.text).toBe("ab");
   });
 });

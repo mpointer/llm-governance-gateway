@@ -1584,8 +1584,10 @@ export class Gateway {
       durationMs: number;
       text: string;
       toolCalls: number;
+      degraded?: boolean;
     }) => ({
       metadata: { ...opts.metadata, toolCalls: f.toolCalls },
+      ...(f.degraded ? { degraded: true } : {}),
       orgId,
       app: opts.app,
       userId: opts.userId ?? null,
@@ -1649,6 +1651,9 @@ export class Gateway {
     void result.catch(() => {});
     const failovers: StreamFailover[] = [];
 
+    // Input size of one model call, for estimating a cut-off step's cost.
+    const inputChars = (opts.system ?? "").length + messages.map(messageText).join("").length;
+
     // Ledger-first, as in streamStructured: an abandoned link still spent.
     const ledgerFailedLink = async (provider: string, model: string, ms: number) => {
       await this.logUsage(
@@ -1684,19 +1689,37 @@ export class Gateway {
             reason instanceof Error ? reason : new Error("Stream aborted by caller"),
         });
         let text = "";
+        let stepText = ""; // output of the step in flight, for the cut-off estimate
         const toolCalls: unknown[] = [];
         const toolResults: unknown[] = [];
         let total = { inputTokens: 0, outputTokens: 0 };
+        const done = { inputTokens: 0, outputTokens: 0 }; // completed steps
+        // After the first text delta or tool call, a new link would repeat
+        // text the user saw or run a tool twice: degrade instead (spec).
+        let pastNoReturn = false;
+        let pendingTools = 0;
         try {
           await Promise.race([
             (async () => {
               for await (const part of guard.stream) {
                 if (part.type === "text-delta") {
+                  pastNoReturn = true;
                   text += part.text;
+                  stepText += part.text;
                   out.publish(part.text);
-                } else if (part.type === "tool-call") toolCalls.push(part);
-                else if (part.type === "tool-result") toolResults.push(part);
-                else if (part.type === "finish")
+                } else if (part.type === "tool-call") {
+                  pastNoReturn = true;
+                  toolCalls.push(part);
+                  // A running tool is not a silent provider.
+                  if (pendingTools++ === 0) guard.pauseClock();
+                } else if (part.type === "tool-result" || part.type === "tool-error") {
+                  if (part.type === "tool-result") toolResults.push(part);
+                  if (--pendingTools === 0) guard.resumeClock();
+                } else if (part.type === "finish-step") {
+                  done.inputTokens += part.usage.inputTokens ?? 0;
+                  done.outputTokens += part.usage.outputTokens ?? 0;
+                  stepText = "";
+                } else if (part.type === "finish")
                   total = {
                     inputTokens: part.totalUsage.inputTokens ?? 0,
                     outputTokens: part.totalUsage.outputTokens ?? 0,
@@ -1733,8 +1756,42 @@ export class Gateway {
           return;
         } catch (err) {
           lastErr = err;
-          await ledgerFailedLink(link.provider, link.model, Date.now() - linkStart);
           const callerAborted = opts.signal?.aborted === true;
+          if (pastNoReturn && !callerAborted) {
+            const notice = opts.degradedNotice ?? DEFAULT_DEGRADED_NOTICE;
+            const delta = text ? `\n\n${notice}` : notice;
+            out.publish(delta);
+            text += delta;
+            const used = {
+              inputTokens: done.inputTokens + Math.ceil(inputChars / 4),
+              outputTokens: done.outputTokens + Math.ceil(stepText.length / 4),
+            };
+            await this.logUsage(
+              row({
+                provider: link.provider,
+                model: link.model,
+                inTok: used.inputTokens,
+                outTok: used.outputTokens,
+                durationMs: Date.now() - start,
+                text,
+                toolCalls: toolCalls.length,
+                degraded: true,
+              }),
+            );
+            out.close();
+            resolveResult({
+              text,
+              toolCalls,
+              toolResults,
+              usage: used,
+              provider: link.provider,
+              model: link.model,
+              degraded: true,
+              failovers,
+            });
+            return;
+          }
+          await ledgerFailedLink(link.provider, link.model, Date.now() - linkStart);
           const advanceable =
             !callerAborted && (err instanceof StreamStallError || isRetryable(err));
           if (advanceable && i < links.length - 1) {
