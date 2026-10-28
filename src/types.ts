@@ -578,6 +578,18 @@ export interface GatewayConfig {
   batch?: import("./batch.js").BatchConfig;
   /** Deterministic mock mode: no provider calls; responders supply outputs. */
   mock?: boolean;
+  /**
+   * Which provider errors are transient: retried on the same link, and on a
+   * stream, failed over. Replaces the built-in `isRetryable` (HTTP 429 and
+   * 5xx only) everywhere. Compose with it to widen rather than replace, e.g.
+   * to retry network errors that carry no status:
+   *
+   *   isRetryable: (err) => isRetryable(err) || isNetworkError(err)
+   *
+   * A caller abort and our own attempt timeout are decided before this runs,
+   * so the predicate never turns them into retries.
+   */
+  isRetryable?: (err: unknown) => boolean;
   /** Tag written to every usage row (multi-app deployments). */
   appId?: string;
   /**

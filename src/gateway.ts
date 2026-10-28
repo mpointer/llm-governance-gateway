@@ -122,6 +122,8 @@ async function attemptGenerate<O>(
   attemptMs = DEFAULT_ATTEMPT_MS,
   /** For error messages only. */
   who: { provider: string; model: string } = { provider: "unknown", model: "unknown" },
+  /** Which errors retry on the same link (GatewayConfig.isRetryable). */
+  retryable: (err: unknown) => boolean = isRetryable,
 ): Promise<AttemptResult<O>> {
   let currentPrompt = prompt;
   let repaired = false;
@@ -167,7 +169,7 @@ async function attemptGenerate<O>(
           "\nRespond again with ONLY JSON that satisfies the schema exactly.";
         continue;
       }
-      if (!isRetryable(err) || transientRetries >= 2) throw err;
+      if (!retryable(err) || transientRetries >= 2) throw err;
       await sleep(budget.clampDelay(backoffMs(transientRetries, err)), budget.callerSignal);
       transientRetries++;
     } finally {
@@ -626,6 +628,7 @@ export class Gateway {
   readonly registry: ProviderRegistry;
   private readonly caps;
   private readonly mock: boolean;
+  private readonly retryable: (err: unknown) => boolean;
   private readonly appId: string | null;
   private readonly cacheTtlSeconds: number;
   private readonly timeouts: GatewayConfig["timeouts"];
@@ -654,6 +657,7 @@ export class Gateway {
       : undefined;
     this.caps = cfg.caps ?? {};
     this.mock = cfg.mock ?? false;
+    this.retryable = cfg.isRetryable ?? isRetryable;
     this.appId = cfg.appId ?? null;
     this.cacheTtlSeconds = cfg.cacheTtlSeconds ?? DEFAULT_CACHE_TTL_SECONDS;
     this.timeouts = cfg.timeouts;
@@ -1019,7 +1023,7 @@ export class Gateway {
             throw new AttemptTimeoutError(linkProvider, linkModel, attemptMs);
           }
           if (budget.callerSignal?.aborted) throw budget.callerSignal.reason;
-          if (!isRetryable(err) || retry >= 2) throw err;
+          if (!this.retryable(err) || retry >= 2) throw err;
           await sleep(budget.clampDelay(backoffMs(retry, err)), budget.callerSignal);
           retry++;
         } finally {
@@ -1056,7 +1060,7 @@ export class Gateway {
             throw new AttemptTimeoutError(linkProvider, linkModel, attemptMs);
           }
           if (budget.callerSignal?.aborted) throw budget.callerSignal.reason;
-          if (!isRetryable(err) || retry >= 2) throw err;
+          if (!this.retryable(err) || retry >= 2) throw err;
           await sleep(budget.clampDelay(backoffMs(retry, err)), budget.callerSignal);
           retry++;
         } finally {
@@ -1189,7 +1193,7 @@ export class Gateway {
           // error or an attempt timeout. Previously runText also fell through
           // on NON-retryable errors whenever the chain had more than one link,
           // so a 400 burned a call on the next provider too.
-          const advance = isRetryable(err) || err instanceof AttemptTimeoutError;
+          const advance = this.retryable(err) || err instanceof AttemptTimeoutError;
           if (!advance) throw err;
           console.warn(
             `[llm-gateway] runText "${link.provider}/${link.model}" failed (${
@@ -1519,7 +1523,7 @@ export class Gateway {
           // somewhere else.
           const callerAborted = opts.signal?.aborted === true;
           const advanceable =
-            !callerAborted && (err instanceof StreamStallError || isRetryable(err));
+            !callerAborted && (err instanceof StreamStallError || this.retryable(err));
           const hasNext = i < links.length - 1;
           if (advanceable && hasNext) {
             const failover: StreamFailover = {
@@ -1894,7 +1898,7 @@ export class Gateway {
           }
           await ledgerFailedLink(link.provider, link.model, Date.now() - linkStart);
           const advanceable =
-            !callerAborted && (err instanceof StreamStallError || isRetryable(err));
+            !callerAborted && (err instanceof StreamStallError || this.retryable(err));
           if (advanceable && i < links.length - 1) {
             const failover: StreamFailover = {
               provider: link.provider,
@@ -2355,7 +2359,7 @@ export class Gateway {
               "\nCall the tool again with input that satisfies the schema exactly.";
             continue;
           }
-          if (!isRetryable(err) || transientRetries >= 2) throw err;
+          if (!this.retryable(err) || transientRetries >= 2) throw err;
           await sleep(budget.clampDelay(backoffMs(transientRetries, err)), budget.callerSignal);
           transientRetries++;
         } finally {
@@ -2378,6 +2382,7 @@ export class Gateway {
       budget,
       attemptMs,
       { provider: link.provider, model: link.model },
+      this.retryable,
     );
     return result;
   }
@@ -2617,7 +2622,7 @@ export class Gateway {
         if (timedOut) {
           await onAttemptTimeout?.(link.provider, link.model, Date.now() - linkStart);
         }
-        if (!timedOut && !isRetryable(err) && !isSchemaValidationError(err)) throw err;
+        if (!timedOut && !this.retryable(err) && !isSchemaValidationError(err)) throw err;
         const reason = timedOut
           ? "attempt-timeout"
           : isSchemaValidationError(err)
@@ -3458,6 +3463,7 @@ export class Gateway {
           judgeBudget,
           Math.min(JUDGE_DEADLINE_MS, this.timeouts?.attemptMs ?? DEFAULT_ATTEMPT_MS),
           { provider, model },
+          this.retryable,
         );
       } catch (err) {
         // A judge that ran out of clock SKIPS. It must never be the reason a
