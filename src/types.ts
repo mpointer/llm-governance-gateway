@@ -30,7 +30,11 @@ export interface UsageEntry {
   webSearches?: number | null;
   /** true when a requireZdr constraint was enforced on this call (audit). */
   zdrEnforced?: boolean | null;
-  /** Already passed through the configured encrypt hook (if any). */
+  /**
+   * Already truncated and passed through the configured encrypt hook (if
+   * any): a store writes it verbatim. The shipped adapters do, deliberately;
+   * encrypting again double-wraps silently (#53).
+   */
   inputText?: string | null;
   outputText?: string | null;
   /**
@@ -95,6 +99,10 @@ export interface UsageStore {
   logUsage(entry: UsageEntry): Promise<string | number>;
   /**
    * Sum of estimatedCostCents since `since`, excluding cache hits.
+   * The window is `createdAt >= since` (inclusive) with no upper bound; the
+   * gateway's caps pass UTC midnight. Each row's cost is fractional cents,
+   * never rounded, so this is an exact sum: round once, at the end, when
+   * comparing against another ledger.
    * userId === undefined → ALL identities (global circuit breaker).
    * userId === null      → anonymous-only spend.
    *
