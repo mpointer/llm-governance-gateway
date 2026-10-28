@@ -505,3 +505,75 @@ describe("streamText: guardrails", () => {
     expect((await res.result).text).toBe("clean");
   });
 });
+
+describe("streamText: final-review fixes", () => {
+  it("a ledger failure after a clean stream rejects result, with no notice and no hang", async () => {
+    class DownStore extends MemoryUsageStore {
+      override async logUsage(): Promise<string> {
+        throw new Error("db down");
+      }
+    }
+    const { model } = scriptedModel([textStep(["Hel", "lo"])]);
+    const { gw } = makeGw([{ model }], { usage: new DownStore() });
+    const res = await gw.streamText(base);
+    const deltas: string[] = [];
+    const reading = (async () => {
+      for await (const d of res.textStream) deltas.push(d);
+    })();
+    await expect(res.result).rejects.toThrow("db down");
+    await reading.catch(() => {});
+    expect(deltas).toEqual(["Hel", "lo"]);
+  });
+
+  it("keeps image parts of a multimodal user turn, with and without a pre transform", async () => {
+    const msg: ModelMessage = {
+      role: "user",
+      content: [
+        { type: "text", text: "what is this" },
+        { type: "image", image: new Uint8Array([1, 2, 3]), mediaType: "image/png" },
+      ],
+    };
+    for (const guardrails of [undefined, { pre: () => ({ action: "transform" as const, prompt: "scrubbed" }) }]) {
+      const { model, state } = scriptedModel([textStep(["a"])]);
+      const { gw } = makeGw([{ model }], guardrails ? { guardrails } : {});
+      await (await gw.streamText({ ...base, messages: [msg] })).result;
+      const sent = JSON.stringify(state.prompts[0]);
+      expect(sent).toContain("image/png");
+      expect(sent).toContain(guardrails ? "scrubbed" : "what is this");
+    }
+  });
+
+  it("deadlineMs bounds a hung tool: the turn degrades instead of hanging", async () => {
+    const a = scriptedModel([toolStep("hang", {}), textStep(["never"])]);
+    const { gw } = makeGw([{ model: a.model }]);
+    const res = await gw.streamText({
+      ...base,
+      deadlineMs: 100,
+      tools: { hang: tool({ inputSchema: z.object({}), execute: () => new Promise(() => {}) }) },
+      stopWhen: stepCountIs(4),
+    });
+    const out = await res.result;
+    expect(out.degraded).toBe(true);
+  });
+
+  it("a cut-off step's input estimate includes prior steps' tool results", async () => {
+    const a = scriptedModel([toolStep("big", {}), partial(["x"], httpError(503))]);
+    const { gw, store } = makeGw([{ model: a.model }]);
+    const res = await gw.streamText({
+      ...base,
+      tools: { big: tool({ inputSchema: z.object({}), execute: async () => ({ blob: "y".repeat(4000) }) }) },
+      stopWhen: stepCountIs(4),
+    });
+    await res.result;
+    expect(store.entries[0]!.inputTokens).toBeGreaterThan(1000);
+  });
+
+  it("the ledger stores the post-transformed text", async () => {
+    const { model } = scriptedModel([textStep(["raw pii"])]);
+    const { gw, store } = makeGw([{ model }], {
+      guardrails: { post: () => ({ action: "transform", output: "clean" }) },
+    });
+    await (await gw.streamText(base)).result;
+    expect(store.entries[0]!.outputText).toBe("clean");
+  });
+});

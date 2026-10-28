@@ -408,6 +408,12 @@ export interface StreamTextOptions {
   streamFirstChunkMs?: number;
   /** Time allowed between parts (paused while a tool runs). */
   streamStallMs?: number;
+  /**
+   * Bound on the whole turn, tools included (the stall clock is paused while
+   * a tool runs, so this is the only bound on tool runtime). Overrides
+   * GatewayConfig.timeouts.deadlineMs.
+   */
+  deadlineMs?: number;
 }
 
 export interface StreamTextOutcome {
@@ -443,6 +449,16 @@ function messageText(m: ModelMessage): string {
  *  model responds and would otherwise disarm the first-chunk clock. */
 async function* modelParts<T extends { type: string }>(src: AsyncIterable<T>): AsyncGenerator<T> {
   for await (const p of src) if (p.type !== "start") yield p;
+}
+
+/** `m` with its text replaced by `text`, keeping any image/file parts. */
+function withText(m: ModelMessage, text: string): ModelMessage {
+  if (typeof m.content === "string") return { ...m, content: text } as ModelMessage;
+  const parts = m.content as { type: string }[];
+  const at = parts.findIndex((p) => p.type === "text");
+  const rest = parts.filter((p) => p.type !== "text");
+  rest.splice(at < 0 ? 0 : Math.min(at, rest.length), 0, { type: "text", text } as never);
+  return { ...m, content: rest } as ModelMessage;
 }
 
 async function* singleEmission<T>(value: T): AsyncGenerator<T> {
@@ -1573,7 +1589,7 @@ export class Gateway {
     const { traceId, orgId, prompt, temperature, guardrailRecords, failOpen } = fd;
     const messages: ModelMessage[] = [
       ...opts.messages.slice(0, -1),
-      { role: "user", content: prompt },
+      prompt === lastUserText ? last! : withText(last!, prompt),
     ];
 
     const row = (f: {
@@ -1652,8 +1668,10 @@ export class Gateway {
     void result.catch(() => {});
     const failovers: StreamFailover[] = [];
 
-    // Input size of one model call, for estimating a cut-off step's cost.
+    // Input size of the first model call, for estimating a cut-off step's
+    // cost. Later steps also carry every earlier step's output and tool I/O.
     const inputChars = (opts.system ?? "").length + messages.map(messageText).join("").length;
+    const deadlineMs = opts.deadlineMs ?? this.timeouts?.deadlineMs;
 
     // Ledger-first, as in streamStructured: an abandoned link still spent.
     const ledgerFailedLink = async (provider: string, model: string, ms: number) => {
@@ -1700,27 +1718,50 @@ export class Gateway {
         // text the user saw or run a tool twice: degrade instead (spec).
         let pastNoReturn = false;
         let pendingTools = 0;
+        let carried = 0; // chars earlier steps add to the next step's input
+        let stepChars = 0;
+        let streamDone = false;
+        let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
         try {
+          const deadline =
+            deadlineMs === undefined
+              ? new Promise<never>(() => {})
+              : new Promise<never>((_, reject) => {
+                  const elapsed = Date.now() - start;
+                  deadlineTimer = setTimeout(() => {
+                    const err = new DeadlineExceededError(deadlineMs, Date.now() - start);
+                    controller.abort(err);
+                    reject(err);
+                  }, Math.max(0, deadlineMs - elapsed));
+                });
           await Promise.race([
+            deadline,
             (async () => {
               for await (const part of guard.stream) {
                 if (part.type === "text-delta") {
                   pastNoReturn = true;
                   text += part.text;
                   stepText += part.text;
+                  stepChars += part.text.length;
                   out.publish(part.text);
                 } else if (part.type === "tool-call") {
                   pastNoReturn = true;
                   toolCalls.push(part);
+                  stepChars += JSON.stringify(part.input ?? null).length;
                   // A running tool is not a silent provider.
                   if (pendingTools++ === 0) guard.pauseClock();
                 } else if (part.type === "tool-result" || part.type === "tool-error") {
-                  if (part.type === "tool-result") toolResults.push(part);
+                  if (part.type === "tool-result") {
+                    toolResults.push(part);
+                    stepChars += JSON.stringify(part.output ?? null).length;
+                  }
                   if (--pendingTools === 0) guard.resumeClock();
                 } else if (part.type === "finish-step") {
                   done.inputTokens += part.usage.inputTokens ?? 0;
                   done.outputTokens += part.usage.outputTokens ?? 0;
                   stepText = "";
+                  carried += stepChars;
+                  stepChars = 0;
                 } else if (part.type === "finish")
                   total = {
                     inputTokens: part.totalUsage.inputTokens ?? 0,
@@ -1733,6 +1774,7 @@ export class Gateway {
               throw err;
             }),
           ]);
+          streamDone = true;
           // Post hook on the final text. The deltas are already out, so a
           // block can only reject `result`; a transform changes result.text.
           let finalText = text;
@@ -1755,7 +1797,7 @@ export class Gateway {
               inTok: total.inputTokens,
               outTok: total.outputTokens,
               durationMs: Date.now() - start,
-              text,
+              text: finalText,
               toolCalls: toolCalls.length,
             }),
           );
@@ -1776,10 +1818,17 @@ export class Gateway {
           });
           return;
         } catch (err) {
+          if (streamDone) {
+            // The model finished; the failure is ours (post hook, ledger).
+            // Not a link failure: no notice, no failover.
+            out.close();
+            rejectResult(err);
+            return;
+          }
           lastErr = err;
           const callerAborted = opts.signal?.aborted === true;
           const used = {
-            inputTokens: done.inputTokens + Math.ceil(inputChars / 4),
+            inputTokens: done.inputTokens + Math.ceil((inputChars + carried) / 4),
             outputTokens: done.outputTokens + Math.ceil(stepText.length / 4),
           };
           if (pastNoReturn && callerAborted) {
@@ -1843,13 +1892,20 @@ export class Gateway {
           }
           break;
         } finally {
+          clearTimeout(deadlineTimer);
           guard.dispose();
         }
       }
       const e = lastErr instanceof Error ? lastErr : new Error("streamText: no link produced a result");
       out.fail(e);
       rejectResult(e);
-    })();
+    })().catch((e: unknown) => {
+      // Last resort (e.g. the ledger itself failing on an error path): settle
+      // both ends rather than leave the consumer hanging.
+      const err = e instanceof Error ? e : new Error(String(e));
+      out.fail(err);
+      rejectResult(err);
+    });
 
     return { traceId, textStream: out.stream, result };
   }
