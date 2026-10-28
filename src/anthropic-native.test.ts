@@ -257,6 +257,31 @@ describe("native Anthropic abort signal", () => {
     expect(options[0]?.signal).toBeInstanceOf(AbortSignal);
   });
 
+  it("joins text blocks: bare when adjacent, newline across a tool block (#16)", async () => {
+    const { client } = signalCapturingClient([
+      {
+        content: [
+          { type: "text", text: "Let me search." },
+          { type: "server_tool_use", name: "web_search", input: {} },
+          { type: "web_search_tool_result" },
+          // Citations split one sentence into adjacent blocks.
+          { type: "text", text: "Paris is " },
+          { type: "text", text: "the capital." },
+        ] as AnthropicMessage["content"],
+        usage: { input_tokens: 3, output_tokens: 2 },
+      },
+    ]);
+    const gw = makeGw(client);
+    const res = await gw.runText({
+      slug: "q",
+      input: { q: "hi" },
+      variables: (i: { q: string }) => ({ q: i.q }),
+      cache: false,
+      anthropic: { webSearch: true },
+    });
+    expect(res.text).toBe("Let me search.\nParis is the capital.");
+  });
+
   it("aborts the in-flight request when the caller's signal fires", async () => {
     const controller = new AbortController();
     let observed: AbortSignal | undefined;

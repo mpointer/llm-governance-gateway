@@ -50,6 +50,11 @@ is gated on a downstream integration proving the SPI holds, not on a date.
   the old table under-counted Haiku and both Gemini models and over-counted
   Opus; sums in `ai_usage_log` written before this release carry the old
   estimates. Every row's `asOf` is now 2026-10-28.
+- **Native Anthropic `runText` glued text blocks together across tool calls
+  (#16).** A web-search answer like "Let me search." → search →
+  "Paris is…" came back as "Let me search.Paris is…". Text blocks separated
+  by a non-text block now join with `"\n"`. Adjacent text blocks, which is how
+  citations split one sentence, still join with nothing between them.
 
 Repository hygiene. Nothing else here changes runtime behavior.
 

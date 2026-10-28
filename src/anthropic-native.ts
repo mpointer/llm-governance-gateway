@@ -296,10 +296,19 @@ export async function callNativeAnthropicText(
     { signal: args.signal },
   );
 
-  const text = msg.content
-    .filter((b): b is { type: "text"; text: string } => b.type === "text")
-    .map((b) => b.text)
-    .join("");
+  // Adjacent text blocks are one run (citations split mid-sentence), so they
+  // join bare. A non-text block between them (a web search) is a break (#16).
+  let text = "";
+  let afterText = true;
+  for (const b of msg.content) {
+    if (b.type !== "text") {
+      afterText = false;
+      continue;
+    }
+    if (!afterText && text) text += "\n";
+    text += (b as { text: string }).text;
+    afterText = true;
+  }
 
   const u = msg.usage ?? {};
   return {
