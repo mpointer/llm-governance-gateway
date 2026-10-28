@@ -10,6 +10,7 @@ is gated on a downstream integration proving the SPI holds, not on a date.
 
 ## Unreleased
 
+<<<<<<< HEAD
 ### Changed
 
 - **Guardrail hooks now run on every path: `runText`, `streamStructured`,
@@ -38,6 +39,19 @@ is gated on a downstream integration proving the SPI holds, not on a date.
   a `task` while `ModelConfigStore.getOverride()` returns a pin was silently
   routed to the pin, `TaskOverrideStore` entries included. The precedence is
   unchanged and documented; the silence is gone.
+=======
+### Fixed
+
+- **Four built-in rates were wrong, re-checked 2026-10-28 against the vendor
+  price pages.** Claude Opus 4.8 was priced at $15/$75 per MTok; it is $5/$25,
+  so every Opus call was ledgered at three times its real cost. Claude Haiku
+  4.5 was $0.80/$4; it is $1/$5. Gemini 2.5 Pro output was $5; it is $10
+  (prompts up to 200k tokens). Gemini 2.5 Flash was $0.15/$0.60; it is
+  $0.30/$2.50. The other seven rows were correct. Spend caps enforced against
+  the old table under-counted Haiku and both Gemini models and over-counted
+  Opus; sums in `ai_usage_log` written before this release carry the old
+  estimates. Every row's `asOf` is now 2026-10-28.
+>>>>>>> origin/main
 
 Repository hygiene. Nothing else here changes runtime behavior.
 
