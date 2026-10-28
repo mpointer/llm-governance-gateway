@@ -67,6 +67,12 @@ Repository hygiene. Nothing else here changes runtime behavior.
   `streamText` included. Code defaults still lose to the pin. Off by default:
   with it unset, resolution is unchanged and the task store is not read for
   pinned calls.
+- **`GatewayConfig.isRetryable` (#15).** Replaces the built-in transient-error
+  predicate (HTTP 429 and 5xx) on every path: same-link retries, chain
+  advance, and stream failover. Compose with the exported `isRetryable` to
+  widen it, for example to retry network errors that carry no status, without
+  an outer wrapper. Caller aborts and attempt timeouts are decided first, so a
+  predicate never turns them into retries. Unset, behavior is unchanged.
 - **`streamText` (#14, Scout half).** A governed text stream with tool calling:
   `tools` and `stopWhen` pass through to the AI SDK, and `result` resolves after
   the ledger row with text, tool calls/results, usage across all steps and a
