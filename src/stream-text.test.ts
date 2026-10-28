@@ -14,7 +14,7 @@ type Step = { parts: unknown[]; then?: "hang" | Error } | "hang" | Error;
 const usage = (i: number, o: number) => ({ inputTokens: i, outputTokens: o, totalTokens: i + o });
 
 /** A fake V2 model whose Nth doStream call plays steps[N]. */
-export function scriptedModel(steps: Step[], id = "fake-model") {
+function scriptedModel(steps: Step[], id = "fake-model") {
   const state = { calls: 0, prompts: [] as unknown[] };
   const model = {
     specificationVersion: "v2",
@@ -58,7 +58,7 @@ export function scriptedModel(steps: Step[], id = "fake-model") {
   return { model, state };
 }
 
-export function textStep(deltas: string[], u = usage(3, 2)): Step {
+function textStep(deltas: string[], u = usage(3, 2)): Step {
   return {
     parts: [
       { type: "stream-start", warnings: [] },
@@ -70,7 +70,7 @@ export function textStep(deltas: string[], u = usage(3, 2)): Step {
   };
 }
 
-export function toolStep(name: string, args: unknown, u = usage(4, 1)): Step {
+function toolStep(name: string, args: unknown, u = usage(4, 1)): Step {
   return {
     parts: [
       { type: "stream-start", warnings: [] },
@@ -80,7 +80,7 @@ export function toolStep(name: string, args: unknown, u = usage(4, 1)): Step {
   };
 }
 
-export function makeGw(
+function makeGw(
   links: { model: LanguageModel; model_id?: string }[],
   extra: Partial<GatewayConfig> = {},
 ) {
@@ -102,9 +102,9 @@ export function makeGw(
   return { gw, store };
 }
 
-export const user = (text: string): ModelMessage => ({ role: "user", content: text });
+const user = (text: string): ModelMessage => ({ role: "user", content: text });
 
-export const base: StreamTextOptions = {
+const base: StreamTextOptions = {
   slug: "scout-chat-user",
   system: "You are Scout.",
   messages: [user("hi")],
@@ -112,7 +112,7 @@ export const base: StreamTextOptions = {
   route: "scout-chat",
 };
 
-export async function collect<T>(it: AsyncIterable<T>): Promise<T[]> {
+async function collect<T>(it: AsyncIterable<T>): Promise<T[]> {
   const out: T[] = [];
   for await (const v of it) out.push(v);
   return out;
