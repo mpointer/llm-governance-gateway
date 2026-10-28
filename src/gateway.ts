@@ -6,6 +6,7 @@ import { backoffMs, isRetryable, isSchemaValidationError } from "./backoff.js";
 import {
   AttemptTimeoutError,
   DeadlineExceededError,
+  type GuardrailError,
   JudgeGateError,
   RateLimitError,
   SpendCapError,
@@ -18,6 +19,7 @@ import {
   runGuardrail,
   type GuardrailConfig,
   type GuardrailRecord,
+  type PostGuardrailContext,
 } from "./guardrails.js";
 import { AttemptBudget, sleep } from "./deadline.js";
 import {
@@ -186,6 +188,44 @@ interface PromptConfig {
   modelHint?: string;
   providerOverride?: string;
   temperature?: number;
+}
+
+/** The options every governed unary/stream call shares; what `frontDoor` reads. */
+interface FrontDoorOptions<I> {
+  slug: string;
+  input: I;
+  variables: (input: I) => Record<string, string>;
+  promptBody?: string;
+  cacheParts?: string[];
+  cache?: boolean;
+  userId?: string;
+  anonKey?: string;
+  route?: string;
+  app?: string;
+  orgId?: string;
+  metadata?: Record<string, unknown>;
+  task?: string;
+  requireZdr?: boolean;
+  temperature?: number;
+  system?: string;
+}
+
+/** What `frontDoor` hands back to a path once the governance checks passed. */
+interface FrontDoor<V> {
+  traceId: string;
+  orgId: string | undefined;
+  requireZdr: boolean;
+  /** null when caching is off for this call. */
+  key: string | null;
+  /** The rendered prompt, after any pre-guardrail transform. */
+  prompt: string;
+  promptConfig: PromptConfig;
+  temperature: number | undefined;
+  /** Pre verdicts so far; the path appends its post verdict. */
+  guardrailRecords: GuardrailRecord[];
+  failOpen: boolean;
+  /** Set on a cache hit: the value to return (post-transformed) and its row. */
+  cached?: { value: V; usageLogId: string | number };
 }
 
 export interface RunStructuredOptions<I, O> {
@@ -768,67 +808,26 @@ export class Gateway {
   // ===========================================================================
 
   async runText<I>(opts: RunTextOptions<I>): Promise<RunTextResult> {
-    const traceId = randomUUID();
-    const orgId = this.org(opts);
-    const identifier = opts.userId ?? (opts.anonKey ? `anon:${opts.anonKey}` : "anon");
-    const requireZdr =
-      opts.requireZdr === true ||
-      (opts.task !== undefined && (this.tasks?.requiresZdr(opts.task) ?? false));
-
-    const rl = await this.rateLimiter.limit(identifier);
-    if (!rl.success) throw new RateLimitError(rl.limit, rl.remaining);
-    await this.checkSpendCap(opts.userId, opts.route, 0, orgId);
-
-    const useCache = opts.cache !== false;
-    if (useCache && !opts.cacheParts) {
-      throw new Error("runText: cacheParts is required unless cache:false is set.");
+    // A post transform on the text path must hand back text.
+    const validate = (raw: unknown): string => {
+      if (typeof raw !== "string")
+        throw new Error("a runText post hook must transform to a string");
+      return raw;
+    };
+    const fd = await this.frontDoor<I, string>("runText", opts, validate);
+    if (fd.cached) {
+      return {
+        text: fd.cached.value,
+        provider: "cache",
+        model: "cache",
+        inputTokens: 0,
+        outputTokens: 0,
+        traceId: fd.traceId,
+        cacheHit: true,
+        usageLogId: fd.cached.usageLogId,
+      };
     }
-    const prefetched = await this.prefetchPromptForKey(opts, orgId, useCache);
-    const key = useCache
-      ? cacheKey(
-          opts.slug,
-          opts.cacheParts!,
-          orgId,
-          prefetched ? promptFingerprint(prefetched) : undefined,
-        )
-      : null;
-    if (key) {
-      const cached = await this.cache.get<string>(key);
-      if (cached !== undefined) {
-        const usageLogId = await this.logUsage({
-          metadata: opts.metadata,
-          orgId,
-          app: opts.app,
-          userId: opts.userId ?? null,
-          route: opts.route ?? null,
-          promptSlug: opts.slug,
-          provider: "cache",
-          model: "cache",
-          inputTokens: 0,
-          outputTokens: 0,
-          estimatedCostCents: 0,
-          cacheHit: true,
-          traceId,
-          zdrEnforced: requireZdr ? true : null,
-        });
-        return {
-          text: cached,
-          provider: "cache",
-          model: "cache",
-          inputTokens: 0,
-          outputTokens: 0,
-          traceId,
-          cacheHit: true,
-          usageLogId,
-        };
-      }
-    }
-
-    const promptConfig: PromptConfig =
-      prefetched ??
-      (opts.promptBody ? { body: opts.promptBody } : await this.loadPrompt(opts.slug, orgId));
-    const prompt = renderTemplate(promptConfig.body, opts.variables(opts.input));
-    const temperature = opts.temperature ?? promptConfig.temperature;
+    const { traceId, orgId, requireZdr, key, prompt, temperature, guardrailRecords, failOpen } = fd;
 
     // Native features must never silently not apply (same rule as runStructured).
     if (opts.anthropic && !this.anthropicCfg && !this.mock) {
@@ -934,7 +933,7 @@ export class Gateway {
       durationMs = 0;
     } else {
       // Single-link resolution + ZDR-filtered chain (parallel to runStructured).
-      const adminOverride = (await this.modelConfig?.getOverride(orgId, opts.tier)) ?? null;
+      const adminOverride = await this.adminPin(orgId, opts.tier, opts.task);
       let links: { provider: string; model: string; languageModel?: LanguageModel }[];
       if (adminOverride) {
         links = [this.registry.resolveDefault(adminOverride)];
@@ -1057,8 +1056,10 @@ export class Gateway {
       if (!done) throw lastErr ?? new Error("runText: no provider produced a result");
     }
 
-    if (key) await this.cache.set(key, text, this.cacheTtlSeconds);
-    const usageLogId = await this.logUsage({
+    // Post guardrail on the text, before the cache write. Same contract as
+    // runStructured: a transform is what gets cached and returned; a block
+    // writes the row with the spent tokens, then throws with the text attached.
+    const textRow = () => ({
       metadata: opts.metadata,
       orgId,
       app: opts.app,
@@ -1084,7 +1085,27 @@ export class Gateway {
       webSearches: extras?.webSearches ?? null,
       zdrEnforced: requireZdr ? true : null,
       inputText: prompt,
+    });
+    if (this.guardrails?.post) {
+      const out = await this.applyPostGuardrail(
+        this.postCtx(opts, prompt, traceId, orgId, text, provider, model),
+        text,
+        validate,
+        failOpen,
+        guardrailRecords,
+      );
+      text = out.value;
+      if (out.blocked) {
+        await this.logUsage({ ...textRow(), outputText: text, guardrails: guardrailRecords });
+        throw guardrailError(out.blocked, text);
+      }
+    }
+
+    if (key) await this.cache.set(key, text, this.cacheTtlSeconds);
+    const usageLogId = await this.logUsage({
+      ...textRow(),
       outputText: text,
+      guardrails: guardrailRecords.length > 0 ? guardrailRecords : null,
     });
 
     return {
@@ -1135,61 +1156,24 @@ export class Gateway {
       streamStallMs?: number;
     },
   ): Promise<StreamStructuredResult<O>> {
-    const traceId = randomUUID();
-    const orgId = this.org(opts);
-    const identifier = opts.userId ?? (opts.anonKey ? `anon:${opts.anonKey}` : "anon");
-
-    const rl = await this.rateLimiter.limit(identifier);
-    if (!rl.success) throw new RateLimitError(rl.limit, rl.remaining);
-    await this.checkSpendCap(opts.userId, opts.route, 0, orgId);
-
-    const useCache = opts.cache !== false;
-    if (useCache && !opts.cacheParts) {
-      throw new Error("streamStructured: cacheParts is required unless cache:false is set.");
+    const validate = (raw: unknown): O => opts.schema.parse(raw);
+    const fd = await this.frontDoor<I, O>("streamStructured", opts, validate);
+    if (fd.cached) {
+      return {
+        cached: true,
+        traceId: fd.traceId,
+        partialObjectStream: singleEmission(fd.cached.value as Partial<O>),
+        object: Promise.resolve(fd.cached.value),
+        failovers: [],
+      };
     }
-    const prefetched = await this.prefetchPromptForKey(opts, orgId, useCache);
-    const key = useCache
-      ? cacheKey(
-          opts.slug,
-          opts.cacheParts!,
-          orgId,
-          prefetched ? promptFingerprint(prefetched) : undefined,
-        )
-      : null;
-    if (key) {
-      const cached = await this.cache.get<O>(key);
-      if (cached !== undefined) {
-        await this.logUsage({
-          metadata: opts.metadata,
-          orgId,
-          app: opts.app,
-          userId: opts.userId ?? null,
-          route: opts.route ?? null,
-          promptSlug: opts.slug,
-          provider: "cache",
-          model: "cache",
-          inputTokens: 0,
-          outputTokens: 0,
-          estimatedCostCents: 0,
-          cacheHit: true,
-          traceId,
-        });
-        return {
-          cached: true,
-          traceId,
-          partialObjectStream: singleEmission(cached as Partial<O>),
-          object: Promise.resolve(cached),
-          failovers: [],
-        };
-      }
-    }
+    const { traceId, orgId, key, prompt, temperature, guardrailRecords, failOpen } = fd;
 
-    const promptConfig: PromptConfig =
-      prefetched ??
-      (opts.promptBody ? { body: opts.promptBody } : await this.loadPrompt(opts.slug, orgId));
-    const prompt = renderTemplate(promptConfig.body, opts.variables(opts.input));
-    const temperature = opts.temperature ?? promptConfig.temperature;
-
+    // Post guardrail, cache write, usage row — once, for the link that
+    // completed. A post block on a stream can only stop the FINAL object: the
+    // partials were already visible to the consumer. The row is written with
+    // the spent tokens and the block is returned (not thrown) so the driver
+    // can tell a policy stop from a link failure; a block never fails over.
     const finalize = async (
       object: O,
       inTok: number,
@@ -1197,9 +1181,8 @@ export class Gateway {
       provider: string,
       model: string,
       durationMs: number,
-    ) => {
-      if (key) await this.cache.set(key, object, this.cacheTtlSeconds);
-      await this.logUsage({
+    ): Promise<{ object: O; blocked?: GuardrailError }> => {
+      const row = () => ({
         metadata: opts.metadata,
         orgId,
         app: opts.app,
@@ -1215,8 +1198,32 @@ export class Gateway {
         traceId,
         durationMs,
         inputText: prompt,
-        outputText: JSON.stringify(object),
       });
+      if (this.guardrails?.post) {
+        const out = await this.applyPostGuardrail(
+          this.postCtx(opts, prompt, traceId, orgId, object, provider, model),
+          object,
+          validate,
+          failOpen,
+          guardrailRecords,
+        );
+        object = out.value;
+        if (out.blocked) {
+          await this.logUsage({
+            ...row(),
+            outputText: JSON.stringify(object),
+            guardrails: guardrailRecords,
+          });
+          return { object, blocked: guardrailError(out.blocked, object) };
+        }
+      }
+      if (key) await this.cache.set(key, object, this.cacheTtlSeconds);
+      await this.logUsage({
+        ...row(),
+        outputText: JSON.stringify(object),
+        guardrails: guardrailRecords.length > 0 ? guardrailRecords : null,
+      });
+      return { object };
     };
 
     if (this.mock) {
@@ -1224,27 +1231,28 @@ export class Gateway {
       if (!responder) {
         throw new Error(`Mock mode is on but no responder registered for "${opts.slug}".`);
       }
-      const object = opts.schema.parse(responder(opts.input));
-      await finalize(
-        object,
+      const raw = opts.schema.parse(responder(opts.input));
+      const fin = await finalize(
+        raw,
         Math.ceil(prompt.length / 4),
-        Math.ceil(JSON.stringify(object).length / 4),
+        Math.ceil(JSON.stringify(raw).length / 4),
         "mock",
         "mock",
         0,
       );
+      if (fin.blocked) throw fin.blocked;
       return {
         cached: false,
         traceId,
-        partialObjectStream: singleEmission(object as Partial<O>),
-        object: Promise.resolve(object),
+        partialObjectStream: singleEmission(fin.object as Partial<O>),
+        object: Promise.resolve(fin.object),
         failovers: [],
       };
     }
 
     // Resolution: adminOverride (single, hard pin) > task chain > config
     // chain > default. Everything but the admin pin can be multi-link.
-    const adminOverride = (await this.modelConfig?.getOverride(orgId, opts.tier)) ?? null;
+    const adminOverride = await this.adminPin(orgId, opts.tier, opts.task);
     let links: { provider: string; model: string; languageModel?: LanguageModel }[];
     if (adminOverride) {
       links = [this.registry.resolveDefault(adminOverride)];
@@ -1261,9 +1269,7 @@ export class Gateway {
       links = built.length > 0 ? built : [this.registry.resolveDefault()];
     }
 
-    const streamRequireZdr =
-      opts.requireZdr === true ||
-      (opts.task !== undefined && (this.tasks?.requiresZdr(opts.task) ?? false));
+    const streamRequireZdr = fd.requireZdr;
     if (streamRequireZdr) {
       const eligible = links.filter((l) => this.registry.isZdr(l.provider, l.model));
       if (eligible.length === 0) {
@@ -1365,7 +1371,7 @@ export class Gateway {
               throw err;
             }),
           ]);
-          await finalize(
+          const fin = await finalize(
             completed.object,
             completed.usage.inputTokens ?? 0,
             completed.usage.outputTokens ?? 0,
@@ -1373,8 +1379,18 @@ export class Gateway {
             link.model,
             Date.now() - start,
           );
+          if (fin.blocked) {
+            // Policy, not a link failure: no failover, the consumer sees the
+            // GuardrailError on both the iterator and the object promise.
+            out.fail(fin.blocked);
+            rejectObject(fin.blocked);
+            return;
+          }
+          // A transformed final object is published as the last partial so a
+          // consumer rendering partials converges on what `object` resolves to.
+          if (fin.object !== completed.object) out.publish(fin.object as Partial<O>);
           out.close();
-          resolveObject(completed.object);
+          resolveObject(fin.object);
           return;
         } catch (err) {
           lastErr = err;
@@ -1481,11 +1497,65 @@ export class Gateway {
     const jsonSchema = batchSchemaToJson(schema);
     const useCache = opts.cache !== false;
 
-    // Cache pre-check: serve hits now, submit only misses.
+    // Pre guardrail per item, then cache pre-check: serve hits now, submit
+    // only misses. A blocked item is excluded from the batch and reported in
+    // `blocked`; it leaves a zero-token row of its own (traceId
+    // "batch:guardrail:<slug>:<item id>") because nothing else would carry
+    // the verdict. Allow/transform verdicts ride the reservation row, one
+    // record per item, tagged with the item id in `detail.batchItemId`.
+    const failOpen = this.guardrails?.failOpen === true;
+    const blocked: { id: string; reason: string }[] = [];
+    const submitRecords: GuardrailRecord[] = [];
     const cached: { id: string; object: unknown }[] = [];
     const misses: { id: string; prompt: string; cacheK: string | null }[] = [];
     for (const item of opts.items) {
-      const prompt = renderTemplate(promptConfig.body, item.variables);
+      let prompt = renderTemplate(promptConfig.body, item.variables);
+      if (this.guardrails?.pre) {
+        const itemTrace = `batch:guardrail:${opts.slug}:${item.id}`;
+        const { verdict, record } = await runGuardrail(
+          this.guardrails.pre,
+          "pre",
+          {
+            slug: opts.slug,
+            prompt,
+            system: opts.system,
+            input: item.input,
+            traceId: itemTrace,
+            userId: opts.userId ?? null,
+            orgId: orgId ?? null,
+            route: opts.route ?? null,
+            task: opts.task,
+          },
+          failOpen,
+        );
+        if (verdict.action === "block") {
+          await this.logUsage({
+            metadata: opts.metadata,
+            orgId,
+            app: opts.app,
+            userId: opts.userId ?? null,
+            route: opts.route ?? `batch:${opts.slug}`,
+            promptSlug: opts.slug,
+            provider: "guardrail",
+            model: "pre",
+            inputTokens: 0,
+            outputTokens: 0,
+            estimatedCostCents: 0,
+            cacheHit: false,
+            traceId: itemTrace,
+            durationMs: record.durationMs,
+            inputText: prompt,
+            outputText: null,
+            guardrails: [record],
+          });
+          blocked.push({ id: item.id, reason: record.reason ?? "blocked" });
+          continue;
+        }
+        if (verdict.action === "transform" && typeof verdict.prompt === "string") {
+          prompt = verdict.prompt;
+        }
+        submitRecords.push({ ...record, detail: { ...record.detail, batchItemId: item.id } });
+      }
       const k = useCache
         ? cacheKey(
             opts.slug,
@@ -1504,7 +1574,7 @@ export class Gateway {
       misses.push({ id: item.id, prompt, cacheK: k });
     }
     if (misses.length === 0) {
-      return { batchId: null, cached, submittedCount: 0, reservedCents: 0 };
+      return { batchId: null, cached, blocked, submittedCount: 0, reservedCents: 0 };
     }
 
     // Submit-time ESTIMATE (documented as such — maxCostCents is the
@@ -1551,6 +1621,7 @@ export class Gateway {
       estimatedCostCents: estimateCents,
       cacheHit: false,
       traceId: `batch:${batchId}`,
+      guardrails: submitRecords.length > 0 ? submitRecords : null,
     });
 
     await cfg.store.createJob({
@@ -1566,7 +1637,13 @@ export class Gateway {
       updatedAt: new Date(),
     });
 
-    return { batchId, cached, submittedCount: misses.length, reservedCents: estimateCents };
+    return {
+      batchId,
+      cached,
+      blocked,
+      submittedCount: misses.length,
+      reservedCents: estimateCents,
+    };
   }
 
   /** Poll provider status and sync the job store. Cron/queue-friendly. */
@@ -1624,7 +1701,7 @@ export class Gateway {
           cacheReadTokens: u.cache_read_input_tokens ?? 0,
         }) * discount;
       totalCents += cents;
-      usageRows.push({
+      const row: Omit<UsageEntry, "createdAt"> = {
         userId: null,
         route: `batch:${job.slug}`,
         promptSlug: job.slug,
@@ -1637,10 +1714,11 @@ export class Gateway {
         traceId: `${batchId}:${item.customId}`, // deterministic — duplicates detectable
         cacheCreateTokens: u.cache_creation_input_tokens ?? null,
         cacheReadTokens: u.cache_read_input_tokens ?? null,
-      });
+      };
+      usageRows.push(row);
+      let object: O;
       try {
-        const raw = extractEmitToolInput(msg);
-        results.push({ id: item.customId, ok: true, object: schema.parse(raw) });
+        object = schema.parse(extractEmitToolInput(msg));
       } catch (err) {
         results.push({
           id: item.customId,
@@ -1648,7 +1726,46 @@ export class Gateway {
           reason: "schema",
           error: err instanceof Error ? err.message.slice(0, 300) : String(err),
         });
+        continue;
       }
+      // Post guardrail at reconcile time, per item. The job store carries no
+      // per-item prompt or input in v1, so the hook sees `prompt: ""` and
+      // `input: undefined`; a hook that grounds against the input (TrustGate's
+      // grounder) has nothing to ground against here and should be configured
+      // to allow. The verdict rides the item's usage row.
+      if (this.guardrails?.post) {
+        const records: GuardrailRecord[] = [];
+        const out = await this.applyPostGuardrail(
+          {
+            slug: job.slug,
+            prompt: "",
+            input: undefined,
+            output: object,
+            provider: "anthropic",
+            model: job.model,
+            traceId: row.traceId,
+            userId: null,
+            orgId: null,
+            route: row.route ?? null,
+          },
+          object,
+          (raw) => schema.parse(raw),
+          this.guardrails.failOpen === true,
+          records,
+        );
+        row.guardrails = records;
+        if (out.blocked) {
+          results.push({
+            id: item.customId,
+            ok: false,
+            reason: "guardrail",
+            error: out.blocked.reason ?? "blocked",
+          });
+          continue;
+        }
+        object = out.value;
+      }
+      results.push({ id: item.customId, ok: true, object });
     }
 
     // Phase 2: side effects — per-item actuals, then reservation release.
@@ -2031,6 +2148,282 @@ export class Gateway {
     throw lastErr ?? new Error("AI chain exhausted with no result");
   }
 
+  // ===========================================================================
+  // The front door, shared by runStructured, runText and streamStructured:
+  // identity → rate limit → spend cap → cache key → prompt → pre guardrail →
+  // cache read (post guardrail on a hit). One implementation, so a check added
+  // to the pipeline lands on every path at once. 0.16.0 put the guardrail hooks
+  // on runStructured only because each path carried its own copy of this
+  // sequence; that is the gap this closes. Batch has its own shape (per-item
+  // prompts, a reservation row) and runs the hooks in submitBatch/reconcileBatch.
+  // ===========================================================================
+
+  private async frontDoor<I, V>(
+    kind: "runStructured" | "runText" | "streamStructured",
+    opts: FrontDoorOptions<I>,
+    validate: (raw: unknown) => V,
+  ): Promise<FrontDoor<V>> {
+    const traceId = randomUUID();
+    const orgId = this.org(opts);
+    const identifier = opts.userId ?? (opts.anonKey ? `anon:${opts.anonKey}` : "anon");
+    const requireZdr =
+      opts.requireZdr === true ||
+      (opts.task !== undefined && (this.tasks?.requiresZdr(opts.task) ?? false));
+
+    // 1. Rate limit
+    const rl = await this.rateLimiter.limit(identifier);
+    if (!rl.success) throw new RateLimitError(rl.limit, rl.remaining);
+
+    // 2. Spend cap
+    await this.checkSpendCap(opts.userId, opts.route, 0, orgId);
+
+    // 3. Cache key
+    const useCache = opts.cache !== false;
+    if (useCache && !opts.cacheParts) {
+      throw new Error(`${kind}: cacheParts is required unless cache:false is set.`);
+    }
+    const prefetched = await this.prefetchPromptForKey(opts, orgId, useCache);
+    const key = useCache
+      ? cacheKey(
+          opts.slug,
+          opts.cacheParts!,
+          orgId,
+          prefetched ? promptFingerprint(prefetched) : undefined,
+        )
+      : null;
+
+    const failOpen = this.guardrails?.failOpen === true;
+    const guardrailRecords: GuardrailRecord[] = [];
+    const rowBase = {
+      metadata: opts.metadata,
+      orgId,
+      app: opts.app,
+      userId: opts.userId ?? null,
+      route: opts.route ?? null,
+      promptSlug: opts.slug,
+      traceId,
+      zdrEnforced: requireZdr ? true : null,
+    };
+
+    // 4. Prompt. Loaded lazily: before the cache read when a hook needs the
+    // rendered prompt (so policy applies to hits too), otherwise after it, so
+    // a plain cache hit still costs no prompt-store read.
+    let promptConfig: PromptConfig | undefined = prefetched;
+    let prompt: string | undefined;
+    const loadAndRender = async () => {
+      promptConfig ??= opts.promptBody
+        ? { body: opts.promptBody }
+        : await this.loadPrompt(opts.slug, orgId);
+      prompt = renderTemplate(promptConfig.body, opts.variables(opts.input));
+    };
+
+    // 4b. Pre guardrail: policy on the rendered prompt, before the cache read
+    // and before any provider spend. A block costs no tokens but still writes
+    // a zero-token usage row carrying the verdict — an audit that cannot see
+    // blocked calls is not an audit. A transform replaces the prompt that goes
+    // out. Runs in mock mode too, so CI can test policy.
+    if (this.guardrails?.pre) {
+      await loadAndRender();
+      const { verdict, record } = await runGuardrail(
+        this.guardrails.pre,
+        "pre",
+        {
+          slug: opts.slug,
+          prompt: prompt!,
+          system: opts.system,
+          input: opts.input,
+          traceId,
+          userId: opts.userId ?? null,
+          orgId: orgId ?? null,
+          route: opts.route ?? null,
+          task: opts.task,
+        },
+        failOpen,
+      );
+      guardrailRecords.push(record);
+      if (verdict.action === "block") {
+        await this.logUsage({
+          ...rowBase,
+          provider: "guardrail",
+          model: "pre",
+          inputTokens: 0,
+          outputTokens: 0,
+          estimatedCostCents: 0,
+          cacheHit: false,
+          durationMs: record.durationMs,
+          inputText: prompt!,
+          outputText: null,
+          guardrails: guardrailRecords,
+        });
+        throw guardrailError(record);
+      }
+      if (verdict.action === "transform" && typeof verdict.prompt === "string") {
+        prompt = verdict.prompt;
+      }
+    }
+
+    // 4c. Cache read. A hit runs the post hook too: policy applies to what the
+    // caller receives, whether a provider produced it just now or last week.
+    // A transformed hit is returned but not written back; a blocked hit writes
+    // the cache row with the verdict and throws.
+    if (key) {
+      const cached = await this.cache.get<V>(key);
+      if (cached !== undefined) {
+        let value: V = cached as V;
+        if (this.guardrails?.post) {
+          if (prompt === undefined) await loadAndRender();
+          const out = await this.applyPostGuardrail(
+            this.postCtx(opts, prompt!, traceId, orgId, value, "cache", "cache"),
+            value,
+            validate,
+            failOpen,
+            guardrailRecords,
+          );
+          value = out.value;
+          if (out.blocked) {
+            await this.logUsage({
+              ...rowBase,
+              provider: "cache",
+              model: "cache",
+              inputTokens: 0,
+              outputTokens: 0,
+              estimatedCostCents: 0,
+              cacheHit: true,
+              outputText: typeof value === "string" ? value : JSON.stringify(value),
+              guardrails: guardrailRecords,
+            });
+            throw guardrailError(out.blocked, value);
+          }
+        }
+        const usageLogId = await this.logUsage({
+          ...rowBase,
+          provider: "cache",
+          model: "cache",
+          inputTokens: 0,
+          outputTokens: 0,
+          estimatedCostCents: 0,
+          cacheHit: true,
+          guardrails: guardrailRecords.length > 0 ? guardrailRecords : null,
+        });
+        return {
+          traceId,
+          orgId,
+          requireZdr,
+          key,
+          prompt: prompt ?? "",
+          promptConfig: promptConfig ?? { body: "" },
+          temperature: opts.temperature ?? promptConfig?.temperature,
+          guardrailRecords,
+          failOpen,
+          cached: { value, usageLogId },
+        };
+      }
+    }
+
+    // 4d. Prompt for the generation paths (inline promptBody skips the store).
+    if (prompt === undefined) await loadAndRender();
+    return {
+      traceId,
+      orgId,
+      requireZdr,
+      key,
+      prompt: prompt!,
+      promptConfig: promptConfig!,
+      temperature: opts.temperature ?? promptConfig!.temperature,
+      guardrailRecords,
+      failOpen,
+    };
+  }
+
+  /** The post-hook context for a unary or stream call. */
+  private postCtx<I>(
+    opts: FrontDoorOptions<I>,
+    prompt: string,
+    traceId: string,
+    orgId: string | undefined,
+    output: unknown,
+    provider: string,
+    model: string,
+  ): PostGuardrailContext {
+    return {
+      slug: opts.slug,
+      prompt,
+      system: opts.system,
+      input: opts.input,
+      output,
+      provider,
+      model,
+      traceId,
+      userId: opts.userId ?? null,
+      orgId: orgId ?? null,
+      route: opts.route ?? null,
+      task: opts.task,
+    };
+  }
+
+  /**
+   * Run the post hook on `value` and apply its verdict. A transform must still
+   * satisfy the caller's shape (`validate`): a scrubber that breaks it would
+   * otherwise hand the caller (and the cache) a value the type system says
+   * cannot exist, so an invalid transform is a block, or under `failOpen` an
+   * allow of the original value with the error recorded. Never throws; the
+   * caller writes the usage row and throws on `blocked`.
+   */
+  private async applyPostGuardrail<V>(
+    ctx: PostGuardrailContext,
+    value: V,
+    validate: (raw: unknown) => V,
+    failOpen: boolean,
+    records: GuardrailRecord[],
+  ): Promise<{ value: V; blocked?: GuardrailRecord }> {
+    const { verdict, record } = await runGuardrail(this.guardrails!.post!, "post", ctx, failOpen);
+    let blocked: GuardrailRecord | undefined;
+    if (verdict.action === "transform" && verdict.output !== undefined) {
+      try {
+        value = validate(verdict.output);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        record.error = `transform produced schema-invalid output: ${message}`;
+        if (!failOpen) {
+          record.action = "block";
+          record.reason = record.error;
+          blocked = record;
+        } else {
+          record.action = "allow";
+        }
+      }
+    } else if (verdict.action === "block") {
+      blocked = record;
+    }
+    records.push(record);
+    return { value, blocked };
+  }
+
+  private readonly warnedShadowedTasks = new Set<string>();
+
+  /**
+   * The admin pin, `ModelConfigStore.getOverride()`. A pin outranks task
+   * routing entirely, `TaskOverrideStore` entries included, which is the
+   * documented precedence — but a call that names a task and silently gets
+   * the pin instead is the shape of issue #57. Warn once per task.
+   */
+  private async adminPin(
+    orgId: string | undefined,
+    tier: "fast" | "power" | undefined,
+    task: string | undefined,
+  ): Promise<{ provider: ProviderId; model: string } | null> {
+    const pin = (await this.modelConfig?.getOverride(orgId, tier)) ?? null;
+    if (pin && task !== undefined && !this.warnedShadowedTasks.has(task)) {
+      this.warnedShadowedTasks.add(task);
+      console.warn(
+        `[llm-gateway] task "${task}" is shadowed: ModelConfigStore.getOverride() returned a pin ` +
+          `(${pin.provider}/${pin.model}), and a pin outranks task routing, TaskOverrideStore ` +
+          `entries included. Return null from getOverride() to let tasks route. Warned once per task. (#57)`,
+      );
+    }
+    return pin;
+  }
+
   private async logUsage(f: Omit<UsageEntry, "createdAt">): Promise<string | number> {
     const enc = (t: string | null) => (t != null && this.encrypt ? this.encrypt(t) : t);
     const entry: UsageEntry = {
@@ -2051,119 +2444,25 @@ export class Gateway {
   }
 
   async runStructured<I, O>(opts: RunStructuredOptions<I, O>): Promise<RunStructuredResult<O>> {
-    const traceId = randomUUID();
-    const orgId = this.org(opts);
-    const identifier = opts.userId ?? (opts.anonKey ? `anon:${opts.anonKey}` : "anon");
-    const requireZdr =
-      opts.requireZdr === true ||
-      (opts.task !== undefined && (this.tasks?.requiresZdr(opts.task) ?? false));
+    const validate = (raw: unknown): O =>
+      isZodSchema(opts.schema) ? opts.schema.parse(raw) : (raw as O);
+    // 1-4b. Rate limit, spend cap, cache key, prompt, pre guardrail, cache read.
+    const fd = await this.frontDoor<I, O>("runStructured", opts, validate);
+    if (fd.cached) {
+      return {
+        object: fd.cached.value,
+        traceId: fd.traceId,
+        cacheHit: true,
+        usageLogId: fd.cached.usageLogId,
+      };
+    }
+    const { traceId, orgId, requireZdr, key, prompt, promptConfig, temperature } = fd;
+    const { guardrailRecords, failOpen } = fd;
     const assertZdr = (p: string, m: string, context: string) => {
       if (requireZdr && !this.registry.isZdr(p, m)) {
         throw new ZdrViolationError(p, m, context);
       }
     };
-
-    // 1. Rate limit
-    const rl = await this.rateLimiter.limit(identifier);
-    if (!rl.success) throw new RateLimitError(rl.limit, rl.remaining);
-
-    // 2. Spend cap
-    await this.checkSpendCap(opts.userId, opts.route, 0, orgId);
-
-    // 3. Cache read
-    const useCache = opts.cache !== false;
-    if (useCache && !opts.cacheParts) {
-      throw new Error("runStructured: cacheParts is required unless cache:false is set.");
-    }
-    const prefetched = await this.prefetchPromptForKey(opts, orgId, useCache);
-    const key = useCache
-      ? cacheKey(
-          opts.slug,
-          opts.cacheParts!,
-          orgId,
-          prefetched ? promptFingerprint(prefetched) : undefined,
-        )
-      : null;
-    if (key) {
-      const cached = await this.cache.get<O>(key);
-      if (cached !== undefined) {
-        const usageLogId = await this.logUsage({
-          metadata: opts.metadata,
-          orgId,
-          app: opts.app,
-          userId: opts.userId ?? null,
-          route: opts.route ?? null,
-          promptSlug: opts.slug,
-          provider: "cache",
-          model: "cache",
-          inputTokens: 0,
-          outputTokens: 0,
-          estimatedCostCents: 0,
-          cacheHit: true,
-          traceId,
-        });
-        return { object: cached, traceId, cacheHit: true, usageLogId };
-      }
-    }
-
-    // 4. Load prompt (inline promptBody skips the store/defaults lookup)
-    const promptConfig: PromptConfig =
-      prefetched ??
-      (opts.promptBody ? { body: opts.promptBody } : await this.loadPrompt(opts.slug, orgId));
-    let prompt = renderTemplate(promptConfig.body, opts.variables(opts.input));
-    const temperature = opts.temperature ?? promptConfig.temperature;
-
-    // 4b. Pre guardrail: policy on the rendered prompt, before any provider
-    // spend. A block costs no tokens but still writes a zero-token usage row
-    // carrying the verdict — an audit that cannot see blocked calls is not
-    // an audit. A transform replaces the prompt that goes out. Runs in mock
-    // mode too, so CI can test policy.
-    const guardrailRecords: GuardrailRecord[] = [];
-    const failOpen = this.guardrails?.failOpen === true;
-    if (this.guardrails?.pre) {
-      const { verdict, record } = await runGuardrail(
-        this.guardrails.pre,
-        "pre",
-        {
-          slug: opts.slug,
-          prompt,
-          system: opts.system,
-          input: opts.input,
-          traceId,
-          userId: opts.userId ?? null,
-          orgId: orgId ?? null,
-          route: opts.route ?? null,
-          task: opts.task,
-        },
-        failOpen,
-      );
-      guardrailRecords.push(record);
-      if (verdict.action === "block") {
-        await this.logUsage({
-          metadata: opts.metadata,
-          orgId,
-          app: opts.app,
-          userId: opts.userId ?? null,
-          route: opts.route ?? null,
-          promptSlug: opts.slug,
-          provider: "guardrail",
-          model: "pre",
-          inputTokens: 0,
-          outputTokens: 0,
-          estimatedCostCents: 0,
-          cacheHit: false,
-          traceId,
-          durationMs: record.durationMs,
-          inputText: prompt,
-          outputText: null,
-          guardrails: guardrailRecords,
-        });
-        throw guardrailError(record);
-      }
-      if (verdict.action === "transform" && typeof verdict.prompt === "string") {
-        prompt = verdict.prompt;
-      }
-    }
 
     // Native features must never silently not apply.
     if (opts.anthropic && !this.anthropicCfg && !this.mock) {
@@ -2243,7 +2542,7 @@ export class Gateway {
       //   b. task routing              — per-task override/default
       //   c. modelConfig.getChain()    — primary → fallback → ...
       //   d. Static/env default        — no dynamic config present
-      const adminOverride = (await this.modelConfig?.getOverride(orgId, opts.tier)) ?? null;
+      const adminOverride = await this.adminPin(orgId, opts.tier, opts.task);
 
       if (!adminOverride && opts.task) {
         if (!this.tasks) {
@@ -2435,51 +2734,15 @@ export class Gateway {
     // usage row first — the tokens were spent — then throws with the object
     // attached, so a reviewer can still be shown what was rejected.
     if (this.guardrails?.post) {
-      const { verdict, record } = await runGuardrail(
-        this.guardrails.post,
-        "post",
-        {
-          slug: opts.slug,
-          prompt,
-          system: opts.system,
-          input: opts.input,
-          output: object,
-          provider,
-          model,
-          traceId,
-          userId: opts.userId ?? null,
-          orgId: orgId ?? null,
-          route: opts.route ?? null,
-          task: opts.task,
-        },
+      const out = await this.applyPostGuardrail(
+        this.postCtx(opts, prompt, traceId, orgId, object, provider, model),
+        object,
+        validate,
         failOpen,
+        guardrailRecords,
       );
-      let blocked: GuardrailRecord | undefined;
-      if (verdict.action === "transform" && verdict.output !== undefined) {
-        // A transform must still satisfy the caller's schema: a scrubber that
-        // breaks the shape would otherwise hand the caller (and the cache) an
-        // object the type system says cannot exist. Treated as a block, under
-        // the same fail-open policy as a throwing hook.
-        try {
-          object = isZodSchema(opts.schema)
-            ? opts.schema.parse(verdict.output)
-            : (verdict.output as O);
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          record.error = `transform produced schema-invalid output: ${message}`;
-          if (!failOpen) {
-            record.action = "block";
-            record.reason = record.error;
-            blocked = record;
-          } else {
-            record.action = "allow";
-          }
-        }
-      } else if (verdict.action === "block") {
-        blocked = record;
-      }
-      guardrailRecords.push(record);
-      if (blocked) {
+      object = out.value;
+      if (out.blocked) {
         await this.logUsage({
           metadata: opts.metadata,
           orgId,
@@ -2509,7 +2772,7 @@ export class Gateway {
           outputText: JSON.stringify(object),
           guardrails: guardrailRecords,
         });
-        throw guardrailError(blocked, object);
+        throw guardrailError(out.blocked, object);
       }
     }
 

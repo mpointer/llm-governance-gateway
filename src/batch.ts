@@ -170,6 +170,8 @@ export interface SubmitBatchResult {
   /** null when every item was served from cache (nothing submitted). */
   batchId: string | null;
   cached: { id: string; object: unknown }[];
+  /** Items the pre guardrail blocked at submit; not submitted, not cached. */
+  blocked: { id: string; reason: string }[];
   submittedCount: number;
   reservedCents: number;
 }
@@ -179,7 +181,8 @@ export type BatchItemResult<O> =
   | {
       id: string;
       ok: false;
-      reason: "schema" | "errored" | "canceled" | "expired";
+      /** "guardrail": the post hook blocked this item at reconcile (0.17). */
+      reason: "schema" | "errored" | "canceled" | "expired" | "guardrail";
       error?: string;
     };
 

@@ -1,7 +1,9 @@
 # Design: pluggable guardrail hooks (pre/post)
 
-Status: shipped in 0.16.0 (`src/guardrails.ts`, `src/trustgate.ts`). The
-shape below is what shipped, with the open questions answered at the end.
+Status: shipped in 0.16.0 (`src/guardrails.ts`, `src/trustgate.ts`) on
+`runStructured`; extended to every path and to cache hits in 0.17.0 via the
+shared front door (`Gateway.frontDoor`, `Gateway.applyPostGuardrail`). The
+shape below is what shipped, with the decisions at each step at the end.
 
 ## Problem
 
@@ -80,13 +82,59 @@ the judge (the judge scores what the caller will actually receive).
 - **Schema-invalid transforms** are a block (or, under `failOpen`, an allow of
   the original object with the error recorded). A scrubber must not hand the
   caller an object the type system says cannot exist.
-- **Streaming, batch and `runText`:** excluded in this version, as the open
-  questions suggested. Streaming needs buffering or chunk-level policy; batch
-  reconcile-time checks double the per-item cost; both are decisions for an
-  adopter with the need. `runText` is a small addition when someone asks.
-- **Cache hits skip the hooks.** The cached object was produced under the
-  guardrails in force when it was written. A pre policy that depends on the
-  caller rather than the prompt needs `cache: false`.
+- **Streaming, batch and `runText`:** excluded in 0.16.0, as the open
+  questions suggested. See the 0.17.0 decisions below; the exclusion was
+  caused by each path carrying its own copy of the front door, not by the
+  open questions.
+- **Cache hits skip the hooks** in 0.16.0. Reversed in 0.17.0, below.
+
+## Decisions at 0.17.0: one front door, every path
+
+The structural cause of the 0.16.0 limits was that `runStructured`, `runText`
+and `streamStructured` each reimplemented rate limit → spend cap → cache key
+→ cache read → prompt. A hook added to one had to be ported by hand to the
+others, and was not. `frontDoor` is now the single implementation; the three
+paths call it and keep only their generation body. `applyPostGuardrail` is
+the single post-verdict implementation (transform validation, fail-open,
+record shape), parameterised on how a path validates a transformed value.
+
+- **Pre hook runs before the cache read**, on the rendered prompt. A policy
+  added today applies to a prompt cached last week, and a per-caller policy
+  (a banned user) cannot be bypassed by a shared cache entry. Cost: when a
+  pre hook is configured, a cache hit loads the prompt before the read (free
+  when `invalidateCacheOnPromptChange` already prefetches it). With no pre
+  hook the order is unchanged and a hit costs no prompt-store read.
+- **Post hook runs on cache hits**, with `provider: "cache"`. A transform is
+  returned to the caller but not written back, so the stored value stays what
+  the provider produced; a block writes the cache row with the verdict and
+  throws. The row for a plain hit with no hooks is byte-identical to before
+  except that `guardrails` is now an explicit NULL rather than absent.
+- **`runText`:** a post transform must return a string; anything else is the
+  schema-invalid case (block, or allow-with-error under `failOpen`).
+- **`streamStructured`:** the pre hook runs before any stream opens. The post
+  hook runs in `finalize`, once, on the completed link's object. A block can
+  only stop the FINAL object: the partials were already visible. The row is
+  written with the spent tokens and the block is *returned* to the driver,
+  not thrown, so the driver can tell policy from a link failure: a block
+  never fails over. `object` rejects and the iterator fails with the same
+  `GuardrailError`. A transformed final object is published as the last
+  partial so a consumer converges on what `object` resolves to.
+- **`submitBatch`:** the pre hook runs per item, before the cache pre-check.
+  A blocked item is excluded from the batch, reported in `result.blocked`,
+  and leaves a zero-token row of its own (trace id
+  `batch:guardrail:<slug>:<item id>`) because no other row would carry the
+  verdict. Allow/transform verdicts ride the reservation row, one record per
+  item, tagged `detail.batchItemId`.
+- **`reconcileBatch`:** the post hook runs per schema-valid item. A block
+  marks the item `{ ok: false, reason: "guardrail", error }` and the item's
+  usage row carries the verdict; the tokens were spent, so the row is billed.
+  The job store persists no per-item prompt or input in v1, so the hook sees
+  `prompt: ""` and `input: undefined`. A hook that grounds against the input
+  (TrustGate's grounder) has nothing to ground against at reconcile and
+  should allow; that is a job-store schema change for a later version, not
+  a reason to skip output policy now.
+- **`embed()` is not a hook path.** There is no prompt and no object; the
+  governance it gets is caps, ZDR and the ledger.
 - **Allow verdicts may carry `reason` and `detail`** so a hook that computed
   something expensive (TrustGate's confidence blend) can leave it in the
   ledger even when it let the call through.

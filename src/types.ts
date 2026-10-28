@@ -614,11 +614,11 @@ export interface GatewayConfig {
   /** Export hooks for OTel/Langfuse/metrics. See ObservabilityHooks. */
   observability?: ObservabilityHooks;
   /**
-   * Pre/post guardrail hooks run on every `runStructured` call (mock mode
-   * included, so CI can test policy). Verdicts are ledgered on the usage row.
-   * Fail closed on hook error unless `failOpen` is set. Not applied to
-   * streaming, batch or `runText` in this version; see
-   * docs/design/guardrail-hooks.md.
+   * Pre/post guardrail hooks run on every governed call: `runStructured`,
+   * `runText`, `streamStructured`, and per item in `submitBatch` (pre) and
+   * `reconcileBatch` (post). Cache hits run them too. Mock mode runs them, so
+   * CI can test policy. Verdicts are ledgered on the usage row. Fail closed
+   * on hook error unless `failOpen` is set. See docs/design/guardrail-hooks.md.
    */
   guardrails?: import("./guardrails.js").GuardrailConfig;
 }
