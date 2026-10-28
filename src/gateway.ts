@@ -439,6 +439,12 @@ function messageText(m: ModelMessage): string {
     .join("");
 }
 
+/** The SDK's fullStream minus its own "start" part, which it emits before the
+ *  model responds and would otherwise disarm the first-chunk clock. */
+async function* modelParts<T extends { type: string }>(src: AsyncIterable<T>): AsyncGenerator<T> {
+  for await (const p of src) if (p.type !== "start") yield p;
+}
+
 async function* singleEmission<T>(value: T): AsyncGenerator<T> {
   yield value;
 }
@@ -1643,81 +1649,113 @@ export class Gateway {
     void result.catch(() => {});
     const failovers: StreamFailover[] = [];
 
+    // Ledger-first, as in streamStructured: an abandoned link still spent.
+    const ledgerFailedLink = async (provider: string, model: string, ms: number) => {
+      await this.logUsage(
+        row({ provider, model, inTok: 0, outTok: 0, durationMs: ms, text: "", toolCalls: 0 }),
+      );
+    };
+
     void (async () => {
-      const link = links[0]!;
-      const controller = new AbortController();
-      const stream = aiStreamText({
-        model: link.languageModel!,
-        messages,
-        abortSignal: controller.signal,
-        ...(opts.system ? { system: opts.system } : {}),
-        ...(opts.tools ? { tools: opts.tools } : {}),
-        ...(opts.stopWhen ? { stopWhen: opts.stopWhen } : {}),
-        ...(temperature !== undefined ? { temperature } : {}),
-      });
-      const guard = guardStream(stream.fullStream, {
-        controller,
-        firstChunkMs,
-        stallMs,
-        mode: "queue",
-        ...(opts.signal ? { callerSignal: opts.signal } : {}),
-        onTrip: (phase, waitedMs) => new StreamStallError(phase, waitedMs, link.provider, link.model),
-        onCallerAbort: (reason) => (reason instanceof Error ? reason : new Error("Stream aborted by caller")),
-      });
-      let text = "";
-      const toolCalls: unknown[] = [];
-      const toolResults: unknown[] = [];
-      let total = { inputTokens: 0, outputTokens: 0 };
-      try {
-        await Promise.race([
-          (async () => {
-            for await (const part of guard.stream) {
-              if (part.type === "text-delta") {
-                text += part.text;
-                out.publish(part.text);
-              } else if (part.type === "tool-call") toolCalls.push(part);
-              else if (part.type === "tool-result") toolResults.push(part);
-              else if (part.type === "finish")
-                total = {
-                  inputTokens: part.totalUsage.inputTokens ?? 0,
-                  outputTokens: part.totalUsage.outputTokens ?? 0,
-                };
-              else if (part.type === "error") throw part.error;
-            }
-          })(),
-          guard.tripped.then((err) => {
-            throw err;
-          }),
-        ]);
-        await this.logUsage(
-          row({
+      let lastErr: unknown;
+      for (let i = 0; i < links.length; i++) {
+        const link = links[i]!;
+        const linkStart = Date.now();
+        const controller = new AbortController();
+        const stream = aiStreamText({
+          model: link.languageModel!,
+          messages,
+          abortSignal: controller.signal,
+          maxRetries: 0, // the gateway owns failover
+          ...(opts.system ? { system: opts.system } : {}),
+          ...(opts.tools ? { tools: opts.tools } : {}),
+          ...(opts.stopWhen ? { stopWhen: opts.stopWhen } : {}),
+          ...(temperature !== undefined ? { temperature } : {}),
+        });
+        const guard = guardStream(modelParts(stream.fullStream), {
+          controller,
+          firstChunkMs,
+          stallMs,
+          mode: "queue",
+          ...(opts.signal ? { callerSignal: opts.signal } : {}),
+          onTrip: (phase, waitedMs) =>
+            new StreamStallError(phase, waitedMs, link.provider, link.model),
+          onCallerAbort: (reason) =>
+            reason instanceof Error ? reason : new Error("Stream aborted by caller"),
+        });
+        let text = "";
+        const toolCalls: unknown[] = [];
+        const toolResults: unknown[] = [];
+        let total = { inputTokens: 0, outputTokens: 0 };
+        try {
+          await Promise.race([
+            (async () => {
+              for await (const part of guard.stream) {
+                if (part.type === "text-delta") {
+                  text += part.text;
+                  out.publish(part.text);
+                } else if (part.type === "tool-call") toolCalls.push(part);
+                else if (part.type === "tool-result") toolResults.push(part);
+                else if (part.type === "finish")
+                  total = {
+                    inputTokens: part.totalUsage.inputTokens ?? 0,
+                    outputTokens: part.totalUsage.outputTokens ?? 0,
+                  };
+                else if (part.type === "error") throw part.error;
+              }
+            })(),
+            guard.tripped.then((err) => {
+              throw err;
+            }),
+          ]);
+          await this.logUsage(
+            row({
+              provider: link.provider,
+              model: link.model,
+              inTok: total.inputTokens,
+              outTok: total.outputTokens,
+              durationMs: Date.now() - start,
+              text,
+              toolCalls: toolCalls.length,
+            }),
+          );
+          out.close();
+          resolveResult({
+            text,
+            toolCalls,
+            toolResults,
+            usage: total,
             provider: link.provider,
             model: link.model,
-            inTok: total.inputTokens,
-            outTok: total.outputTokens,
-            durationMs: Date.now() - start,
-            text,
-            toolCalls: toolCalls.length,
-          }),
-        );
-        out.close();
-        resolveResult({
-          text,
-          toolCalls,
-          toolResults,
-          usage: total,
-          provider: link.provider,
-          model: link.model,
-          degraded: false,
-          failovers,
-        });
-      } catch (err) {
-        const e = err instanceof Error ? err : new Error(String(err));
-        out.fail(e);
-        rejectResult(e);
-      } finally {
-        guard.dispose();
+            degraded: false,
+            failovers,
+          });
+          return;
+        } catch (err) {
+          lastErr = err;
+          await ledgerFailedLink(link.provider, link.model, Date.now() - linkStart);
+          const callerAborted = opts.signal?.aborted === true;
+          const advanceable =
+            !callerAborted && (err instanceof StreamStallError || isRetryable(err));
+          if (advanceable && i < links.length - 1) {
+            const failover: StreamFailover = {
+              provider: link.provider,
+              model: link.model,
+              reason: err instanceof StreamStallError ? "stall" : "retryable",
+              hadPartialOutput: false,
+            };
+            failovers.push(failover);
+            this.emitObs("onStreamFailover", this.obs?.onStreamFailover, { traceId, ...failover });
+            continue;
+          }
+          break;
+        } finally {
+          guard.dispose();
+        }
       }
+      const e = lastErr instanceof Error ? lastErr : new Error("streamText: no link produced a result");
+      out.fail(e);
+      rejectResult(e);
     })();
 
     return { traceId, textStream: out.stream, result };

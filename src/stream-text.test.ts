@@ -209,3 +209,60 @@ describe("streamText: happy path", () => {
     expect((await res.result).text).toBe("mocked");
   });
 });
+
+const httpError = (status: number) =>
+  Object.assign(new Error(`${status} upstream`), { statusCode: status });
+
+describe("streamText: failover before the point of no return", () => {
+  it("fails over on a first-chunk stall", async () => {
+    const a = scriptedModel(["hang"]);
+    const b = scriptedModel([textStep(["ok"])]);
+    const { gw, store } = makeGw([{ model: a.model }, { model: b.model }]);
+    const res = await gw.streamText({ ...base, streamFirstChunkMs: 50 });
+    const out = await res.result;
+    expect(out.text).toBe("ok");
+    expect(out.failovers).toEqual([
+      { provider: "anthropic", model: "link-0", reason: "stall", hadPartialOutput: false },
+    ]);
+    expect(store.entries).toHaveLength(2);
+    expect(store.entries[0]!.outputTokens).toBe(0);
+    expect(store.entries[0]!.model).toBe("link-0");
+  });
+
+  it("fails over on a retryable error before any part", async () => {
+    const a = scriptedModel([httpError(503)]);
+    const b = scriptedModel([textStep(["ok"])]);
+    const { gw } = makeGw([{ model: a.model }, { model: b.model }]);
+    const out = await (await gw.streamText(base)).result;
+    expect(out.text).toBe("ok");
+    expect(out.failovers[0]!.reason).toBe("retryable");
+  });
+
+  it("a non-retryable error does not fail over", async () => {
+    const a = scriptedModel([httpError(400)]);
+    const b = scriptedModel([textStep(["ok"])]);
+    const { gw } = makeGw([{ model: a.model }, { model: b.model }]);
+    const res = await gw.streamText(base);
+    await expect(collect(res.textStream)).rejects.toThrow(/400/);
+    await expect(res.result).rejects.toThrow(/400/);
+    expect(b.state.calls).toBe(0);
+  });
+
+  it("an exhausted chain rejects with the last link's error", async () => {
+    const a = scriptedModel([httpError(503)]);
+    const b = scriptedModel([httpError(502)]);
+    const { gw } = makeGw([{ model: a.model }, { model: b.model }]);
+    await expect((await gw.streamText(base)).result).rejects.toThrow(/502/);
+  });
+
+  it("requireZdr filters links", async () => {
+    const a = scriptedModel([textStep(["a"])]);
+    const b = scriptedModel([textStep(["b"])]);
+    const { gw } = makeGw([{ model: a.model }, { model: b.model }], {
+      providers: { retention: { "anthropic:link-1": { zdr: true } } },
+    });
+    const out = await (await gw.streamText({ ...base, requireZdr: true })).result;
+    expect(out.text).toBe("b");
+    expect(a.state.calls).toBe(0);
+  });
+});
