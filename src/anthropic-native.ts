@@ -66,6 +66,13 @@ export interface NativeCallOptions {
   webSearch?: boolean | { maxUses: number };
   /** Attach ephemeral cache_control to the system prompt block. */
   cacheSystem?: boolean;
+  /**
+   * runText only: use the streaming transport (messages.create with
+   * stream: true) and return the joined text. Needed for completions the SDK
+   * refuses to send non-streaming (its 10-minute ceiling, e.g. a 64k
+   * max_tokens). streamText always streams.
+   */
+  stream?: boolean;
 }
 
 export interface NativeAnthropicConfig {
@@ -234,24 +241,18 @@ function toFinishReason(stopReason: string | null | undefined): string | undefin
   return stopReason;
 }
 
-/** Native Anthropic TEXT call: the runText counterpart of
- *  callNativeAnthropic. No emit tool and no schema — the answer is the
- *  concatenated text blocks — which is exactly what makes server-side web
- *  search usable for grounded text: the search results and the prose answer
- *  interleave freely instead of being forced through a tool call. */
-export async function callNativeAnthropicText(
+/** Request params for a native text call (shared by the unary and streaming paths). */
+function nativeTextParams(
   cfg: NativeAnthropicConfig,
   args: {
     model: string;
-    prompt: string;
+    messages: { role: "user" | "assistant"; content: string }[];
     system?: string;
     temperature?: number;
     maxTokens?: number;
     native: NativeCallOptions;
-    /** Aborts the request. The gateway always supplies one. */
-    signal?: AbortSignal;
   },
-): Promise<NativeTextResult> {
+): Record<string, unknown> {
   const supports = cfg.supportsThinking ?? defaultSupportsThinking;
   const wantsThinking = !!args.native.thinking && supports(args.model);
 
@@ -281,20 +282,132 @@ export async function callNativeAnthropicText(
       ]
     : undefined;
 
-  const msg = await cfg.client.messages.create(
-    {
-      model: args.model,
-      max_tokens: args.maxTokens ?? cfg.maxTokens ?? 8192,
-      ...(system ? { system } : {}),
-      messages: [{ role: "user", content: args.prompt }],
-      ...(tools.length > 0 ? { tools } : {}),
-      ...(thinking ? { thinking } : {}),
-      ...(args.temperature !== undefined && !wantsThinking
-        ? { temperature: args.temperature } // thinking requires temperature 1
-        : {}),
-    },
+  return {
+    model: args.model,
+    max_tokens: args.maxTokens ?? cfg.maxTokens ?? 8192,
+    ...(system ? { system } : {}),
+    messages: args.messages,
+    ...(tools.length > 0 ? { tools } : {}),
+    ...(thinking ? { thinking } : {}),
+    ...(args.temperature !== undefined && !wantsThinking
+      ? { temperature: args.temperature } // thinking requires temperature 1
+      : {}),
+  };
+}
+
+/** A streamed native part, shaped like the AI SDK's fullStream parts the
+ *  gateway's stream loop already reads. */
+export type NativeStreamPart =
+  | { type: "text-delta"; text: string }
+  | {
+      type: "finish";
+      finishReason?: string;
+      totalUsage: { inputTokens: number; outputTokens: number };
+      extras: { cacheCreateTokens: number; cacheReadTokens: number; webSearches: number };
+    };
+
+/**
+ * Native text over the streaming transport: messages.create({ stream: true })
+ * yields raw SSE events, mapped to text deltas and one final usage part.
+ * Same join rule as the unary path (#16): a text block that follows a
+ * non-text block (a web search) starts on a new line.
+ */
+export async function* streamNativeAnthropicText(
+  cfg: NativeAnthropicConfig,
+  args: Parameters<typeof nativeTextParams>[1] & { signal?: AbortSignal },
+): AsyncGenerator<NativeStreamPart> {
+  const create = cfg.client.messages.create as unknown as (
+    p: Record<string, unknown>,
+    o?: AnthropicRequestOptions,
+  ) => Promise<AsyncIterable<Record<string, any>>>;
+  const events = await create(
+    { ...nativeTextParams(cfg, args), stream: true },
     { signal: args.signal },
   );
+  const usage = { in: 0, out: 0, cacheCreate: 0, cacheRead: 0, searches: 0 };
+  let stopReason: string | null | undefined;
+  let emitted = false;
+  let afterText = true;
+  for await (const e of events) {
+    if (e.type === "message_start") {
+      const u = e.message?.usage ?? {};
+      usage.in = u.input_tokens ?? 0;
+      usage.out = u.output_tokens ?? 0;
+      usage.cacheCreate = u.cache_creation_input_tokens ?? 0;
+      usage.cacheRead = u.cache_read_input_tokens ?? 0;
+    } else if (e.type === "content_block_start") {
+      if (e.content_block?.type !== "text") afterText = false;
+      else {
+        if (!afterText && emitted) yield { type: "text-delta", text: "\n" };
+        afterText = true;
+      }
+    } else if (e.type === "content_block_delta" && e.delta?.type === "text_delta") {
+      emitted = true;
+      yield { type: "text-delta", text: e.delta.text };
+    } else if (e.type === "message_delta") {
+      stopReason = e.delta?.stop_reason ?? stopReason;
+      if (e.usage?.output_tokens !== undefined) usage.out = e.usage.output_tokens;
+      usage.searches = e.usage?.server_tool_use?.web_search_requests ?? usage.searches;
+    } else if (e.type === "error") {
+      throw Object.assign(new Error(e.error?.message ?? "Anthropic stream error"), {
+        status: e.error?.type === "overloaded_error" ? 529 : undefined,
+      });
+    }
+  }
+  yield {
+    type: "finish",
+    finishReason: toFinishReason(stopReason),
+    totalUsage: { inputTokens: usage.in, outputTokens: usage.out },
+    extras: {
+      cacheCreateTokens: usage.cacheCreate,
+      cacheReadTokens: usage.cacheRead,
+      webSearches: usage.searches,
+    },
+  };
+}
+
+/** Native Anthropic TEXT call: the runText counterpart of
+ *  callNativeAnthropic. No emit tool and no schema — the answer is the
+ *  concatenated text blocks — which is exactly what makes server-side web
+ *  search usable for grounded text: the search results and the prose answer
+ *  interleave freely instead of being forced through a tool call. */
+export async function callNativeAnthropicText(
+  cfg: NativeAnthropicConfig,
+  args: {
+    model: string;
+    prompt: string;
+    system?: string;
+    temperature?: number;
+    maxTokens?: number;
+    native: NativeCallOptions;
+    /** Aborts the request. The gateway always supplies one. */
+    signal?: AbortSignal;
+  },
+): Promise<NativeTextResult> {
+  const textArgs = {
+    ...args,
+    messages: [{ role: "user" as const, content: args.prompt }],
+  };
+  if (args.native.stream) {
+    // Streaming transport, joined: same result shape as the unary call.
+    let text = "";
+    for await (const part of streamNativeAnthropicText(cfg, textArgs)) {
+      if (part.type === "text-delta") text += part.text;
+      else
+        return {
+          text,
+          finishReason: part.finishReason,
+          inputTokens: part.totalUsage.inputTokens,
+          outputTokens: part.totalUsage.outputTokens,
+          ...part.extras,
+        };
+    }
+    throw new Error("Anthropic stream ended without a final message");
+  }
+
+  const msg = await cfg.client.messages.create(nativeTextParams(cfg, textArgs), {
+    signal: args.signal,
+  });
 
   // Adjacent text blocks are one run (citations split mid-sentence), so they
   // join bare. A non-text block between them (a web search) is a break (#16).

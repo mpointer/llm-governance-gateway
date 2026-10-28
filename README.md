@@ -591,6 +591,8 @@ const out = await res.result; // after the ledger row: text, toolCalls, toolResu
 - A caller abort ends the stream with no notice; `result` rejects with your reason and the spend is still ledgered.
 - The stall clock pauses while a tool runs, so a slow tool is not a stall.
 
+**Native Anthropic streaming.** Pass `anthropic: { webSearch, thinking, cacheSystem }` and Anthropic links stream through `GatewayConfig.anthropic`'s client (`messages.create({ stream: true })`), with the same failure contract and with web searches and cache tokens on the ledger row. Text messages only, and not combinable with `tools`. For a long non-interactive completion, `runText({ anthropic: { stream: true } })` uses the streaming transport and returns the joined text, which avoids the Anthropic SDK's 10-minute ceiling on non-streaming requests.
+
 ### Editable prompts and the cache
 
 If prompts are edited at runtime — a prompt library, an admin UI, anything that
