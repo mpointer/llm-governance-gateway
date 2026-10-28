@@ -290,6 +290,22 @@ the ledger — one row per attempt, `provider` and `model` differing per row. If
 you implemented `TaskOverrideStore`, also change a model in the admin UI and
 confirm the next call's ledger row names the new model.
 
+**If you also have a `ModelConfigStore` pin, read this before adding a
+`TaskOverrideStore`.** By default a pin outranks the whole task layer. While
+`getOverride()` returns non-null, the gateway never reads your task store, so
+per-task admin choices have no effect. A store that returns `null` when `tier`
+is set gets around this only for call sites that pass a tier. A store that
+always returns the pin while a pin row exists makes the task store dead code.
+
+To let a per-task admin choice win, opt in:
+
+```ts
+tasks: { defaults: { ... }, store: myTaskStore, overridesBeatPin: true }
+```
+
+With the flag on, a task that has an entry in the store ignores the pin.
+Tasks that only have a code default still follow the pin.
+
 ### 4.3 Phase 3 — enforce
 
 Flip `mode` to `"enforce"` (or drop it; enforce is the default) once the

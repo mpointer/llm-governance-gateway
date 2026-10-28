@@ -297,7 +297,8 @@ export interface RunStructuredOptions<I, O> {
   /**
    * Named task from GatewayConfig.tasks — routes to the task's model
    * (admin-store override → code default). Precedence when set:
-   * modelConfig.getOverride() > task > chain > static default.
+   * modelConfig.getOverride() > task > chain > static default. With
+   * `tasks.overridesBeatPin`, a task's store entry outranks the pin.
    */
   task?: string;
   /**
@@ -2884,16 +2885,18 @@ export class Gateway {
   private readonly warnedShadowedTasks = new Set<string>();
 
   /**
-   * The admin pin, `ModelConfigStore.getOverride()`. A pin outranks task
-   * routing entirely, `TaskOverrideStore` entries included, which is the
-   * documented precedence — but a call that names a task and silently gets
-   * the pin instead is the shape of issue #57. Warn once per task.
+   * The admin pin, `ModelConfigStore.getOverride()`. By default a pin
+   * outranks task routing entirely, `TaskOverrideStore` entries included —
+   * but a call that names a task and silently gets the pin instead is the
+   * shape of issue #57. With `tasks.overridesBeatPin`, a task's store entry
+   * wins (null here); otherwise warn once per shadowed task.
    */
   private async adminPin(
     orgId: string | undefined,
     tier: "fast" | "power" | undefined,
     task: string | undefined,
   ): Promise<{ provider: ProviderId; model: string } | null> {
+    if (task !== undefined && (await this.tasks?.beatsPin(task, orgId))) return null;
     const pin = (await this.modelConfig?.getOverride(orgId, tier)) ?? null;
     if (pin && task !== undefined && !this.warnedShadowedTasks.has(task)) {
       this.warnedShadowedTasks.add(task);

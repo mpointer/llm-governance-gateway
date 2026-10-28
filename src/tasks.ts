@@ -85,6 +85,15 @@ export class TaskRouter {
   }
 
   /**
+   * Should this task's store entry outrank a ModelConfigStore pin? Only with
+   * `overridesBeatPin` set, and only for a store entry, never a code default.
+   */
+  async beatsPin(task: string, orgId?: string | null): Promise<boolean> {
+    if (!this.cfg.overridesBeatPin) return false;
+    return !!(await this.loadOverrides(orgId))[task];
+  }
+
+  /**
    * Resolve a task to its model: store override → code default. Throws on an
    * unknown task — a typo'd task name must fail loudly, not silently route to
    * some global default.

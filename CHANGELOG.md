@@ -60,6 +60,13 @@ Repository hygiene. Nothing else here changes runtime behavior.
 
 ### Added
 
+- **`tasks.overridesBeatPin` (#57).** A `ModelConfigStore` pin used to skip
+  the task layer entirely, so a `TaskOverrideStore` entry was never read while
+  any pin existed (the gateway only warned). Set `overridesBeatPin: true` and a
+  task with an entry in the store outranks the pin on every run path,
+  `streamText` included. Code defaults still lose to the pin. Off by default:
+  with it unset, resolution is unchanged and the task store is not read for
+  pinned calls.
 - **`streamText` (#14, Scout half).** A governed text stream with tool calling:
   `tools` and `stopWhen` pass through to the AI SDK, and `result` resolves after
   the ledger row with text, tool calls/results, usage across all steps and a
