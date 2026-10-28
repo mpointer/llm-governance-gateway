@@ -8,7 +8,7 @@ adopters implement, and in practice they have only ever gained capability throug
 *optional* parameters — but they are not yet under a formal semver freeze. 1.0.0
 is gated on a downstream integration proving the SPI holds, not on a date.
 
-## Unreleased
+## 0.17.1
 
 - `streamText`: a caller abort now rejects `result` with the caller's own
   reason, even when it is not an `Error` (it was replaced by a generic error).
