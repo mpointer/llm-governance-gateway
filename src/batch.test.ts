@@ -184,8 +184,8 @@ describe("governed batch", () => {
     // expired item billed nothing.
     const itemRows = usage.entries.filter((e) => e.route === "batch:extract");
     expect(itemRows).toHaveLength(2);
-    // 50% discount: haiku in .08/1K out .4/1K → (100*.08+50*.4)/1000 * .5
-    expect(itemRows[0]!.estimatedCostCents).toBeCloseTo(((100 * 0.08 + 50 * 0.4) / 1000) * 0.5, 10);
+    // 50% discount: haiku 4.5 in .1/1K out .5/1K → (100*.1+50*.5)/1000 * .5
+    expect(itemRows[0]!.estimatedCostCents).toBeCloseTo(((100 * 0.1 + 50 * 0.5) / 1000) * 0.5, 10);
     expect(itemRows[0]!.traceId).toBe("batch_123:a");
 
     // Reservation fully released: net spend = sum of actuals.

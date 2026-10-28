@@ -86,6 +86,11 @@ const BUILTIN_TIERS: Partial<Record<ProviderId, { fast: string; power: string }>
 
 // Cents per 1K tokens. Extend/override via ProviderConfig.pricing.
 //
+// Sources, checked 2026-10-28: platform.claude.com/docs/en/about-claude/pricing,
+// ai.google.dev/gemini-api/docs/pricing (paid tier, standard context),
+// developers.openai.com/api/docs/pricing (standard tier). $/MTok × 0.1 =
+// cents per 1K.
+//
 // Every row carries `asOf`, the date the rate was last checked against the
 // vendor's price page. The monthly pricing-staleness workflow fails once the
 // NEWEST of these is more than a quarter old, which is the reminder to
@@ -95,19 +100,20 @@ const BUILTIN_TIERS: Partial<Record<ProviderId, { fast: string; power: string }>
 // Exported for that script and for the test that pins the invariant; it is
 // not part of the package's public API (not re-exported from index.ts).
 export const BUILTIN_PRICING: Record<string, ModelPricing> = {
-  "claude-sonnet-4-6": { in: 0.3, out: 1.5, asOf: "2026-07-19" },
-  "claude-opus-4-8": { in: 1.5, out: 7.5, asOf: "2026-07-19" },
-  "claude-haiku-4-5-20251001": { in: 0.08, out: 0.4, asOf: "2026-07-19" },
-  "gemini-2.5-pro": { in: 0.125, out: 0.5, asOf: "2026-07-19" },
-  "gemini-2.5-flash": { in: 0.015, out: 0.06, asOf: "2026-07-19" },
+  "claude-sonnet-4-6": { in: 0.3, out: 1.5, asOf: "2026-10-28" },
+  "claude-opus-4-8": { in: 0.5, out: 2.5, asOf: "2026-10-28" },
+  "claude-haiku-4-5-20251001": { in: 0.1, out: 0.5, asOf: "2026-10-28" },
+  // Prompts up to 200k tokens; the >200k tier ($2.50/$15) is not modelled.
+  "gemini-2.5-pro": { in: 0.125, out: 1.0, asOf: "2026-10-28" },
+  "gemini-2.5-flash": { in: 0.03, out: 0.25, asOf: "2026-10-28" },
   // Paid-tier ceiling, ai.google.dev pricing.
-  "gemini-3.1-flash-lite": { in: 0.025, out: 0.15, asOf: "2026-07-24" },
-  "gpt-4.1": { in: 0.2, out: 0.8, asOf: "2026-07-19" },
-  "gpt-4.1-mini": { in: 0.04, out: 0.16, asOf: "2026-07-19" },
-  "gpt-4.1-nano": { in: 0.01, out: 0.04, asOf: "2026-07-19" },
+  "gemini-3.1-flash-lite": { in: 0.025, out: 0.15, asOf: "2026-10-28" },
+  "gpt-4.1": { in: 0.2, out: 0.8, asOf: "2026-10-28" },
+  "gpt-4.1-mini": { in: 0.04, out: 0.16, asOf: "2026-10-28" },
+  "gpt-4.1-nano": { in: 0.01, out: 0.04, asOf: "2026-10-28" },
   // Embeddings (no output tokens).
-  "text-embedding-3-small": { in: 0.002, out: 0, asOf: "2026-07-24" },
-  "text-embedding-3-large": { in: 0.013, out: 0, asOf: "2026-07-24" },
+  "text-embedding-3-small": { in: 0.002, out: 0, asOf: "2026-10-28" },
+  "text-embedding-3-large": { in: 0.013, out: 0, asOf: "2026-10-28" },
 };
 
 /** Days after which the built-in table counts as stale. One quarter. */
