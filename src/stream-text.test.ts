@@ -46,8 +46,7 @@ function scriptedModel(steps: Step[], id = "fake-model") {
             if (step.then instanceof Error) {
               const err = step.then;
               setTimeout(() => c.error(err), 0);
-            }
-            else if (step.then === "hang")
+            } else if (step.then === "hang")
               opts.abortSignal?.addEventListener("abort", () => c.error(new Error("aborted")));
             else c.close();
           },
@@ -450,7 +449,12 @@ describe("streamText: guardrails", () => {
         },
       },
     });
-    await (await gw.streamText({ ...base, messages: [user("first"), { role: "assistant", content: "x" }, user("last")] })).result;
+    await (
+      await gw.streamText({
+        ...base,
+        messages: [user("first"), { role: "assistant", content: "x" }, user("last")],
+      })
+    ).result;
     expect(seen).toEqual([{ prompt: "last", system: "You are Scout." }]);
   });
 
@@ -533,7 +537,10 @@ describe("streamText: final-review fixes", () => {
         { type: "image", image: new Uint8Array([1, 2, 3]), mediaType: "image/png" },
       ],
     };
-    for (const guardrails of [undefined, { pre: () => ({ action: "transform" as const, prompt: "scrubbed" }) }]) {
+    for (const guardrails of [
+      undefined,
+      { pre: () => ({ action: "transform" as const, prompt: "scrubbed" }) },
+    ]) {
       const { model, state } = scriptedModel([textStep(["a"])]);
       const { gw } = makeGw([{ model }], guardrails ? { guardrails } : {});
       await (await gw.streamText({ ...base, messages: [msg] })).result;
@@ -561,7 +568,9 @@ describe("streamText: final-review fixes", () => {
     const { gw, store } = makeGw([{ model: a.model }]);
     const res = await gw.streamText({
       ...base,
-      tools: { big: tool({ inputSchema: z.object({}), execute: async () => ({ blob: "y".repeat(4000) }) }) },
+      tools: {
+        big: tool({ inputSchema: z.object({}), execute: async () => ({ blob: "y".repeat(4000) }) }),
+      },
       stopWhen: stepCountIs(4),
     });
     await res.result;

@@ -1573,7 +1573,8 @@ export class Gateway {
     if (!lastUserText) throw new Error("streamText: messages must end with a user message");
 
     const validate = (raw: unknown): string => {
-      if (typeof raw !== "string") throw new Error("a streamText post hook must transform to a string");
+      if (typeof raw !== "string")
+        throw new Error("a streamText post hook must transform to a string");
       return raw;
     };
     // The front door renders `promptBody` as the prompt: here, the last user
@@ -1628,9 +1629,20 @@ export class Gateway {
         throw new Error(`Mock mode is on but no responder registered for "${opts.slug}".`);
       }
       const text = String(responder({ system: opts.system, messages } as never));
-      const usage = { inputTokens: Math.ceil(prompt.length / 4), outputTokens: Math.ceil(text.length / 4) };
+      const usage = {
+        inputTokens: Math.ceil(prompt.length / 4),
+        outputTokens: Math.ceil(text.length / 4),
+      };
       await this.logUsage(
-        row({ provider: "mock", model: "mock", inTok: usage.inputTokens, outTok: usage.outputTokens, durationMs: 0, text, toolCalls: 0 }),
+        row({
+          provider: "mock",
+          model: "mock",
+          inTok: usage.inputTokens,
+          outTok: usage.outputTokens,
+          durationMs: 0,
+          text,
+          toolCalls: 0,
+        }),
       );
       return {
         traceId,
@@ -1728,11 +1740,14 @@ export class Gateway {
               ? new Promise<never>(() => {})
               : new Promise<never>((_, reject) => {
                   const elapsed = Date.now() - start;
-                  deadlineTimer = setTimeout(() => {
-                    const err = new DeadlineExceededError(deadlineMs, Date.now() - start);
-                    controller.abort(err);
-                    reject(err);
-                  }, Math.max(0, deadlineMs - elapsed));
+                  deadlineTimer = setTimeout(
+                    () => {
+                      const err = new DeadlineExceededError(deadlineMs, Date.now() - start);
+                      controller.abort(err);
+                      reject(err);
+                    },
+                    Math.max(0, deadlineMs - elapsed),
+                  );
                 });
           await Promise.race([
             deadline,
@@ -1896,7 +1911,8 @@ export class Gateway {
           guard.dispose();
         }
       }
-      const e = lastErr instanceof Error ? lastErr : new Error("streamText: no link produced a result");
+      const e =
+        lastErr instanceof Error ? lastErr : new Error("streamText: no link produced a result");
       out.fail(e);
       rejectResult(e);
     })().catch((e: unknown) => {
