@@ -6,7 +6,14 @@ import {
   streamObject,
   streamText as aiStreamText,
 } from "ai";
-import type { LanguageModel, ModelMessage, Schema, StopCondition, ToolSet } from "ai";
+import type {
+  LanguageModel,
+  ModelMessage,
+  Schema,
+  StopCondition,
+  TextStreamPart,
+  ToolSet,
+} from "ai";
 import { z } from "zod";
 import { backoffMs, isRetryable, isSchemaValidationError } from "./backoff.js";
 import {
@@ -38,8 +45,10 @@ import {
   callNativeAnthropic,
   callNativeAnthropicText,
   extractEmitToolInput,
+  streamNativeAnthropicText,
   NativeSchemaError,
   type NativeCallOptions,
+  type NativeStreamPart,
 } from "./anthropic-native.js";
 import {
   batchSchemaToJson,
@@ -407,6 +416,13 @@ export interface StreamTextOptions {
   metadata?: Record<string, unknown>;
   /** Overrides DEFAULT_DEGRADED_NOTICE. */
   degradedNotice?: string;
+  /**
+   * Stream Anthropic links natively (web search, thinking, system-prompt
+   * caching) via GatewayConfig.anthropic. Text messages only, and not
+   * combinable with `tools`. Non-Anthropic links in the chain stream through
+   * the AI SDK without these features.
+   */
+  anthropic?: NativeCallOptions;
   /** Time allowed to the first stream part. Overrides GatewayConfig.timeouts. */
   streamFirstChunkMs?: number;
   /** Time allowed between parts (paused while a tool runs). */
@@ -462,6 +478,27 @@ function withText(m: ModelMessage, text: string): ModelMessage {
   const rest = parts.filter((p) => p.type !== "text");
   rest.splice(at < 0 ? 0 : Math.min(at, rest.length), 0, { type: "text", text } as never);
   return { ...m, content: rest } as ModelMessage;
+}
+
+/** A part streamText's loop reads: the AI SDK's, or the native path's. */
+type StreamPart = TextStreamPart<ToolSet> | NativeStreamPart;
+type NativeExtras = { cacheCreateTokens: number; cacheReadTokens: number; webSearches: number };
+
+/** ModelMessages as Anthropic text messages; the native stream is text-only. */
+function nativeMessages(
+  messages: ModelMessage[],
+): { role: "user" | "assistant"; content: string }[] {
+  return messages.map((m) => {
+    const textOnly =
+      typeof m.content === "string" ||
+      (m.content as { type: string }[]).every((p) => p.type === "text");
+    if ((m.role !== "user" && m.role !== "assistant") || !textOnly) {
+      throw new Error(
+        "streamText: `anthropic` native streaming takes text user/assistant messages only",
+      );
+    }
+    return { role: m.role, content: messageText(m) };
+  });
 }
 
 async function* singleEmission<T>(value: T): AsyncGenerator<T> {
@@ -733,6 +770,8 @@ export class Gateway {
     orgId: string | undefined,
     opts: { tier?: "fast" | "power"; task?: string },
     requireZdr: boolean,
+    /** Keep these providers' links even with no AI SDK key (native path). */
+    keepKeyless?: ProviderId[],
   ): Promise<ChainLink[]> {
     const adminOverride = await this.adminPin(orgId, opts.tier, opts.task);
     let links: ChainLink[];
@@ -747,7 +786,7 @@ export class Gateway {
       }));
     } else {
       const chainCfg = (await this.modelConfig?.getChain(orgId)) ?? [];
-      const built = this.registry.buildChain(chainCfg, opts.tier);
+      const built = this.registry.buildChain(chainCfg, opts.tier, keepKeyless);
       links = built.length > 0 ? built : [this.registry.resolveDefault()];
     }
     if (requireZdr) {
@@ -1576,6 +1615,16 @@ export class Gateway {
     const last = opts.messages.at(-1);
     const lastUserText = last?.role === "user" ? messageText(last) : "";
     if (!lastUserText) throw new Error("streamText: messages must end with a user message");
+    if (opts.anthropic && opts.tools) {
+      throw new Error(
+        "streamText: `anthropic` native options cannot be combined with AI SDK `tools`",
+      );
+    }
+    if (opts.anthropic && !this.anthropicCfg && !this.mock) {
+      throw new Error(
+        "streamText received `anthropic` native options but GatewayConfig.anthropic is not configured.",
+      );
+    }
 
     const validate = (raw: unknown): string => {
       if (typeof raw !== "string")
@@ -1607,7 +1656,9 @@ export class Gateway {
       text: string;
       toolCalls: number;
       degraded?: boolean;
+      extras?: NativeExtras;
     }) => ({
+      ...(f.extras ?? {}),
       metadata: { ...opts.metadata, toolCalls: f.toolCalls },
       ...(f.degraded ? { degraded: true } : {}),
       guardrails: guardrailRecords.length > 0 ? guardrailRecords : null,
@@ -1620,7 +1671,7 @@ export class Gateway {
       model: f.model,
       inputTokens: f.inTok,
       outputTokens: f.outTok,
-      estimatedCostCents: this.registry.estimateCostCents(f.model, f.inTok, f.outTok),
+      estimatedCostCents: this.registry.estimateCostCents(f.model, f.inTok, f.outTok, f.extras),
       cacheHit: false,
       traceId,
       durationMs: f.durationMs,
@@ -1665,9 +1716,17 @@ export class Gateway {
       };
     }
 
-    const links = (await this.resolveStreamLinks(orgId, opts, fd.requireZdr)).filter(
-      (l) => l.languageModel,
-    );
+    // A link streams natively when the caller asked for native features and
+    // it is an Anthropic link; native links need no AI SDK key.
+    const native = (l: ChainLink) => !!opts.anthropic && l.provider === "anthropic";
+    const links = (
+      await this.resolveStreamLinks(
+        orgId,
+        opts,
+        fd.requireZdr,
+        opts.anthropic ? ["anthropic"] : undefined,
+      )
+    ).filter((l) => l.languageModel || native(l));
     if (links.length === 0) throw new Error("No API key for any streaming link.");
 
     const start = Date.now();
@@ -1703,18 +1762,30 @@ export class Gateway {
         const link = links[i]!;
         const linkStart = Date.now();
         const controller = new AbortController();
-        const stream = aiStreamText({
-          model: link.languageModel!,
-          messages,
-          abortSignal: controller.signal,
-          maxRetries: 0, // the gateway owns failover
-          onError: () => {}, // surfaced via the part stream; the SDK default logs it again
-          ...(opts.system ? { system: opts.system } : {}),
-          ...(opts.tools ? { tools: opts.tools } : {}),
-          ...(opts.stopWhen ? { stopWhen: opts.stopWhen } : {}),
-          ...(temperature !== undefined ? { temperature } : {}),
-        });
-        const guard = guardStream(modelParts(stream.fullStream), {
+        const source = native(link)
+          ? streamNativeAnthropicText(this.anthropicCfg!, {
+              model: link.model,
+              messages: nativeMessages(messages),
+              ...(opts.system ? { system: opts.system } : {}),
+              ...(temperature !== undefined ? { temperature } : {}),
+              native: opts.anthropic!,
+              signal: controller.signal,
+            })
+          : null;
+        const stream = source
+          ? null
+          : aiStreamText({
+              model: link.languageModel!,
+              messages,
+              abortSignal: controller.signal,
+              maxRetries: 0, // the gateway owns failover
+              onError: () => {}, // surfaced via the part stream; the SDK default logs it again
+              ...(opts.system ? { system: opts.system } : {}),
+              ...(opts.tools ? { tools: opts.tools } : {}),
+              ...(opts.stopWhen ? { stopWhen: opts.stopWhen } : {}),
+              ...(temperature !== undefined ? { temperature } : {}),
+            });
+        const guard = guardStream<StreamPart>(source ?? modelParts(stream!.fullStream), {
           controller,
           firstChunkMs,
           stallMs,
@@ -1730,6 +1801,7 @@ export class Gateway {
         const toolCalls: unknown[] = [];
         const toolResults: unknown[] = [];
         let total = { inputTokens: 0, outputTokens: 0 };
+        let extras: NativeExtras | undefined; // native path only
         const done = { inputTokens: 0, outputTokens: 0 }; // completed steps
         // After the first text delta or tool call, a new link would repeat
         // text the user saw or run a tool twice: degrade instead (spec).
@@ -1782,12 +1854,13 @@ export class Gateway {
                   stepText = "";
                   carried += stepChars;
                   stepChars = 0;
-                } else if (part.type === "finish")
+                } else if (part.type === "finish") {
                   total = {
                     inputTokens: part.totalUsage.inputTokens ?? 0,
                     outputTokens: part.totalUsage.outputTokens ?? 0,
                   };
-                else if (part.type === "error") throw part.error;
+                  if ("extras" in part) extras = part.extras;
+                } else if (part.type === "error") throw part.error;
               }
             })(),
             guard.tripped.then((err) => {
@@ -1819,6 +1892,7 @@ export class Gateway {
               durationMs: Date.now() - start,
               text: finalText,
               toolCalls: toolCalls.length,
+              ...(extras ? { extras } : {}),
             }),
           );
           out.close();

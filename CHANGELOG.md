@@ -73,6 +73,14 @@ Repository hygiene. Nothing else here changes runtime behavior.
   widen it, for example to retry network errors that carry no status, without
   an outer wrapper. Caller aborts and attempt timeouts are decided first, so a
   predicate never turns them into retries. Unset, behavior is unchanged.
+- **Native Anthropic streaming (#14, NewsHound half).** `streamText` takes
+  `anthropic: { webSearch, thinking, cacheSystem }` and streams Anthropic links
+  natively through `GatewayConfig.anthropic`, with the same failover/degrade
+  contract and web searches and cache tokens on the ledger row (text messages
+  only; not combinable with `tools`). `runText({ anthropic: { stream: true } })`
+  uses the streaming transport for long completions the Anthropic SDK refuses
+  to send non-streaming. A BYO `AnthropicMessagesClient` must support
+  `create({ ...params, stream: true })` to use either.
 - **`streamText` (#14, Scout half).** A governed text stream with tool calling:
   `tools` and `stopWhen` pass through to the AI SDK, and `result` resolves after
   the ledger row with text, tool calls/results, usage across all steps and a

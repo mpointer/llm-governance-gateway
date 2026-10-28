@@ -152,8 +152,9 @@ individually; their count goes in the row's metadata.
 
 ## Non-goals
 
-- Native Anthropic streaming (`.messages.stream()`), adaptive thinking, web
-  search and prompt caching on this path. That is NewsHound's half of #14.
+- (Since shipped: native Anthropic streaming via `streamText({ anthropic })`
+  and `runText({ anthropic: { stream: true } })`, NewsHound's half of #14.
+  It uses `messages.create({ stream: true })` and feeds the same loop.)
 - A restart-on-failure option. Add it only if an adopter asks.
 - The gateway executing tools itself, or validating tool schemas. The AI SDK
   does both.
