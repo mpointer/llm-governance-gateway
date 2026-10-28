@@ -137,8 +137,9 @@ the public contract, so nothing about it needs freezing at 1.0.
 ### Ledger
 
 `UsageEntry` gains an optional `routedBy` field recording which layer decided:
-`"slug" | "slug-fallback" | "admin-pin" | "task-override" | "task-default" |
-"chain" | "default"`. Optional, so existing `UsageStore` implementations keep
+`"router" | "slug" | "slug-fallback" | "admin-pin" | "task-override" |
+"task-default" | "chain" | "default"` (`"router"` only once #33's hook exists).
+Optional, so existing `UsageStore` implementations keep
 compiling, and absent on rows written with `slugPinWins` off.
 
 ## Answers to #49's questions
@@ -160,7 +161,43 @@ Also settled:
 - **#57 (pin shadows task store):** the shipped opt-in `tasks.overridesBeatPin`
   stands. Under this design both sit below the slug pin.
 - **#33 (content-based routing):** a content router, if one is ever built,
-  picks a slug, never a model.
+  picks a slug, never a model. See the next section for the full decision.
+
+## Content-based routing (#33)
+
+**Decision: no routing seam yet.** Declarative routing (slug, admin pin, task,
+chain, tier) is the deliberate scope today.
+
+**Why.** A router needs to know how several models did on the *same* query.
+The ledger records only the model that was called, so training on it learns
+"the model we already route to is good". Failover and the judge do not fix
+this: failover only samples the fallback when the primary failed, and the
+judge only scores the response that won. A seam with no data behind it just
+moves the problem to the adopter. LLMRouter itself is also not pluggable as a
+dependency: it is Python (a sidecar this library does not make you run),
+PyTorch-sized, and ships no pretrained checkpoints, so every adopter would
+fund a data-generation and training run first.
+
+**Sequencing.** Shadow calls come first
+([hedging-and-shadow-calls.md](./hedging-and-shadow-calls.md)): serve from one
+model, call another off-path on a sampled fraction, judge both, ledger both.
+That produces the comparison data a router needs, on the adopter's own
+traffic, and answers "is our cheap tier good enough?" on its own. A router
+hook is worth building only once that data shows the decision is worth
+making.
+
+**When it is built, its shape is fixed now:**
+
+- `router?: { route(ctx): Promise<string | null> }`, consulted before the
+  slug pin. It returns a **slug** (so the slug still names the model and
+  carries the ZDR rule), or `null` to fall through to today's resolution.
+- Expect the common router to be a simple heuristic the adopter writes
+  (length, keyword, embedding distance), not a trained model.
+- It gets its own small time budget derived from `AttemptBudget`, and it
+  **fails open**: an error, timeout or unknown slug falls through to
+  declarative routing and the request proceeds.
+- The choice is ledgered: `routedBy: "router"`, with the router's chosen slug
+  as the row's `promptSlug`.
 
 ## Non-goals
 
