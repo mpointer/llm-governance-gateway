@@ -10,7 +10,6 @@ is gated on a downstream integration proving the SPI holds, not on a date.
 
 ## Unreleased
 
-<<<<<<< HEAD
 ### Changed
 
 - **Guardrail hooks now run on every path: `runText`, `streamStructured`,
@@ -39,7 +38,7 @@ is gated on a downstream integration proving the SPI holds, not on a date.
   a `task` while `ModelConfigStore.getOverride()` returns a pin was silently
   routed to the pin, `TaskOverrideStore` entries included. The precedence is
   unchanged and documented; the silence is gone.
-=======
+
 ### Fixed
 
 - **Four built-in rates were wrong, re-checked 2026-10-28 against the vendor
@@ -51,7 +50,6 @@ is gated on a downstream integration proving the SPI holds, not on a date.
   the old table under-counted Haiku and both Gemini models and over-counted
   Opus; sums in `ai_usage_log` written before this release carry the old
   estimates. Every row's `asOf` is now 2026-10-28.
->>>>>>> origin/main
 
 Repository hygiene. Nothing else here changes runtime behavior.
 
