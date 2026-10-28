@@ -221,6 +221,46 @@ yours actually blocked — and enforcement never lapses.
 gateway's `sumSpendCents` against your existing spend number. They should agree
 within rounding; if they don't, find out why *now* — the usual cause is §5.1.
 
+#### Running the reconciliation
+
+This is the one gate whose failure is silent and financial, so pin down what
+the gateway's number means before comparing it to yours:
+
+- **Window.** `sumSpendCents(since)` sums rows with `createdAt >= since`
+  (inclusive) and has no upper bound. The caps pass UTC midnight. To compare
+  one closed day, query the table directly with both bounds, as below.
+- **Units.** The SQLite adapter stores `created_at` as **milliseconds**
+  (`timestamp_ms`); the Postgres adapter uses `timestamptz`. If your own ledger
+  is in unixepoch seconds, convert one side. A seconds-vs-milliseconds mismatch
+  returns a plausible number over a window off by 1000×, with no error.
+- **What counts.** Cache hits are excluded. Zero-cost rows (abandoned stream
+  links, guardrail blocks, mock) are included and add nothing. A batch
+  reservation counts until `reconcileBatch` writes its compensating row.
+- **Rounding.** Each row's `estimated_cost_cents` is fractional and never
+  rounded. Sum first, round once at the end. If your ledger rounds per call,
+  expect it to drift from the gateway's by up to half a cent per call; compare
+  per-call rounded sums if you need an exact match.
+
+The query, for one UTC day on the SQLite adapter (adapt the bounds for
+Postgres: `created_at >= '2026-10-27' AND created_at < '2026-10-28'`):
+
+```sql
+-- Gateway side: one UTC day, cache hits excluded, rounded once.
+SELECT model,
+       COUNT(*)                                AS calls,
+       ROUND(SUM(estimated_cost_cents), 2)     AS cents
+FROM ai_usage_log
+WHERE cache_hit = 0
+  AND created_at >= 1793059200000   -- 2026-10-27T00:00:00Z, in MILLISECONDS
+  AND created_at <  1793145600000   -- 2026-10-28T00:00:00Z
+GROUP BY model
+ORDER BY cents DESC;
+```
+
+Run the same grouping over your own ledger for the same day and compare per
+model, not only the total: a single model that disagrees points straight at a
+pricing key (§5.1), while every model off by the same factor points at units.
+
 ### 4.2 Phase 2 — move model selection into the gateway
 
 Replace the app's own chain-walking with `tasks.defaults`, naming the call
@@ -401,7 +441,9 @@ evidence that survives a process being killed:
 - [ ] If prompts are editable: publish an edit and confirm the *next* call
       sends the new body. Assert this through the ledger's `inputText`, not
       through a key-shape check — a key-shape assertion passes against a build
-      that computes a fine key and still serves the stale entry.
+      that computes a fine key and still serves the stale entry. Decrypting
+      `inputText` and comparing it to the rendered prompt also catches a
+      custom store that encrypts snapshots a second time (§3.3).
 
 That last one is the load-bearing test, and the one most likely to be written
 wrong.
