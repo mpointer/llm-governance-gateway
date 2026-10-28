@@ -563,6 +563,34 @@ Restarting rather than resuming is deliberate: no provider offers mid-object con
 
 Remaining constraints, stated plainly: no repair retry, no judge, no native-Anthropic options on the streaming path. Cache hits return a single-emission stream.
 
+#### Streaming text with tools: `streamText`
+
+For a chat turn: text deltas, tool calling, same front door (rate limit, spend cap, guardrails, ledger). No cache and no judge. The caller builds the system prompt and messages; the slug names the call.
+
+```ts
+import { stepCountIs } from "ai";
+
+const res = await gw.streamText({
+  slug: "scout-chat-user",
+  system,
+  messages, // must end with a user message
+  tools,    // the AI SDK executes them
+  stopWhen: stepCountIs(4),
+  userId,
+  route: "scout-chat",
+  signal: req.signal,
+});
+for await (const delta of res.textStream) send(delta);
+const out = await res.result; // after the ledger row: text, toolCalls, toolResults, usage, degraded
+```
+
+**The failure contract is different from `streamStructured`'s.** Restarting text would repeat words the user already read, so:
+
+- Before the **point of no return** (the first text delta or the first executed tool call), a stall or retryable error fails over to the next link.
+- After it, the turn never restarts. The gateway appends a notice (`DEFAULT_DEGRADED_NOTICE`, or your `degradedNotice`), ends the stream normally, resolves `result` with `degraded: true`, and ledgers the turn at an estimated cost.
+- A caller abort ends the stream with no notice; `result` rejects with your reason and the spend is still ledgered.
+- The stall clock pauses while a tool runs, so a slow tool is not a stall.
+
 ### Editable prompts and the cache
 
 If prompts are edited at runtime — a prompt library, an admin UI, anything that

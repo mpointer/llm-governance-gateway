@@ -60,6 +60,14 @@ Repository hygiene. Nothing else here changes runtime behavior.
 
 ### Added
 
+- **`streamText` (#14, Scout half).** A governed text stream with tool calling:
+  `tools` and `stopWhen` pass through to the AI SDK, and `result` resolves after
+  the ledger row with text, tool calls/results, usage across all steps and a
+  `degraded` flag. It fails over only before the point of no return (the first
+  text delta or tool call); after that it appends a notice instead of
+  restarting. No cache, no judge. `UsageEntry` gains an optional `degraded`.
+  Native Anthropic streaming is still open on #14.
+
 - **`ModelPricing.asOf`** — optional ISO date a rate was last checked.
   Every built-in rate now carries one, `ProviderRegistry.pricingAsOf()`
   reads it back, and a monthly `Pricing staleness` workflow fails when the
