@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { embedMany, generateObject, generateText, streamObject } from "ai";
-import type { LanguageModel, Schema } from "ai";
+import type { LanguageModel, ModelMessage, Schema, StopCondition, ToolSet } from "ai";
 import { z } from "zod";
 import { backoffMs, isRetryable, isSchemaValidationError } from "./backoff.js";
 import {
@@ -370,6 +370,60 @@ export interface StreamStructuredResult<O> {
   failovers: StreamFailover[];
 }
 
+/** Appended to a streamText turn that fails after its point of no return. */
+export const DEFAULT_DEGRADED_NOTICE =
+  "Sorry, I lost my connection partway through that answer. Please try again.";
+
+export interface StreamTextOptions {
+  /** Names the call: routing, ledger, guardrails, ZDR. Required. */
+  slug: string;
+  /** Caller-assembled system prompt; the gateway does not render it. */
+  system?: string;
+  /** Must end with a user message. */
+  messages: ModelMessage[];
+  /** Passed through; the AI SDK executes them. */
+  tools?: ToolSet;
+  stopWhen?: StopCondition<ToolSet> | StopCondition<ToolSet>[];
+  tier?: "fast" | "power";
+  task?: string;
+  orgId?: string;
+  /** Identity and cap scope: same semantics as RunTextOptions. */
+  userId?: string;
+  anonKey?: string;
+  route?: string;
+  app?: string;
+  temperature?: number;
+  requireZdr?: boolean;
+  signal?: AbortSignal;
+  metadata?: Record<string, unknown>;
+  /** Overrides DEFAULT_DEGRADED_NOTICE. */
+  degradedNotice?: string;
+  /** Time allowed to the first stream part. Overrides GatewayConfig.timeouts. */
+  streamFirstChunkMs?: number;
+  /** Time allowed between parts (paused while a tool runs). */
+  streamStallMs?: number;
+}
+
+export interface StreamTextOutcome {
+  /** Everything the user saw, notice included (post-guardrail transform applied). */
+  text: string;
+  toolCalls: unknown[];
+  toolResults: unknown[];
+  usage: { inputTokens: number; outputTokens: number };
+  provider: string;
+  model: string;
+  degraded: boolean;
+  failovers: StreamFailover[];
+}
+
+export interface StreamTextResult {
+  traceId: string;
+  /** Text deltas. Never throws after the point of no return. */
+  textStream: AsyncIterable<string>;
+  /** Resolves AFTER the ledger row is written. */
+  result: Promise<StreamTextOutcome>;
+}
+
 async function* singleEmission<T>(value: T): AsyncGenerator<T> {
   yield value;
 }
@@ -627,6 +681,41 @@ export class Gateway {
       );
     }
     return resolved;
+  }
+
+  /**
+   * Link resolution shared by the streaming paths: admin pin (single, hard
+   * pin) > task chain > config chain > default, then the ZDR filter.
+   */
+  private async resolveStreamLinks(
+    orgId: string | undefined,
+    opts: { tier?: "fast" | "power"; task?: string },
+    requireZdr: boolean,
+  ): Promise<ChainLink[]> {
+    const adminOverride = await this.adminPin(orgId, opts.tier, opts.task);
+    let links: ChainLink[];
+    if (adminOverride) {
+      links = [this.registry.resolveDefault(adminOverride)];
+    } else if (opts.task && this.tasks) {
+      const taskChain = await this.tasks.chainForTask(opts.task, orgId);
+      links = taskChain.map((t) => ({
+        provider: t.provider,
+        model: t.model,
+        languageModel: this.registry.buildAny(t.provider, t.model) ?? undefined,
+      }));
+    } else {
+      const chainCfg = (await this.modelConfig?.getChain(orgId)) ?? [];
+      const built = this.registry.buildChain(chainCfg, opts.tier);
+      links = built.length > 0 ? built : [this.registry.resolveDefault()];
+    }
+    if (requireZdr) {
+      const eligible = links.filter((l) => this.registry.isZdr(l.provider, l.model));
+      if (eligible.length === 0) {
+        throw new ZdrViolationError(links[0]!.provider, links[0]!.model, "streaming chain");
+      }
+      links = eligible;
+    }
+    return links;
   }
 
   /** Per call > gateway config > unscoped. */
@@ -1268,33 +1357,7 @@ export class Gateway {
       };
     }
 
-    // Resolution: adminOverride (single, hard pin) > task chain > config
-    // chain > default. Everything but the admin pin can be multi-link.
-    const adminOverride = await this.adminPin(orgId, opts.tier, opts.task);
-    let links: { provider: string; model: string; languageModel?: LanguageModel }[];
-    if (adminOverride) {
-      links = [this.registry.resolveDefault(adminOverride)];
-    } else if (opts.task && this.tasks) {
-      const taskChain = await this.tasks.chainForTask(opts.task, orgId);
-      links = taskChain.map((t) => ({
-        provider: t.provider,
-        model: t.model,
-        languageModel: this.registry.buildAny(t.provider, t.model) ?? undefined,
-      }));
-    } else {
-      const chainCfg = (await this.modelConfig?.getChain(orgId)) ?? [];
-      const built = this.registry.buildChain(chainCfg, opts.tier);
-      links = built.length > 0 ? built : [this.registry.resolveDefault()];
-    }
-
-    const streamRequireZdr = fd.requireZdr;
-    if (streamRequireZdr) {
-      const eligible = links.filter((l) => this.registry.isZdr(l.provider, l.model));
-      if (eligible.length === 0) {
-        throw new ZdrViolationError(links[0]!.provider, links[0]!.model, "streaming chain");
-      }
-      links = eligible;
-    }
+    let links = await this.resolveStreamLinks(orgId, opts, fd.requireZdr);
     links = links.filter((l) => l.languageModel);
     if (links.length === 0) {
       throw new Error("No API key for any streaming link.");
@@ -2177,7 +2240,7 @@ export class Gateway {
   // ===========================================================================
 
   private async frontDoor<I, V>(
-    kind: "runStructured" | "runText" | "streamStructured",
+    kind: "runStructured" | "runText" | "streamStructured" | "streamText",
     opts: FrontDoorOptions<I>,
     validate: (raw: unknown) => V,
   ): Promise<FrontDoor<V>> {

@@ -57,6 +57,8 @@ export interface UsageEntry {
    * audit sees blocks rather than silence.
    */
   guardrails?: import("./guardrails.js").GuardrailRecord[] | null;
+  /** true when a streamed turn ended with the degraded notice (streamText). */
+  degraded?: boolean | null;
   createdAt: Date;
 }
 
