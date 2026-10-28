@@ -1,6 +1,6 @@
 # Design: governed `streamText` with tool calling
 
-Status: shipped in Unreleased (`Gateway.streamText`). Answers the Scout half of #14.
+Status: shipped in 0.17.0 (`Gateway.streamText`). Answers the Scout half of #14.
 NewsHound's half (native Anthropic streaming via `.messages.stream()`, which
 also lifts the SDK's 10-minute non-streaming ceiling) is deferred and stays
 open on #14.

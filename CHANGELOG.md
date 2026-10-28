@@ -8,7 +8,21 @@ adopters implement, and in practice they have only ever gained capability throug
 *optional* parameters — but they are not yet under a formal semver freeze. 1.0.0
 is gated on a downstream integration proving the SPI holds, not on a date.
 
-## Unreleased
+## 0.17.0
+
+Streaming chat with tools, native Anthropic streaming, and the fixes and
+decisions behind every issue open at the start of the day.
+
+**No breaking API changes from 0.16.0.** New features are new methods or
+opt-in flags. Three changes apply without opting in, so read them before
+upgrading:
+
+- Guardrail hooks now run on every path and on cache hits, not only
+  `runStructured` (Changed).
+- Four built-in prices were wrong and are corrected, Opus by a factor of
+  three, so spend-cap totals move (Fixed).
+- Native `runText` puts a newline between text blocks separated by a web
+  search (Fixed, #16).
 
 ### Changed
 
