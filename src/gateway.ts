@@ -1570,7 +1570,7 @@ export class Gateway {
       cache: false,
     };
     const fd = await this.frontDoor<undefined, string>("streamText", fdOpts, validate);
-    const { traceId, orgId, prompt, temperature } = fd;
+    const { traceId, orgId, prompt, temperature, guardrailRecords, failOpen } = fd;
     const messages: ModelMessage[] = [
       ...opts.messages.slice(0, -1),
       { role: "user", content: prompt },
@@ -1588,6 +1588,7 @@ export class Gateway {
     }) => ({
       metadata: { ...opts.metadata, toolCalls: f.toolCalls },
       ...(f.degraded ? { degraded: true } : {}),
+      guardrails: guardrailRecords.length > 0 ? guardrailRecords : null,
       orgId,
       app: opts.app,
       userId: opts.userId ?? null,
@@ -1672,6 +1673,7 @@ export class Gateway {
           messages,
           abortSignal: controller.signal,
           maxRetries: 0, // the gateway owns failover
+          onError: () => {}, // surfaced via the part stream; the SDK default logs it again
           ...(opts.system ? { system: opts.system } : {}),
           ...(opts.tools ? { tools: opts.tools } : {}),
           ...(opts.stopWhen ? { stopWhen: opts.stopWhen } : {}),
@@ -1731,6 +1733,21 @@ export class Gateway {
               throw err;
             }),
           ]);
+          // Post hook on the final text. The deltas are already out, so a
+          // block can only reject `result`; a transform changes result.text.
+          let finalText = text;
+          let blocked: GuardrailError | undefined;
+          if (this.guardrails?.post) {
+            const post = await this.applyPostGuardrail(
+              this.postCtx(fdOpts, prompt, traceId, orgId, text, link.provider, link.model),
+              text,
+              validate,
+              failOpen,
+              guardrailRecords,
+            );
+            finalText = post.value;
+            if (post.blocked) blocked = guardrailError(post.blocked, text);
+          }
           await this.logUsage(
             row({
               provider: link.provider,
@@ -1743,8 +1760,12 @@ export class Gateway {
             }),
           );
           out.close();
+          if (blocked) {
+            rejectResult(blocked);
+            return;
+          }
           resolveResult({
-            text,
+            text: finalText,
             toolCalls,
             toolResults,
             usage: total,

@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { stepCountIs, tool, type LanguageModel, type ModelMessage } from "ai";
 import { DEFAULT_DEGRADED_NOTICE, Gateway, type StreamTextOptions } from "./gateway.js";
-import { RateLimitError } from "./errors.js";
+import { GuardrailError, RateLimitError } from "./errors.js";
 import { MemoryRateLimiter, MemoryUsageStore } from "./adapters/memory.js";
 import type { GatewayConfig } from "./types.js";
 
@@ -435,5 +435,73 @@ describe("streamText: caller abort", () => {
     await reading.catch(() => {});
     expect(deltas).toEqual([]);
     expect(store.entries).toHaveLength(1);
+  });
+});
+
+describe("streamText: guardrails", () => {
+  it("pre-hook sees the last user message as prompt and system separately", async () => {
+    const seen: { prompt: string; system?: string }[] = [];
+    const { model } = scriptedModel([textStep(["a"])]);
+    const { gw } = makeGw([{ model }], {
+      guardrails: {
+        pre: (ctx) => {
+          seen.push({ prompt: ctx.prompt, system: ctx.system });
+          return { action: "allow" };
+        },
+      },
+    });
+    await (await gw.streamText({ ...base, messages: [user("first"), { role: "assistant", content: "x" }, user("last")] })).result;
+    expect(seen).toEqual([{ prompt: "last", system: "You are Scout." }]);
+  });
+
+  it("pre transform replaces only the last user message", async () => {
+    const { model, state } = scriptedModel([textStep(["a"])]);
+    const { gw } = makeGw([{ model }], {
+      guardrails: { pre: () => ({ action: "transform", prompt: "scrubbed" }) },
+    });
+    await (await gw.streamText({ ...base, messages: [user("ssn 123")] })).result;
+    const sent = JSON.stringify(state.prompts[0]);
+    expect(sent).toContain("scrubbed");
+    expect(sent).not.toContain("ssn 123");
+    expect(sent).toContain("You are Scout.");
+  });
+
+  it("pre block rejects before the stream opens", async () => {
+    const { model, state } = scriptedModel([textStep(["a"])]);
+    const { gw, store } = makeGw([{ model }], {
+      guardrails: { pre: () => ({ action: "block", reason: "no" }) },
+    });
+    await expect(gw.streamText(base)).rejects.toBeInstanceOf(GuardrailError);
+    expect(state.calls).toBe(0);
+    expect(store.entries[0]!.provider).toBe("guardrail");
+  });
+
+  it("post block rejects result after streaming; the deltas were delivered", async () => {
+    const { model } = scriptedModel([textStep(["bad"])]);
+    const { gw, store } = makeGw([{ model }], {
+      guardrails: { post: () => ({ action: "block", reason: "unsafe" }) },
+    });
+    const res = await gw.streamText(base);
+    const deltas: string[] = [];
+    const reading = (async () => {
+      for await (const d of res.textStream) deltas.push(d);
+    })();
+    await expect(res.result).rejects.toBeInstanceOf(GuardrailError);
+    await reading.catch(() => {});
+    expect(deltas).toEqual(["bad"]);
+    expect(store.entries).toHaveLength(1);
+    expect(store.entries[0]!.guardrails).toEqual([
+      expect.objectContaining({ hook: "post", action: "block" }),
+    ]);
+  });
+
+  it("post transform changes result.text only", async () => {
+    const { model } = scriptedModel([textStep(["raw"])]);
+    const { gw } = makeGw([{ model }], {
+      guardrails: { post: () => ({ action: "transform", output: "clean" }) },
+    });
+    const res = await gw.streamText(base);
+    expect(await collect(res.textStream)).toEqual(["raw"]);
+    expect((await res.result).text).toBe("clean");
   });
 });
