@@ -373,3 +373,67 @@ describe("streamText: degrade after the point of no return", () => {
     expect(out.text).toBe("ab");
   });
 });
+
+describe("streamText: caller abort", () => {
+  it("abort after text: no notice, rejects with the caller's reason, one estimated row", async () => {
+    const a = scriptedModel([partial(["Part"], "hang")]);
+    const { gw, store } = makeGw([{ model: a.model }]);
+    const ctl = new AbortController();
+    const res = await gw.streamText({ ...base, signal: ctl.signal });
+    const seen: string[] = [];
+    const reading = (async () => {
+      for await (const d of res.textStream) {
+        seen.push(d);
+        ctl.abort(new Error("client went away"));
+      }
+    })();
+    await expect(res.result).rejects.toThrow("client went away");
+    await reading.catch(() => {});
+    expect(seen).toEqual(["Part"]);
+    expect(store.entries).toHaveLength(1);
+    expect(store.entries[0]!.outputTokens).toBeGreaterThan(0);
+    expect(store.entries[0]!.degraded ?? false).toBe(false);
+  });
+
+  it("abort before any part: rejects, one zero-token row, no failover", async () => {
+    const a = scriptedModel(["hang"]);
+    const b = scriptedModel([textStep(["never"])]);
+    const { gw, store } = makeGw([{ model: a.model }, { model: b.model }]);
+    const ctl = new AbortController();
+    const res = await gw.streamText({ ...base, signal: ctl.signal });
+    setTimeout(() => ctl.abort(new Error("stop")), 10);
+    await expect(res.result).rejects.toThrow("stop");
+    expect(b.state.calls).toBe(0);
+    expect(store.entries).toHaveLength(1);
+    expect(store.entries[0]!.outputTokens).toBe(0);
+  });
+
+  it("abort while a tool executes: no notice, rejects, one row", async () => {
+    const a = scriptedModel([toolStep("wait", {}), textStep(["never"])]);
+    const { gw, store } = makeGw([{ model: a.model }]);
+    const ctl = new AbortController();
+    const res = await gw.streamText({
+      ...base,
+      signal: ctl.signal,
+      tools: {
+        wait: tool({
+          inputSchema: z.object({}),
+          execute: async () => {
+            ctl.abort(new Error("bye"));
+            await new Promise((r) => setTimeout(r, 50));
+            return { ok: true };
+          },
+        }),
+      },
+      stopWhen: stepCountIs(4),
+    });
+    const deltas: string[] = [];
+    const reading = (async () => {
+      for await (const d of res.textStream) deltas.push(d);
+    })();
+    await expect(res.result).rejects.toThrow("bye");
+    await reading.catch(() => {});
+    expect(deltas).toEqual([]);
+    expect(store.entries).toHaveLength(1);
+  });
+});

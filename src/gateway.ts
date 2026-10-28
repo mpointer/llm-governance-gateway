@@ -1757,15 +1757,30 @@ export class Gateway {
         } catch (err) {
           lastErr = err;
           const callerAborted = opts.signal?.aborted === true;
-          if (pastNoReturn && !callerAborted) {
+          const used = {
+            inputTokens: done.inputTokens + Math.ceil(inputChars / 4),
+            outputTokens: done.outputTokens + Math.ceil(stepText.length / 4),
+          };
+          if (pastNoReturn && callerAborted) {
+            // They asked to stop: no notice, but the spend is real.
+            await this.logUsage(
+              row({
+                provider: link.provider,
+                model: link.model,
+                inTok: used.inputTokens,
+                outTok: used.outputTokens,
+                durationMs: Date.now() - start,
+                text,
+                toolCalls: toolCalls.length,
+              }),
+            );
+            break;
+          }
+          if (pastNoReturn) {
             const notice = opts.degradedNotice ?? DEFAULT_DEGRADED_NOTICE;
             const delta = text ? `\n\n${notice}` : notice;
             out.publish(delta);
             text += delta;
-            const used = {
-              inputTokens: done.inputTokens + Math.ceil(inputChars / 4),
-              outputTokens: done.outputTokens + Math.ceil(stepText.length / 4),
-            };
             await this.logUsage(
               row({
                 provider: link.provider,
