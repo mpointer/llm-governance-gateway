@@ -36,6 +36,13 @@ export interface StreamGuard<T> {
   readonly tripped: Promise<Error>;
   /** Clears timers and listeners. Idempotent; call from a finally block. */
   dispose(): void;
+  /**
+   * Stop the clock without tripping, e.g. while a tool executes between
+   * steps: a slow tool is not a silent provider.
+   */
+  pauseClock(): void;
+  /** Re-arm after pauseClock: the stall clock if anything was emitted, else first-chunk. */
+  resumeClock(): void;
 }
 
 export interface StreamGuardOptions {
@@ -55,6 +62,12 @@ export interface StreamGuardOptions {
   onTrip: (phase: StallPhase, waitedMs: number) => Error;
   /** Builds the error surfaced when the CALLER aborts, not a clock. */
   onCallerAbort: (reason: unknown) => Error;
+  /**
+   * "conflate" (default) keeps only the newest value: right for object
+   * snapshots. "queue" delivers every value in order: required for text
+   * deltas, where a dropped value is lost text.
+   */
+  mode?: "conflate" | "queue";
 }
 
 /**
@@ -74,8 +87,9 @@ export interface ConflatedCell<T> {
   readonly stream: AsyncIterable<T>;
 }
 
-export function createConflatedCell<T>(): ConflatedCell<T> {
-  let latest: { value: T } | null = null;
+export function createConflatedCell<T>(queue = false): ConflatedCell<T> {
+  // Conflated: at most one pending value. Queued: every value, in order.
+  let pending: T[] = [];
   let closed = false;
   let failure: Error | null = null;
   let wake: (() => void) | null = null;
@@ -88,10 +102,8 @@ export function createConflatedCell<T>(): ConflatedCell<T> {
 
   async function* consume(): AsyncGenerator<T> {
     for (;;) {
-      if (latest) {
-        const { value } = latest;
-        latest = null;
-        yield value;
+      if (pending.length > 0) {
+        yield pending.shift()!;
         continue;
       }
       if (failure) throw failure;
@@ -104,7 +116,8 @@ export function createConflatedCell<T>(): ConflatedCell<T> {
 
   return {
     publish(value) {
-      latest = { value };
+      if (queue) pending.push(value);
+      else pending = [value];
       nudge();
     },
     close() {
@@ -121,6 +134,11 @@ export function createConflatedCell<T>(): ConflatedCell<T> {
   };
 }
 
+/** Same channel, but FIFO and lossless: for text deltas. */
+export function createQueuedCell<T>(): ConflatedCell<T> {
+  return createConflatedCell<T>(true);
+}
+
 /**
  * Wraps `source` with first-chunk and inter-chunk stall clocks.
  *
@@ -133,13 +151,15 @@ export function createConflatedCell<T>(): ConflatedCell<T> {
 export function guardStream<T>(source: AsyncIterable<T>, opts: StreamGuardOptions): StreamGuard<T> {
   const { controller, firstChunkMs, stallMs, callerSignal, onTrip, onCallerAbort } = opts;
 
-  const cell = createConflatedCell<T>();
+  const cell = opts.mode === "queue" ? createQueuedCell<T>() : createConflatedCell<T>();
   const { publish, close, fail } = cell;
 
   // --- clocks ---------------------------------------------------------------
   let timer: ReturnType<typeof setTimeout> | undefined;
   let armedAt = Date.now();
   let disposed = false;
+  let paused = false;
+  let emitted = false;
   let resolveTripped!: (err: Error) => void;
   const tripped = new Promise<Error>((r) => {
     resolveTripped = r;
@@ -154,7 +174,7 @@ export function guardStream<T>(source: AsyncIterable<T>, opts: StreamGuardOption
 
   const arm = (phase: StallPhase, ms: number) => {
     clearTimer();
-    if (disposed || cell.isClosed() || ms <= 0) return;
+    if (disposed || paused || cell.isClosed() || ms <= 0) return;
     armedAt = Date.now();
     timer = setTimeout(() => {
       const waited = Date.now() - armedAt;
@@ -187,6 +207,7 @@ export function guardStream<T>(source: AsyncIterable<T>, opts: StreamGuardOption
   void (async () => {
     try {
       for await (const value of source) {
+        emitted = true;
         arm("stall", stallMs);
         publish(value);
       }
@@ -205,6 +226,15 @@ export function guardStream<T>(source: AsyncIterable<T>, opts: StreamGuardOption
       disposed = true;
       clearTimer();
       callerSignal?.removeEventListener("abort", onCallerAbortEvent);
+    },
+    pauseClock() {
+      paused = true;
+      clearTimer();
+    },
+    resumeClock() {
+      paused = false;
+      if (emitted) arm("stall", stallMs);
+      else arm("first-chunk", firstChunkMs);
     },
   };
 }
