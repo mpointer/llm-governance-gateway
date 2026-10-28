@@ -683,7 +683,8 @@ Endpoints: `POST /run` (structured generation — send your Zod schema as JSON S
 
 ## Guardrail hooks (pre/post)
 
-Policy enforced on every `runStructured` call, in the request path, with the
+Policy enforced on every governed call (`runStructured`, `runText`,
+`streamStructured`, and per item in batch), in the request path, with the
 verdict written to the ledger. Two seams, both plain TypeScript functions:
 
 ```ts
@@ -729,10 +730,26 @@ transformed output is what gets cached and what the judge scores; a transform
 that breaks the caller's schema is treated as a block. Hooks run in mock mode
 too, so CI can test policy without keys.
 
-Two deliberate limits: cache hits do not run the hooks (the cached object was
-produced under the guardrails in force when it was written; use `cache: false`
-when the pre policy depends on the caller), and this version applies hooks to
-`runStructured` only, not `streamStructured`, `batch` or `runText`.
+**Cache hits run the hooks too.** The pre hook runs on the rendered prompt
+before the cache is read, so a policy you add today applies to a prompt that
+was cached last week, and a per-caller policy cannot be bypassed by a shared
+cache entry. The post hook runs on the cached value; a transform is returned
+but not written back, a block writes the cache row with the verdict and
+throws. A plain hit with no hooks configured costs exactly what it did before.
+
+**Per path.** `runText`: a post transform must return a string. `streamStructured`:
+a post block can only stop the *final* object, since the partials were already
+visible to the consumer; `object` rejects with `GuardrailError`, the iterator
+fails, and a block never fails over to the next link. A transformed final object
+is published as the last partial so a consumer rendering partials converges on
+it. `submitBatch`: the pre hook runs per item; blocked items are excluded,
+listed in `result.blocked`, and each leaves a zero-token row (trace id
+`batch:guardrail:<slug>:<item id>`), while allow and transform verdicts ride the
+reservation row tagged with `detail.batchItemId`. `reconcileBatch`: the post
+hook runs per item; a block marks the item `{ ok: false, reason: "guardrail" }`
+and the item's usage row carries the verdict. The job store holds no per-item
+prompt or input in this version, so a reconcile-time hook sees `prompt: ""` and
+`input: undefined`.
 
 ### TrustGate: confidence and human-in-the-loop routing as a post hook
 

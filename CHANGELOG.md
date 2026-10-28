@@ -10,6 +10,35 @@ is gated on a downstream integration proving the SPI holds, not on a date.
 
 ## Unreleased
 
+### Changed
+
+- **Guardrail hooks now run on every path: `runText`, `streamStructured`,
+  `submitBatch` (pre, per item) and `reconcileBatch` (post, per item), and on
+  cache hits.** 0.16.0 ran them on `runStructured` only. The cause was
+  structural: each path carried its own copy of the front door (rate limit →
+  caps → cache → prompt), so a hook added to one was not on the others. The
+  three unary/stream paths now share one `frontDoor` and one post-verdict
+  implementation. Contracts per path are in the README's guardrail section
+  and docs/design/guardrail-hooks.md. Behavior with no hooks configured is
+  unchanged, with two ledger-shape notes: cache-hit rows now carry an
+  explicit `guardrails: null` instead of omitting the field, and
+  `runStructured` cache-hit rows now carry `zdrEnforced` like `runText`'s
+  already did.
+- **Cache hits run the hooks.** The pre hook runs on the rendered prompt
+  before the cache read, so a policy added today applies to prompts cached
+  earlier and a per-caller policy cannot be bypassed by a shared entry. When
+  a pre hook is configured, a hit loads the prompt before the read (free when
+  `invalidateCacheOnPromptChange` already prefetches it). The post hook runs
+  on the cached value with `provider: "cache"`; a transform is returned but
+  not written back.
+- **`SubmitBatchResult.blocked`** lists items the pre hook excluded.
+  **`BatchItemResult.reason`** gains `"guardrail"`; an exhaustive `switch`
+  over the old four reasons needs a new arm.
+- **Admin pin shadowing a task warns once per task (#57).** A call that names
+  a `task` while `ModelConfigStore.getOverride()` returns a pin was silently
+  routed to the pin, `TaskOverrideStore` entries included. The precedence is
+  unchanged and documented; the silence is gone.
+
 ### Fixed
 
 - **Four built-in rates were wrong, re-checked 2026-10-28 against the vendor
