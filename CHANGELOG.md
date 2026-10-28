@@ -8,6 +8,16 @@ adopters implement, and in practice they have only ever gained capability throug
 *optional* parameters — but they are not yet under a formal semver freeze. 1.0.0
 is gated on a downstream integration proving the SPI holds, not on a date.
 
+## Unreleased
+
+- `streamText`: a caller abort now rejects `result` with the caller's own
+  reason, even when it is not an `Error` (it was replaced by a generic error).
+- `UsageEntry.aborted` (optional): `true` on the row a caller-aborted
+  `streamText` turn writes, whose token counts are estimates. Stores that
+  ignore unknown fields need no change.
+- Doc fixes: `textStream` does throw on a caller abort; why `streamText` sets
+  `maxRetries: 0` and `streamStructured` does not. (#78)
+
 ## 0.17.0
 
 Streaming chat with tools, native Anthropic streaming, and the fixes and

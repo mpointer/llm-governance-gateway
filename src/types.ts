@@ -63,6 +63,8 @@ export interface UsageEntry {
   guardrails?: import("./guardrails.js").GuardrailRecord[] | null;
   /** true when a streamed turn ended with the degraded notice (streamText). */
   degraded?: boolean | null;
+  /** true when the caller aborted a streamed turn; the token counts are estimates (streamText). */
+  aborted?: boolean | null;
   createdAt: Date;
 }
 

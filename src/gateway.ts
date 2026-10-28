@@ -449,7 +449,11 @@ export interface StreamTextOutcome {
 
 export interface StreamTextResult {
   traceId: string;
-  /** Text deltas. Never throws after the point of no return. */
+  /**
+   * Text deltas. A provider failure after the point of no return ends the
+   * stream with the degraded notice, not an error. It throws on a caller
+   * abort, or when no link produced output.
+   */
   textStream: AsyncIterable<string>;
   /** Resolves AFTER the ledger row is written. */
   result: Promise<StreamTextOutcome>;
@@ -1656,11 +1660,13 @@ export class Gateway {
       text: string;
       toolCalls: number;
       degraded?: boolean;
+      aborted?: boolean;
       extras?: NativeExtras;
     }) => ({
       ...(f.extras ?? {}),
       metadata: { ...opts.metadata, toolCalls: f.toolCalls },
       ...(f.degraded ? { degraded: true } : {}),
+      ...(f.aborted ? { aborted: true } : {}),
       guardrails: guardrailRecords.length > 0 ? guardrailRecords : null,
       orgId,
       app: opts.app,
@@ -1778,7 +1784,9 @@ export class Gateway {
               model: link.languageModel!,
               messages,
               abortSignal: controller.signal,
-              maxRetries: 0, // the gateway owns failover
+              // The gateway owns failover. streamStructured keeps the SDK
+              // default (2) for compatibility; it predates chain failover.
+              maxRetries: 0,
               onError: () => {}, // surfaced via the part stream; the SDK default logs it again
               ...(opts.system ? { system: opts.system } : {}),
               ...(opts.tools ? { tools: opts.tools } : {}),
@@ -1936,6 +1944,7 @@ export class Gateway {
                 durationMs: Date.now() - start,
                 text,
                 toolCalls: toolCalls.length,
+                aborted: true,
               }),
             );
             break;
@@ -1993,7 +2002,8 @@ export class Gateway {
       const e =
         lastErr instanceof Error ? lastErr : new Error("streamText: no link produced a result");
       out.fail(e);
-      rejectResult(e);
+      // The caller's own reason, as given (it need not be an Error).
+      rejectResult(opts.signal?.aborted ? opts.signal.reason : e);
     })().catch((e: unknown) => {
       // Last resort (e.g. the ledger itself failing on an error path): settle
       // both ends rather than leave the consumer hanging.
