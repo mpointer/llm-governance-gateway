@@ -844,7 +844,7 @@ sends fewer high-stakes items to a human; this package raises it instead.
 
 Extracted from a production system (three independent in-house implementations converged on this design). Pre-1.0, so the API may still shift — though in practice the store interfaces (`UsageStore`, `PromptStore`, `ModelConfigStore`, `TaskOverrideStore`, `RateLimiter`, `CacheStore`) have only ever gained capability through *optional* parameters, and existing implementations keep compiling. 1.0.0 is gated on a downstream integration proving that holds, not on a date. See [CHANGELOG.md](./CHANGELOG.md).
 
-Next up ([ROADMAP](./ROADMAP.md)): a sibling control-plane package (store adapters and headless admin operations first, UI last if ever), specified in [docs/design/admin-control-plane-package.md](./docs/design/admin-control-plane-package.md). It supersedes the earlier admin-UI sketch.
+Next up ([ROADMAP](./ROADMAP.md), full reasoning in [docs/strategy/roadmap-2026-2027.md](./docs/strategy/roadmap-2026-2027.md)): governed agent runs with per-run budgets and tool caps, then 1.0, then a sibling control-plane package (store adapters and headless admin operations first, UI last if ever), specified in [docs/design/admin-control-plane-package.md](./docs/design/admin-control-plane-package.md). It supersedes the earlier admin-UI sketch.
 
 ## License
 
