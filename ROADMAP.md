@@ -136,6 +136,71 @@ not on a date. #28 is that evidence and it came back clean: no type-level
 breaks across a second adopter. What it also showed is that *shape* gaps are
 the real 1.0 risk, which is why #8 and #12 landed first.
 
+## 2026-11 strategic roadmap: the governance runtime for agent runs
+
+A full assessment, competitive research and a scored 35-item backlog are in
+[docs/strategy/roadmap-2026-2027.md](./docs/strategy/roadmap-2026-2027.md)
+(written 2026-11-03). Its thesis: every competitor is a proxy that sees HTTP
+requests; this library runs in-process and can govern the agent loop itself.
+The items below are that document's near- and medium-term plan, as the
+checklist this file has always been. Numbers in parentheses are the
+backlog ids in section 4 of the strategy doc.
+
+### First 90 days (to 1.0)
+
+- [ ] Decide #49, how a caller or store names a model, and write it into the
+      README's model-id section (28)
+- [ ] Configurable retry predicate, #15 (29)
+- [ ] `streamText`, #14 (19)
+- [ ] Spike: confirm the pinned AI SDK exposes per-step usage and a composable
+      stop condition; record the answer in `docs/design/run-governance.md`
+- [ ] Merge or close draft docs PRs #54, #55, #56
+- [ ] Run lineage: nullable `run_id`, `step_index`, `parent_trace_id` on the
+      usage and cap-event tables; `GovernedRun`, `gw.startRun()`, snapshot and
+      resume; `scope: "run"` cap check inside `frontDoor()` (8)
+- [ ] `runAgent()`: per-run budget, step ceiling, cost-velocity breaker, one
+      ledger row per step (1)
+- [ ] Governed tool calls: `ToolPolicy`, per-tool caps, `guardrails.tool`
+      hook, tool ledger rows, `preflightTools()` (2)
+- [ ] `llm-gateway policy` report: effective policy per task from config (10)
+- [ ] Postgres adapter test, then a coverage threshold (34)
+- [ ] **1.0.0**: SPI freeze statement, README Status rewritten (17)
+- [ ] Open the control-plane repository with the spec and L1 schema as its
+      first commit; no code yet
+
+### Months 3 to 6 (1.x minors)
+
+- [ ] Shadow calls: the counterfactual ledger, `shadowOf` column, off-path
+      scheduler, both outputs judged. Design:
+      [hedging-and-shadow-calls.md](./docs/design/hedging-and-shadow-calls.md) (3)
+- [ ] Control plane L1 (store adapters, schema) and L2 (headless admin
+      operations) as the sibling package. Design:
+      [admin-control-plane-package.md](./docs/design/admin-control-plane-package.md) (11, 7)
+- [ ] HITL review queue: persist `routeToHitl` decisions, `reviews.decide()`,
+      human-edited outputs ledgered as `provider: "human"` (4)
+- [ ] Human approval gate for tools marked `requiresApproval` (12)
+- [ ] Autonomy-tiered policy schema: `autonomy` and `risk` on a task, tier
+      defaults for caps, judge sampling, HITL threshold, ZDR (5)
+
+### Months 6 to 12
+
+- [ ] Routing recommendations report from shadow plus judge data; a report,
+      never an auto-router (6)
+- [ ] Calibrate TrustGate confidence weights from review outcomes (9)
+- [ ] Ledger replay eval harness: ledger rows as mock fixtures (13)
+- [ ] Policy dry-run against ledger history (16)
+- [ ] `explainRun(runId)` provenance tree (14)
+- [ ] Fill-in: cost-velocity forecast, chargeback export, anomaly alerts,
+      model-retirement warning, guardrail recipes (15, 18, 24, 25, 20)
+
+### Decided against, for now
+
+Semantic cache, a built-in prompt-injection classifier, a hosted control
+plane, a Python port, an admin UI, a bandit router before a year of
+human-read shadow reports, and any OpenTelemetry exporter heavier than
+attribute mapping while the GenAI conventions are in Development status.
+Reasons in section 12 of the strategy doc.
+
 ## Non-goals
 
 - Observability breadth (traces, dashboards, analytics) — export to Langfuse/OTel instead.
