@@ -8,7 +8,15 @@ adopters implement, and in practice they have only ever gained capability throug
 *optional* parameters — but they are not yet under a formal semver freeze. 1.0.0
 is gated on a downstream integration proving the SPI holds, not on a date.
 
-## Unreleased
+## 0.18.0
+
+Governed runs: a dollar budget and a step ceiling across the calls of one
+agent turn, with every ledger row the turn writes tied to one run id.
+
+**No breaking API changes from 0.17.1.** A call that carries no `run` behaves
+and ledgers exactly as before. The reference Drizzle adapters write four new
+nullable columns, so adopters who manage their own migrations must apply the
+SQL under Migration before upgrading; `ensureTables()` does it on SQLite.
 
 ### Added
 
