@@ -134,6 +134,37 @@ export class SpendCapError extends Error {
 }
 
 /**
+ * A governed run hit one of its own limits and the call was refused before
+ * any provider was contacted.
+ *
+ * `limit: "budget"`: the run named by `runId` (the call's own run, or the
+ * nearest ancestor that ran out) has spent its `budgetCents`. Recorded as a
+ * spend-cap event, and under `caps.mode: "observe"` recorded but not thrown.
+ * `limit: "steps"`: the run has made `maxSteps` governed calls. Always
+ * enforced: a step ceiling is a loop guard, not a threshold on trial. The
+ * refusal leaves a zero-token usage row (`provider: "run"`).
+ */
+export class RunLimitError extends Error {
+  constructor(
+    public readonly limit: "budget" | "steps",
+    public readonly runId: string,
+    public readonly detail: {
+      spentCents: number;
+      budgetCents?: number;
+      steps: number;
+      maxSteps?: number;
+    },
+  ) {
+    super(
+      limit === "budget"
+        ? `Run ${runId} is out of budget (${detail.spentCents.toFixed(2)}¢ of ${detail.budgetCents}¢ spent)`
+        : `Run ${runId} reached its step ceiling (${detail.steps} of ${detail.maxSteps} steps)`,
+    );
+    this.name = "RunLimitError";
+  }
+}
+
+/**
  * A `promptConfig.modelHint` did not resolve to a usable model id, and
  * `ProviderConfig.throwOnInvalidModelHint` is on.
  *

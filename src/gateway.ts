@@ -22,6 +22,7 @@ import {
   type GuardrailError,
   JudgeGateError,
   RateLimitError,
+  RunLimitError,
   SpendCapError,
   StreamStallError,
   ZdrViolationError,
@@ -35,6 +36,7 @@ import {
   type PostGuardrailContext,
 } from "./guardrails.js";
 import { AttemptBudget, sleep } from "./deadline.js";
+import { GovernedRun, type RunSnapshot, type StartRunOptions } from "./run.js";
 import {
   ProviderRegistry,
   parseModelId,
@@ -225,10 +227,26 @@ interface FrontDoorOptions<I> {
   requireZdr?: boolean;
   temperature?: number;
   system?: string;
+  run?: GovernedRun;
 }
+
+/** Where a call sits in a governed run. undefined = the call carries no run. */
+type Lineage = { run: GovernedRun; stepIndex: number } | undefined;
+
+/**
+ * What a path hands to `logUsage`. `lineage` is REQUIRED (though it may be
+ * undefined) so that a new ledger write cannot forget to say which run it
+ * belongs to: the compiler finds every site. The lineage columns themselves
+ * are stamped by `logUsage`, never by a path.
+ */
+type LedgerRow = Omit<UsageEntry, "createdAt" | "runId" | "stepIndex" | "parentRunId"> & {
+  lineage: Lineage;
+};
 
 /** What `frontDoor` hands back to a path once the governance checks passed. */
 interface FrontDoor<V> {
+  /** The call's place in its run, for every row the path writes. */
+  lineage: Lineage;
   traceId: string;
   orgId: string | undefined;
   requireZdr: boolean;
@@ -246,6 +264,13 @@ interface FrontDoor<V> {
 }
 
 export interface RunStructuredOptions<I, O> {
+  /**
+   * The governed run this call belongs to (`gateway.startRun()`). The call
+   * becomes one step of the run: every usage row it writes carries the run's
+   * lineage, its spend counts against the run's budget, and it is refused
+   * with `RunLimitError` when the run is out of budget or steps.
+   */
+  run?: GovernedRun;
   /** Caller-defined attribution logged on every usage row this call writes
    *  (including cache hits and the judge). The gateway never reads it — it is
    *  not part of the cache key and never affects routing. */
@@ -393,6 +418,14 @@ export const DEFAULT_DEGRADED_NOTICE =
   "Sorry, I lost my connection partway through that answer. Please try again.";
 
 export interface StreamTextOptions {
+  /**
+   * The governed run this call belongs to (`gateway.startRun()`). The call
+   * becomes one step of the run: every usage row it writes carries the run's
+   * lineage, its spend counts against the run's budget, and the whole turn is one step, however many tool-loop steps the AI SDK takes
+   * inside it; it is refused
+   * with `RunLimitError` when the run is out of budget or steps.
+   */
+  run?: GovernedRun;
   /** Names the call: routing, ledger, guardrails, ZDR. Required. */
   slug: string;
   /** Caller-assembled system prompt; the gateway does not render it. */
@@ -510,6 +543,13 @@ async function* singleEmission<T>(value: T): AsyncGenerator<T> {
 }
 
 export interface RunTextOptions<I> {
+  /**
+   * The governed run this call belongs to (`gateway.startRun()`). The call
+   * becomes one step of the run: every usage row it writes carries the run's
+   * lineage, its spend counts against the run's budget, and it is refused
+   * with `RunLimitError` when the run is out of budget or steps.
+   */
+  run?: GovernedRun;
   /** Caller-defined attribution logged on every usage row this call writes
    *  (including cache hits and the judge). The gateway never reads it — it is
    *  not part of the cache key and never affects routing. */
@@ -844,6 +884,7 @@ export class Gateway {
       slug: string;
       orgId?: string;
       metadata?: Record<string, unknown>;
+      lineage: Lineage;
     },
     provider: string,
     model: string,
@@ -868,6 +909,7 @@ export class Gateway {
       durationMs,
       inputText: prompt,
       outputText: null,
+      lineage: opts.lineage,
     });
   }
 
@@ -903,6 +945,15 @@ export class Gateway {
     const rl = await this.rateLimiter.limit(identifier);
     if (!rl.success) throw new RateLimitError(rl.limit, rl.remaining);
     await this.checkSpendCap(opts.userId, opts.route, 0, orgId);
+    const lineage = await this.enterRun(opts.run, {
+      traceId,
+      orgId,
+      userId: opts.userId,
+      route: opts.route,
+      app: opts.app,
+      slug: null,
+      metadata: opts.metadata,
+    });
 
     const modelId = opts.model ?? DEFAULT_EMBEDDING_MODEL;
     const { provider, model } = parseEmbeddingModelId(modelId, (id) => this.registry.parseAny(id));
@@ -980,6 +1031,7 @@ export class Gateway {
       cacheHit: false,
       traceId,
       zdrEnforced: opts.requireZdr ? true : null,
+      lineage,
     });
 
     return {
@@ -1020,6 +1072,7 @@ export class Gateway {
       };
     }
     const { traceId, orgId, requireZdr, key, prompt, temperature, guardrailRecords, failOpen } = fd;
+    const { lineage } = fd;
 
     // Native features must never silently not apply (same rule as runStructured).
     if (opts.anthropic && !this.anthropicCfg && !this.mock) {
@@ -1252,6 +1305,7 @@ export class Gateway {
     // runStructured: a transform is what gets cached and returned; a block
     // writes the row with the spent tokens, then throws with the text attached.
     const textRow = () => ({
+      lineage,
       metadata: opts.metadata,
       orgId,
       app: opts.app,
@@ -1359,7 +1413,7 @@ export class Gateway {
         failovers: [],
       };
     }
-    const { traceId, orgId, key, prompt, temperature, guardrailRecords, failOpen } = fd;
+    const { traceId, orgId, key, prompt, temperature, guardrailRecords, failOpen, lineage } = fd;
 
     // Post guardrail, cache write, usage row — once, for the link that
     // completed. A post block on a stream can only stop the FINAL object: the
@@ -1375,6 +1429,7 @@ export class Gateway {
       durationMs: number,
     ): Promise<{ object: O; blocked?: GuardrailError }> => {
       const row = () => ({
+        lineage,
         metadata: opts.metadata,
         orgId,
         app: opts.app,
@@ -1470,6 +1525,7 @@ export class Gateway {
     // unary paths (see logAbortedAttempt).
     const ledgerFailedLink = async (provider: string, model: string, ms: number) => {
       await this.logUsage({
+        lineage,
         metadata: opts.metadata,
         orgId,
         app: opts.app,
@@ -1645,7 +1701,7 @@ export class Gateway {
       cache: false,
     };
     const fd = await this.frontDoor<undefined, string>("streamText", fdOpts, validate);
-    const { traceId, orgId, prompt, temperature, guardrailRecords, failOpen } = fd;
+    const { traceId, orgId, prompt, temperature, guardrailRecords, failOpen, lineage } = fd;
     const messages: ModelMessage[] = [
       ...opts.messages.slice(0, -1),
       prompt === lastUserText ? last! : withText(last!, prompt),
@@ -1663,6 +1719,7 @@ export class Gateway {
       aborted?: boolean;
       extras?: NativeExtras;
     }) => ({
+      lineage,
       ...(f.extras ?? {}),
       metadata: { ...opts.metadata, toolCalls: f.toolCalls },
       ...(f.degraded ? { degraded: true } : {}),
@@ -2101,6 +2158,7 @@ export class Gateway {
         );
         if (verdict.action === "block") {
           await this.logUsage({
+            lineage: undefined, // batch is not a run path in this version
             metadata: opts.metadata,
             orgId,
             app: opts.app,
@@ -2179,6 +2237,7 @@ export class Gateway {
 
     // Reservation row: committed money counts against caps immediately.
     await this.logUsage({
+      lineage: undefined,
       metadata: opts.metadata,
       orgId,
       app: opts.app,
@@ -2340,8 +2399,9 @@ export class Gateway {
     }
 
     // Phase 2: side effects — per-item actuals, then reservation release.
-    for (const row of usageRows) await this.logUsage(row);
+    for (const row of usageRows) await this.logUsage({ ...row, lineage: undefined });
     await this.logUsage({
+      lineage: undefined,
       metadata: job.metadata,
       userId: null,
       route: `batch:release:${job.slug}`,
@@ -2469,6 +2529,100 @@ export class Gateway {
       this.retryable,
     );
     return result;
+  }
+
+  // ===========================================================================
+  // Governed runs — see src/run.ts and docs/design/run-governance.md.
+  // ===========================================================================
+
+  /**
+   * Start a governed run. Pass the returned run as `run` to `runStructured`,
+   * `runText`, `streamStructured`, `streamText` or `embed`; each such call is
+   * one step. The run's rows share a `runId` in the ledger, their spend
+   * counts against `budgetCents`, and `maxSteps` bounds how many there are.
+   */
+  startRun(opts: StartRunOptions = {}): GovernedRun {
+    return new GovernedRun(opts);
+  }
+
+  /** Continue a run from `run.snapshot()`, for a run that spans processes. */
+  resumeRun(snapshot: RunSnapshot, opts: { parent?: GovernedRun } = {}): GovernedRun {
+    return GovernedRun.fromSnapshot(snapshot, opts);
+  }
+
+  /**
+   * Admit a call into its run, or refuse it. Runs after the rate limit and
+   * the daily caps, before the cache and before any provider spend.
+   *
+   * Budget: refused when the run, or the nearest ancestor with a budget, has
+   * spent it. Recorded as a spend-cap event carrying the run id; under
+   * `caps.mode: "observe"` recorded and let through, like every other cap.
+   * Step ceiling: always enforced, and the refusal leaves a zero-token usage
+   * row (`provider: "run"`), because a denial the ledger cannot see is not
+   * auditable.
+   */
+  private async enterRun(
+    run: GovernedRun | undefined,
+    ctx: {
+      traceId: string;
+      orgId?: string | null;
+      userId?: string;
+      route?: string;
+      app?: string;
+      slug?: string | null;
+      metadata?: Record<string, unknown>;
+    },
+  ): Promise<Lineage> {
+    if (!run) return undefined;
+    const over = run.exhausted();
+    if (over) {
+      const enforced = this.caps.mode !== "observe";
+      await this.recordCapEvent({
+        userId: ctx.userId ?? null,
+        orgId: ctx.orgId ?? null,
+        capCents: over.budgetCents!,
+        spentCents: over.spentCents,
+        route: ctx.route ? `run:${ctx.route}` : "run",
+        runId: over.id,
+        wouldBlock: true,
+        enforced,
+        createdAt: new Date(),
+      });
+      if (enforced) {
+        throw new RunLimitError("budget", over.id, {
+          spentCents: over.spentCents,
+          budgetCents: over.budgetCents,
+          steps: over.steps,
+          ...(over.maxSteps !== undefined ? { maxSteps: over.maxSteps } : {}),
+        });
+      }
+    }
+    if (run.atStepCeiling()) {
+      await this.logUsage({
+        metadata: ctx.metadata,
+        orgId: ctx.orgId ?? undefined,
+        app: ctx.app,
+        userId: ctx.userId ?? null,
+        route: ctx.route ?? null,
+        promptSlug: ctx.slug ?? null,
+        provider: "run",
+        model: "step-limit",
+        inputTokens: 0,
+        outputTokens: 0,
+        estimatedCostCents: 0,
+        cacheHit: false,
+        traceId: ctx.traceId,
+        // The index the refused call would have had.
+        lineage: { run, stepIndex: run.steps },
+      });
+      throw new RunLimitError("steps", run.id, {
+        spentCents: run.spentCents,
+        ...(run.budgetCents !== undefined ? { budgetCents: run.budgetCents } : {}),
+        steps: run.steps,
+        maxSteps: run.maxSteps,
+      });
+    }
+    return { run, stepIndex: run.beginStep() };
   }
 
   /** Register a deterministic responder used when mock mode is on. */
@@ -2749,6 +2903,18 @@ export class Gateway {
     // 2. Spend cap
     await this.checkSpendCap(opts.userId, opts.route, 0, orgId);
 
+    // 2b. Run limits: the run's budget and step ceiling, then this call
+    // becomes the run's next step.
+    const lineage = await this.enterRun(opts.run, {
+      traceId,
+      orgId,
+      userId: opts.userId,
+      route: opts.route,
+      app: opts.app,
+      slug: opts.slug,
+      metadata: opts.metadata,
+    });
+
     // 3. Cache key
     const useCache = opts.cache !== false;
     if (useCache && !opts.cacheParts) {
@@ -2775,6 +2941,7 @@ export class Gateway {
       promptSlug: opts.slug,
       traceId,
       zdrEnforced: requireZdr ? true : null,
+      lineage,
     };
 
     // 4. Prompt. Loaded lazily: before the cache read when a hook needs the
@@ -2878,6 +3045,7 @@ export class Gateway {
           guardrails: guardrailRecords.length > 0 ? guardrailRecords : null,
         });
         return {
+          lineage,
           traceId,
           orgId,
           requireZdr,
@@ -2895,6 +3063,7 @@ export class Gateway {
     // 4d. Prompt for the generation paths (inline promptBody skips the store).
     if (prompt === undefined) await loadAndRender();
     return {
+      lineage,
       traceId,
       orgId,
       requireZdr,
@@ -2998,10 +3167,20 @@ export class Gateway {
     return pin;
   }
 
-  private async logUsage(f: Omit<UsageEntry, "createdAt">): Promise<string | number> {
+  private async logUsage(row: LedgerRow): Promise<string | number> {
     const enc = (t: string | null) => (t != null && this.encrypt ? this.encrypt(t) : t);
+    const { lineage, ...f } = row;
     const entry: UsageEntry = {
       ...f,
+      // Run lineage, stamped here and nowhere else. Absent (not null) outside
+      // a run, so rows written without one are shaped exactly as before.
+      ...(lineage
+        ? {
+            runId: lineage.run.id,
+            stepIndex: lineage.stepIndex,
+            parentRunId: lineage.run.parentRunId ?? null,
+          }
+        : {}),
       app: f.app ?? this.appId,
       // Stamped like appId: a row without a tenant is unscoped, which is what
       // a single-tenant deployment produces and what it produced before.
@@ -3013,6 +3192,10 @@ export class Gateway {
       createdAt: new Date(),
     };
     const id = await this.usage.logUsage(entry);
+    // The run's spend is counted from the row that was just written, so the
+    // run and the ledger cannot disagree. Cache hits cost nothing by
+    // construction and are excluded the same way sumSpendCents excludes them.
+    if (lineage && !entry.cacheHit) lineage.run.record(entry.estimatedCostCents);
     this.emitObs("onUsage", this.obs?.onUsage, { ...entry, id });
     return id;
   }
@@ -3031,7 +3214,7 @@ export class Gateway {
       };
     }
     const { traceId, orgId, requireZdr, key, prompt, promptConfig, temperature } = fd;
-    const { guardrailRecords, failOpen } = fd;
+    const { guardrailRecords, failOpen, lineage } = fd;
     const assertZdr = (p: string, m: string, context: string) => {
       if (requireZdr && !this.registry.isZdr(p, m)) {
         throw new ZdrViolationError(p, m, context);
@@ -3055,6 +3238,7 @@ export class Gateway {
           slug: opts.slug,
           orgId,
           metadata: opts.metadata,
+          lineage,
         },
         p,
         m,
@@ -3318,6 +3502,7 @@ export class Gateway {
       object = out.value;
       if (out.blocked) {
         await this.logUsage({
+          lineage,
           metadata: opts.metadata,
           orgId,
           app: opts.app,
@@ -3355,6 +3540,7 @@ export class Gateway {
 
     // 7. Usage log
     const usageLogId = await this.logUsage({
+      lineage,
       metadata: opts.metadata,
       orgId,
       app: opts.app,
@@ -3399,7 +3585,7 @@ export class Gateway {
 
     // 8b. Model-graded judge (sampled, budget-aware, may gate)
     if (opts.judge) {
-      await this.runJudge(opts, prompt, object, usageLogId, requireZdr);
+      await this.runJudge(opts, prompt, object, usageLogId, requireZdr, lineage);
     }
 
     return { object, traceId, cacheHit: false, usageLogId };
@@ -3420,6 +3606,7 @@ export class Gateway {
     object: O,
     mainUsageLogId: string | number,
     requireZdr = false,
+    lineage: Lineage = undefined,
   ): Promise<void> {
     const judge = opts.judge!;
     const orgId = this.org(opts);
@@ -3571,7 +3758,9 @@ export class Gateway {
     const overall = values.length > 0 ? values.reduce((a, b) => a + b, 0) / values.length : 0;
 
     // Persist BEFORE gating: rejected responses must still leave an audit trail.
+    // The judge row carries the judged call's lineage: its spend is the run's.
     await this.logUsage({
+      lineage,
       metadata: opts.metadata,
       app: opts.app,
       userId: opts.userId ?? null,
@@ -3682,6 +3871,7 @@ export class Gateway {
 
     const costCents = this.registry.estimateCostCents(model, inputTokens, outputTokens);
     const usageLogId = await this.logUsage({
+      lineage: undefined, // the admin test bench is not a run path
       metadata: opts.metadata,
       orgId,
       userId: opts.userId ?? null,

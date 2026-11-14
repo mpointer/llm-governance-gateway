@@ -65,6 +65,19 @@ export interface UsageEntry {
   degraded?: boolean | null;
   /** true when the caller aborted a streamed turn; the token counts are estimates (streamText). */
   aborted?: boolean | null;
+  /**
+   * Run lineage. Set on every row a call writes when the call carried a
+   * governed run (`gateway.startRun()`), absent otherwise and on rows written
+   * before 0.18.0. `runId` groups the rows of one agent run; `stepIndex` is
+   * the 0-based position of the governed call within it (every row that call
+   * writes shares it: failed links, the judge, the final row); `parentRunId`
+   * is set when the run is a child of another. A store that ignores unknown
+   * fields needs no change, but a store that drops these loses the ability to
+   * answer "what did this run cost".
+   */
+  runId?: string | null;
+  stepIndex?: number | null;
+  parentRunId?: string | null;
   createdAt: Date;
 }
 
@@ -86,6 +99,8 @@ export interface SpendCapEvent {
    * the point of measuring first. undefined on rows written before 0.11.0.
    */
   enforced?: boolean | null;
+  /** Set when the cap that was hit is a governed run's budget (0.18.0). */
+  runId?: string | null;
   createdAt: Date;
 }
 

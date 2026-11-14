@@ -25,7 +25,9 @@ export {
   DeadlineExceededError,
   InvalidModelHintError,
   GuardrailError,
+  RunLimitError,
 } from "./errors.js";
+export { GovernedRun, type RunSnapshot, type StartRunOptions } from "./run.js";
 export {
   runGuardrail,
   type GuardrailConfig,

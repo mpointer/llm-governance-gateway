@@ -47,6 +47,10 @@ export const aiUsageLog = pgTable("ai_usage_log", {
   metadata: jsonb("metadata").$type<Record<string, unknown>>(),
   /** Guardrail verdicts for the call. JSON. NULL before 0.16.0. */
   guardrails: jsonb("guardrails").$type<GuardrailRecord[]>(),
+  /** Run lineage. NULL on rows outside a governed run and before 0.18.0. */
+  runId: text("run_id"),
+  stepIndex: integer("step_index"),
+  parentRunId: text("parent_run_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
 });
 
@@ -61,6 +65,8 @@ export const spendCapEvents = pgTable("spend_cap_events", {
   wouldBlock: boolean("would_block").notNull(),
   /** Did this breach actually throw? NULL on rows written before 0.11.0. */
   enforced: boolean("enforced"),
+  /** The governed run whose budget was hit. NULL for the daily caps. */
+  runId: text("run_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
 });
 
@@ -107,6 +113,9 @@ export class DrizzlePgUsageStore implements UsageStore {
         outputText: entry.outputText ?? null,
         metadata: entry.metadata ?? null,
         guardrails: entry.guardrails ?? null,
+        runId: entry.runId ?? null,
+        stepIndex: entry.stepIndex ?? null,
+        parentRunId: entry.parentRunId ?? null,
         createdAt: entry.createdAt,
       })
       .returning({ id: aiUsageLog.id });
@@ -141,6 +150,7 @@ export class DrizzlePgUsageStore implements UsageStore {
       route: event.route ?? null,
       wouldBlock: event.wouldBlock,
       enforced: event.enforced ?? null,
+      runId: event.runId ?? null,
       createdAt: event.createdAt,
     });
   }

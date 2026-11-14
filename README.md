@@ -53,6 +53,7 @@ Spend controls in this space are usually observed (dashboards that tell you *aft
   - [Editable prompts and the cache](#editable-prompts-and-the-cache)
   - [Model-id conventions, and the one place they differ](#model-id-conventions-and-the-one-place-they-differ)
   - [Attribution beyond userId](#attribution-beyond-userid)
+  - [Governed runs (agent loops)](#governed-runs-agent-loops)
   - [Observability export (OTel, Langfuse, metrics)](#observability-export-otel-langfuse-metrics)
   - [HTTP service (multi-app deployments)](#http-service-multi-app-deployments)
 - [Guardrail hooks (pre/post)](#guardrail-hooks-prepost)
@@ -683,6 +684,59 @@ It lands on every usage row the call writes and is handed to your `UsageStore` a
 It reaches the rows that are easy to forget, which are usually the ones that matter: cache hits (whose share grows exactly as your hit rate improves), the judge's own row, and the zero-token row written when an attempt times out.
 
 One caveat: `metadata` is **not** covered by the `encrypt` hook, which applies to `inputText`/`outputText` only. Keep PII out of it, or encrypt it yourself before passing.
+
+### Governed runs (agent loops)
+
+The daily caps bound a user per day. An agent loop can spend a day's budget in
+a minute. A **run** groups the calls of one agent turn, gives them a dollar
+budget across all of them, and bounds how many there may be:
+
+```ts
+const run = gw.startRun({ budgetCents: 100, maxSteps: 20 });
+
+const plan = await gw.runStructured({ ...planOpts, run });
+const chat = await gw.streamText({ slug: "agent", messages, tools, run });
+await gw.embed(chunks, { run });
+
+run.spentCents;       // counted from the ledger rows the gateway wrote
+run.remainingCents(); // undefined when nothing in the chain has a budget
+```
+
+Each governed call that carries the run is one step. What you get:
+
+- **Lineage in the ledger.** Every row a step writes (final, cache hit,
+  guardrail block, failed link, judge) carries `runId`, `stepIndex` and
+  `parentRunId`. "What did this run cost" is one `WHERE run_id = ?`.
+- **A hard budget across calls.** Checked before every call, in the same front
+  door as the daily caps. Once the run has spent `budgetCents` the next call
+  throws `RunLimitError` before any provider is contacted, and a spend-cap
+  event records it with the run id. `caps.mode: "observe"` records without
+  throwing, like every other cap.
+- **A step ceiling.** The call past `maxSteps` throws `RunLimitError` and
+  leaves a zero-token row (`provider: "run"`). Always enforced, observe mode
+  included: it is a loop guard, not a threshold on trial.
+- **Nesting.** `gw.startRun({ parent: run })` makes a child for a sub-agent.
+  Its spend also counts against the parent, and it is refused when the parent
+  runs out. A sub-agent cannot spend what its parent has not got.
+- **Runs that span processes.** `run.snapshot()` is JSON;
+  `gw.resumeRun(snapshot)` continues it.
+
+Three limits, stated plainly. The budget check is before each call, so a run
+can overshoot by at most one step. One `streamText` call is one step however
+many tool-loop steps the AI SDK takes inside it; its row totals their usage,
+but nothing stops the loop mid-turn yet. And batch and `runPromptTest` take no
+run. Design, and what comes next (a stop inside the tool loop, per-tool caps):
+[docs/design/run-governance.md](./docs/design/run-governance.md).
+
+Migration, all nullable; `ensureTables()` (SQLite quick-start) adds them:
+
+```sql
+ALTER TABLE ai_usage_log     ADD COLUMN run_id TEXT;
+ALTER TABLE ai_usage_log     ADD COLUMN step_index INTEGER;
+ALTER TABLE ai_usage_log     ADD COLUMN parent_run_id TEXT;
+ALTER TABLE spend_cap_events ADD COLUMN run_id TEXT;
+CREATE INDEX idx_ai_usage_run ON ai_usage_log (run_id, step_index);
+```
 
 ### Observability export (OTel, Langfuse, metrics)
 
