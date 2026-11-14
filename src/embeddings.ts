@@ -29,6 +29,8 @@ export interface EmbedOptions {
    *  not part of the cache key and never affects routing. */
   metadata?: Record<string, unknown>;
   requireZdr?: boolean;
+  /** The governed run this embedding call is a step of. See `Gateway.startRun()`. */
+  run?: import("./run.js").GovernedRun;
   userId?: string;
   anonKey?: string;
   route?: string;

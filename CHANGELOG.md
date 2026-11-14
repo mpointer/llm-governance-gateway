@@ -8,6 +8,61 @@ adopters implement, and in practice they have only ever gained capability throug
 *optional* parameters — but they are not yet under a formal semver freeze. 1.0.0
 is gated on a downstream integration proving the SPI holds, not on a date.
 
+## Unreleased
+
+### Added
+
+- **Governed runs: `gateway.startRun({ budgetCents, maxSteps, parent })`.**
+  Pass the returned run as `run` to `runStructured`, `runText`,
+  `streamStructured`, `streamText` or `embed`, and each call becomes one step
+  of the run. The run's rows share a `runId` in the ledger, their spend counts
+  against the budget, and the step ceiling bounds how many there are. A call
+  past either limit throws the new `RunLimitError` before any provider is
+  contacted. Child runs (`parent`) count against their ancestors' budgets.
+  `run.snapshot()` and `gateway.resumeRun()` carry a run across processes.
+  `GovernedRun`, `RunSnapshot` and `StartRunOptions` are exported. Design:
+  docs/design/run-governance.md.
+- **Run lineage on the ledger.** `UsageEntry` gains optional `runId`,
+  `stepIndex` and `parentRunId`; `SpendCapEvent` gains optional `runId`. Set
+  on every row a step writes (final, cache hit, guardrail block, failed link,
+  judge) and absent, not null, on rows written outside a run. A run budget
+  breach is a spend-cap event with the run id and a `run:` route prefix;
+  `caps.mode: "observe"` records it without throwing. A step-ceiling refusal
+  is always enforced and writes a zero-token row (`provider: "run"`,
+  `model: "step-limit"`).
+
+### Migration
+
+Nullable columns on two tables, and one index. No backfill. A call that
+carries no run behaves and ledgers exactly as before, and a custom
+`UsageStore` that ignores unknown fields needs no change.
+
+```sql
+ALTER TABLE ai_usage_log     ADD COLUMN run_id TEXT;
+ALTER TABLE ai_usage_log     ADD COLUMN step_index INTEGER;
+ALTER TABLE ai_usage_log     ADD COLUMN parent_run_id TEXT;
+ALTER TABLE spend_cap_events ADD COLUMN run_id TEXT;
+CREATE INDEX idx_ai_usage_run ON ai_usage_log (run_id, step_index);
+```
+
+`ensureTables()` (SQLite quick-start) applies these automatically.
+
+### Known limits
+
+- The budget is checked before each call, so a run can overshoot by at most
+  one step.
+- One `streamText` call is one step however many tool-loop steps the AI SDK
+  takes inside it. Its row totals their usage, so the run's spend is right,
+  but nothing stops the loop mid-turn yet.
+- `submitBatch`, `reconcileBatch` and `runPromptTest` take no run.
+
+### Changed
+
+- The strategic roadmap (docs/strategy/roadmap-2026-2027.md) is corrected
+  against `main` at 0.17.1: it was written from a stale checkout and listed
+  `streamText`, the retry predicate and the #49 decision as open. The planned
+  `runAgent()` method is dropped in favor of run governance on `streamText`.
+
 ## 0.17.1
 
 - `streamText`: a caller abort now rejects `result` with the caller's own

@@ -160,9 +160,11 @@ backlog ids in section 4 of the strategy doc.
       usage, `prepareStep`, tool execution hooks, `toolApproval` and composable
       `stopWhen` on both `streamText` and `generateText`. Verified 2026-11-14
 - [x] Merge or close draft docs PRs #54, #55, #56: merged 2026-10-28
-- [ ] Run lineage: nullable `run_id`, `step_index`, `parent_trace_id` on the
-      usage and cap-event tables; `GovernedRun`, `gw.startRun()`, snapshot and
-      resume; `scope: "run"` cap check inside `frontDoor()` (8)
+- [x] Run lineage and the governed run: nullable `run_id`, `step_index`,
+      `parent_run_id` on the usage table and `run_id` on cap events;
+      `GovernedRun`, `gw.startRun()`, snapshot and resume; budget and step
+      ceiling checked inside `frontDoor()`; nested runs. Design:
+      [run-governance.md](./docs/design/run-governance.md) (8)
 - [ ] Run budgets on the agent loop: per-run budget, step ceiling,
       cost-velocity breaker, one ledger row per step, added to the shipped
       `streamText` and a non-streaming sibling when the call carries a run.

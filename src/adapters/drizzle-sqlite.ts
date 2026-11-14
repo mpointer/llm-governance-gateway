@@ -38,6 +38,10 @@ export const aiUsageLog = sqliteTable("ai_usage_log", {
   metadata: text("metadata", { mode: "json" }).$type<Record<string, unknown>>(),
   /** Guardrail verdicts for the call. JSON. NULL before 0.16.0. */
   guardrails: text("guardrails", { mode: "json" }).$type<GuardrailRecord[]>(),
+  /** Run lineage. NULL on rows outside a governed run and before 0.18.0. */
+  runId: text("run_id"),
+  stepIndex: integer("step_index"),
+  parentRunId: text("parent_run_id"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
 });
 
@@ -52,6 +56,8 @@ export const spendCapEvents = sqliteTable("spend_cap_events", {
   wouldBlock: integer("would_block", { mode: "boolean" }).notNull(),
   /** Did this breach actually throw? NULL on rows written before 0.11.0. */
   enforced: integer("enforced", { mode: "boolean" }),
+  /** The governed run whose budget was hit. NULL for the daily caps. */
+  runId: text("run_id"),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
 });
 
@@ -98,6 +104,9 @@ export class DrizzleSqliteUsageStore implements UsageStore {
         outputText: entry.outputText ?? null,
         metadata: entry.metadata ?? null,
         guardrails: entry.guardrails ?? null,
+        runId: entry.runId ?? null,
+        stepIndex: entry.stepIndex ?? null,
+        parentRunId: entry.parentRunId ?? null,
         createdAt: entry.createdAt,
       })
       .returning({ id: aiUsageLog.id });
@@ -132,6 +141,7 @@ export class DrizzleSqliteUsageStore implements UsageStore {
       route: event.route ?? null,
       wouldBlock: event.wouldBlock,
       enforced: event.enforced ?? null,
+      runId: event.runId ?? null,
       createdAt: event.createdAt,
     });
   }
@@ -179,6 +189,11 @@ async function addColumnIfMissing(
  *    ALTER TABLE spend_cap_events ADD COLUMN enforced INTEGER; -- 0.11.0
  *    ALTER TABLE ai_usage_log     ADD COLUMN metadata TEXT;      -- 0.11.0
  *    ALTER TABLE ai_usage_log     ADD COLUMN guardrails TEXT;    -- 0.16.0 (jsonb on pg)
+ *    ALTER TABLE ai_usage_log     ADD COLUMN run_id TEXT;        -- 0.18.0
+ *    ALTER TABLE ai_usage_log     ADD COLUMN step_index INTEGER; -- 0.18.0
+ *    ALTER TABLE ai_usage_log     ADD COLUMN parent_run_id TEXT; -- 0.18.0
+ *    ALTER TABLE spend_cap_events ADD COLUMN run_id TEXT;        -- 0.18.0
+ *    CREATE INDEX idx_ai_usage_run ON ai_usage_log (run_id, step_index); -- 0.18.0
  *  All nullable — existing rows stay unscoped, every unscoped query keeps its
  *  old plan, and a NULL `enforced` reads as "written before the mode existed",
  *  which is exactly what it means. */
@@ -193,7 +208,8 @@ export async function ensureTables(db: SqliteDb): Promise<void> {
     cache_create_tokens INTEGER, cache_read_tokens INTEGER, web_searches INTEGER,
     zdr_enforced INTEGER,
     input_text TEXT, output_text TEXT, created_at INTEGER NOT NULL,
-    org_id TEXT, metadata TEXT, guardrails TEXT
+    org_id TEXT, metadata TEXT, guardrails TEXT,
+    run_id TEXT, step_index INTEGER, parent_run_id TEXT
   )`);
   // Additive migration for tables created before org scoping existed. SQLite
   // has no ADD COLUMN IF NOT EXISTS, so a duplicate-column error means the
@@ -201,6 +217,12 @@ export async function ensureTables(db: SqliteDb): Promise<void> {
   await addColumnIfMissing(db, "ai_usage_log", "org_id", "org_id TEXT");
   await addColumnIfMissing(db, "ai_usage_log", "metadata", "metadata TEXT");
   await addColumnIfMissing(db, "ai_usage_log", "guardrails", "guardrails TEXT");
+  await addColumnIfMissing(db, "ai_usage_log", "run_id", "run_id TEXT");
+  await addColumnIfMissing(db, "ai_usage_log", "step_index", "step_index INTEGER");
+  await addColumnIfMissing(db, "ai_usage_log", "parent_run_id", "parent_run_id TEXT");
+  // "Every row of this run, in order" is the query run lineage exists for.
+  await db.run(sql`CREATE INDEX IF NOT EXISTS idx_ai_usage_run
+    ON ai_usage_log (run_id, step_index)`);
   await db.run(sql`CREATE INDEX IF NOT EXISTS idx_ai_usage_spend
     ON ai_usage_log (created_at, cache_hit, user_id)`);
   // Org-scoped spend sums are the hot path in a multi-tenant deployment.
@@ -210,10 +232,11 @@ export async function ensureTables(db: SqliteDb): Promise<void> {
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT, cap_cents REAL NOT NULL, spent_cents REAL NOT NULL,
     route TEXT, would_block INTEGER NOT NULL, created_at INTEGER NOT NULL,
-    org_id TEXT, enforced INTEGER
+    org_id TEXT, enforced INTEGER, run_id TEXT
   )`);
   await addColumnIfMissing(db, "spend_cap_events", "org_id", "org_id TEXT");
   await addColumnIfMissing(db, "spend_cap_events", "enforced", "enforced INTEGER");
+  await addColumnIfMissing(db, "spend_cap_events", "run_id", "run_id TEXT");
   await db.run(sql`CREATE TABLE IF NOT EXISTS ai_judge_scores (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     usage_log_id INTEGER NOT NULL, rubric TEXT NOT NULL,

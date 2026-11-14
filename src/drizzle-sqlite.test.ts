@@ -4,6 +4,7 @@
 
 import { beforeEach, describe, expect, it } from "vitest";
 import initSqlJs from "sql.js";
+import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/sql-js";
 import { z } from "zod";
 import { Gateway } from "./gateway.js";
@@ -86,6 +87,41 @@ describe("DrizzleSqliteUsageStore integration", () => {
       judgeRubric: () => ({ quality: 5 }),
     });
     expect(res.usageLogId).toBeDefined();
+  });
+
+  it("persists run lineage on usage rows and the run id on a run cap event", async () => {
+    const gw = makeGateway(store);
+    const run = gw.startRun({ id: "run-x", maxSteps: 2 });
+    await gw.runStructured({ ...opts("u1", ["r1"]), run });
+    await gw.runStructured({ ...opts("u1", ["r2"]), run });
+    await gw.runStructured(opts("u1", ["r3"])); // no run
+    const rows = await db.select().from(aiUsageLog);
+    expect(rows.map((r) => [r.runId, r.stepIndex, r.parentRunId])).toEqual([
+      ["run-x", 0, null],
+      ["run-x", 1, null],
+      [null, null, null],
+    ]);
+  });
+
+  it("ensureTables adds the lineage columns to a table created before 0.18.0", async () => {
+    const old = drizzle(new SQL.Database());
+    old.run(
+      sql`CREATE TABLE ai_usage_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, app TEXT, route TEXT,
+        prompt_slug TEXT, provider TEXT NOT NULL, model TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
+        estimated_cost_cents REAL NOT NULL, cache_hit INTEGER NOT NULL,
+        trace_id TEXT NOT NULL, duration_ms INTEGER, cache_create_tokens INTEGER,
+        cache_read_tokens INTEGER, web_searches INTEGER, zdr_enforced INTEGER,
+        input_text TEXT, output_text TEXT, created_at INTEGER NOT NULL
+      )`,
+    );
+    await ensureTables(old);
+    await ensureTables(old); // idempotent
+    const gw = makeGateway(new DrizzleSqliteUsageStore(old));
+    await gw.runStructured({ ...opts("u1", ["m"]), run: gw.startRun({ id: "migrated" }) });
+    const rows = await old.select().from(aiUsageLog);
+    expect(rows[0]!.runId).toBe("migrated");
   });
 });
 
