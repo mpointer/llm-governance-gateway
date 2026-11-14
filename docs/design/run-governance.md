@@ -1,6 +1,6 @@
 # Design: governed runs
 
-Status: **step 1 shipped** (run lineage, run budget, step ceiling: `src/run.ts`,
+Status: **step 1 shipped in 0.18.0** (run lineage, run budget, step ceiling: `src/run.ts`,
 `Gateway.startRun()`). Steps 2 and 3 below are designed, not built. This is the
 first item of the plan in
 [docs/strategy/roadmap-2026-2027.md](../strategy/roadmap-2026-2027.md).
