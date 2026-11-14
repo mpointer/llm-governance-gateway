@@ -140,7 +140,8 @@ the real 1.0 risk, which is why #8 and #12 landed first.
 
 A full assessment, competitive research and a scored 35-item backlog are in
 [docs/strategy/roadmap-2026-2027.md](./docs/strategy/roadmap-2026-2027.md)
-(written 2026-11-03). Its thesis: every competitor is a proxy that sees HTTP
+(written 2026-11-03, corrected 2026-11-14 after it turned out to describe a
+checkout four releases behind `main`). Its thesis: every competitor is a proxy that sees HTTP
 requests; this library runs in-process and can govern the agent loop itself.
 The items below are that document's near- and medium-term plan, as the
 checklist this file has always been. Numbers in parentheses are the
@@ -148,18 +149,24 @@ backlog ids in section 4 of the strategy doc.
 
 ### First 90 days (to 1.0)
 
-- [ ] Decide #49, how a caller or store names a model, and write it into the
-      README's model-id section (28)
-- [ ] Configurable retry predicate, #15 (29)
-- [ ] `streamText`, #14 (19)
-- [ ] Spike: confirm the pinned AI SDK exposes per-step usage and a composable
-      stop condition; record the answer in `docs/design/run-governance.md`
-- [ ] Merge or close draft docs PRs #54, #55, #56
+- [x] Decide #49, how a caller or store names a model: the slug names the
+      model, decided 2026-10-28 in
+      [model-naming.md](./docs/design/model-naming.md). Implementation is gated
+      on Scout's adoption (28)
+- [x] Configurable retry predicate, #15: `GatewayConfig.isRetryable`, 0.17.0 (29)
+- [x] `streamText`, #14: governed text streaming with tool calling and native
+      Anthropic streaming, 0.17.0 (19)
+- [x] Spike: the pinned AI SDK (7.0.83) exposes `onStepEnd` with per-step
+      usage, `prepareStep`, tool execution hooks, `toolApproval` and composable
+      `stopWhen` on both `streamText` and `generateText`. Verified 2026-11-14
+- [x] Merge or close draft docs PRs #54, #55, #56: merged 2026-10-28
 - [ ] Run lineage: nullable `run_id`, `step_index`, `parent_trace_id` on the
       usage and cap-event tables; `GovernedRun`, `gw.startRun()`, snapshot and
       resume; `scope: "run"` cap check inside `frontDoor()` (8)
-- [ ] `runAgent()`: per-run budget, step ceiling, cost-velocity breaker, one
-      ledger row per step (1)
+- [ ] Run budgets on the agent loop: per-run budget, step ceiling,
+      cost-velocity breaker, one ledger row per step, added to the shipped
+      `streamText` and a non-streaming sibling when the call carries a run.
+      This replaces the separate `runAgent()` first planned (1)
 - [ ] Governed tool calls: `ToolPolicy`, per-tool caps, `guardrails.tool`
       hook, tool ledger rows, `preflightTools()` (2)
 - [ ] `llm-gateway policy` report: effective policy per task from config (10)
