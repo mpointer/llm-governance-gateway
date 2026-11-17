@@ -1,7 +1,10 @@
 # Design: governed runs
 
 Status: **step 1 shipped in 0.18.0** (run lineage, run budget, step ceiling: `src/run.ts`,
-`Gateway.startRun()`). Steps 2 and 3 below are designed, not built. This is the
+`Gateway.startRun()`). **Step 2 is half built**: the budget stop inside a
+`streamText` tool loop and the per-tool-step ledger rows are in; the
+cost-velocity breaker and the non-streaming loop are not. Step 3 is designed,
+not built. This is the
 first item of the plan in
 [docs/strategy/roadmap-2026-2027.md](../strategy/roadmap-2026-2027.md).
 
@@ -111,9 +114,8 @@ with every other store. A child's snapshot keeps its `parentRunId`; pass
 - **Batch and `runPromptTest` take no run.** A batch is not a step of an
   interactive loop, and the admin test bench bypasses governance by design.
 - **One `streamText` call is one step**, however many tool-loop steps the AI
-  SDK takes inside it. Its single ledger row already totals usage across
-  those steps, so the run's spend is right; what is missing is a stop inside
-  the loop and a row per inner step. That is step 2.
+  SDK takes inside it. Step 1 left that loop ungoverned; step 2 below stops
+  it on the budget and ledgers its tool steps.
 - **Concurrent calls in one run can overshoot together.** Two calls admitted
   at the same moment both see the same spent total. The run is a guard for a
   loop, not a distributed lock.
@@ -121,32 +123,105 @@ with every other store. A child's snapshot keeps its `parentRunId`; pass
   an index on `(run_id, step_index)`; reading them back as a tree is a query
   today and a helper later.
 
-## Step 2: budgets and tools inside the loop (not built)
+## Step 2: budgets inside the loop
 
-`streamText` already passes `tools` and `stopWhen` to the AI SDK loop. When
-the call carries a run, the loop itself should be governed. The spike the
-roadmap called for is answered, against the pinned `ai@7.0.83`, for both
+`streamText` passes `tools` and `stopWhen` to the AI SDK loop. The front door
+checks the run's budget once, before the call. A loop can spend many times
+that inside the call, so when the call carries a run the loop itself is
+governed.
+
+The spike the roadmap called for, against the pinned `ai@7.0.83`, for both
 `streamText` and `generateText`:
 
 | Need | AI SDK surface |
 | --- | --- |
-| Usage per inner step | `onStepEnd`, whose `StepResult` carries `usage` |
+| Usage per inner step | `finish-step` parts and `onStepEnd`, whose `StepResult` carries `usage` |
 | Stop before the next inner step | `stopWhen` (array-composable) and `prepareStep` |
 | See a tool call before it runs | `onToolExecutionStart` |
 | See its result and duration | `onToolExecutionEnd` |
 | Hold a tool call for a human | `toolApproval` |
 
-So the loop does not need to be driven by hand. The plan:
+So the loop does not need to be driven by hand.
 
-1. A budget stop condition composed into `stopWhen`, fed by `onStepEnd`
-   usage priced through the registry: the loop stops when the run is out of
-   budget, instead of at the next governed call.
-2. One ledger row per inner step, sharing the call's `stepIndex` with a
-   sub-index, in place of the single totalled row. This changes the row count
-   of a `streamText` turn, so it is opt-in by the presence of a run.
-3. A cost-velocity breaker over the last N inner steps, off by default.
-4. A non-streaming sibling on `generateText` for agent loops that do not
-   stream.
+### Built: the budget stop
+
+When the call carries a run whose chain has a budget, and the caller passed
+`stopWhen`, a budget condition is appended to the caller's conditions. After
+each inner step it:
+
+1. prices every step of the turn so far from the SDK's own step results,
+   with the same registry function that prices ledger rows;
+2. subtracts what the run has already been charged for this turn (see the
+   next section: tool steps are ledgered as they finish);
+3. asks the run whether that pending spend puts it, or an ancestor, at its
+   budget (`GovernedRun.exhausted(pendingCents)`), and stops the loop if so.
+
+Step 2 matters because the SDK evaluates stop conditions in its own pipeline,
+which may run before or after the gateway's consumer has written the row for
+the step that just finished. The condition must be right either way. So
+`logUsage` adds each row's cost to a per-turn counter in the same synchronous
+tick it adds it to the run, and the condition uses
+`turn cost so far − turn cost already ledgered` as the pending amount. There
+is no window in which a step is counted twice or not at all.
+
+When the loop is cut:
+
+- `result` resolves, it does not reject. The text and tool results produced
+  so far were already streamed and are valid. `result.runStopped` is
+  `{ limit: "budget", runId }`, naming the run that ran out (the call's own,
+  or an ancestor).
+- A spend-cap event is recorded with the run id, after the closing row so its
+  `spentCents` is the ledger's.
+- The run's next call is refused by the front door.
+
+`runStopped` is set only when the loop was actually cut, that is, when the
+last step asked for tools and the model was not called again. Under
+`caps.mode: "observe"` the breach is recorded and the loop runs on.
+
+With no `stopWhen` from the caller the SDK runs one step (`isStepCount(1)`),
+so there is no loop and nothing is added. Appending a condition there would
+replace the SDK's default and turn a single call into an unbounded loop.
+
+### Built: a row per tool step
+
+With a run, a completed tool step is ledgered as soon as its `finish-step`
+arrives, tagged `metadata.innerStep` with its index. The turn's closing row
+(the one that carries the final text and the post-guardrail verdict) then
+carries only what is left: the last step's tokens, or zero if the loop was
+cut right after a tool step. It is tagged `metadata.innerSteps` with the
+count.
+
+- **Each quantity is ledgered once.** Tokens, cost and tool-call counts on
+  the turn's rows sum to `result.usage` and the total tool calls. Text is the
+  exception: a step row holds that step's text, the closing row the whole
+  turn's.
+- **Why ledger early.** It is the library's oldest rule applied to the loop:
+  a row is written when the money is known to be spent, so a turn killed
+  mid-loop keeps the audit trail of what it had already spent. It also lets
+  a sibling call in the same run see this turn's spend while it is running.
+- **Why only tool steps.** The last step of a turn is not known to be the
+  last until the stream ends, and it is ledgered milliseconds later on the
+  closing row anyway. A tool step is the one after which the loop goes back
+  to the provider, which is the gap worth covering.
+- **Why only with a run.** It changes the number of rows a turn writes.
+  Callers without a run keep one row per turn.
+- **No schema change.** `innerStep` and `innerSteps` sit in `metadata`, next
+  to the `toolCalls` count `streamText` already put there.
+
+The aborted and degraded closing rows follow the same rule: they carry the
+cut-off estimate minus what was already ledgered.
+
+### Not built
+
+- **Cost-velocity breaker.** A stop when the cost per inner step keeps
+  growing. Deliberately held: the rule ("how much growth over how many
+  steps") should come from a real loop's ledger, which now exists to be
+  read, not from a guess.
+- **A non-streaming loop** on `generateText`, for agents that do not stream.
+  The same condition and the same row scheme apply; it is a new public method
+  and wants its own change.
+- **Inner steps are not counted against `maxSteps`.** A run's steps are
+  governed calls. The caller's `stopWhen` bounds the inner loop.
 
 This replaces the separate `runAgent()` method first planned: it would have
 been a second door onto the loop `streamText` already runs.

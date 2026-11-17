@@ -144,6 +144,8 @@ links, which keep their existing zero-token rows.
 
 ### Ledger
 
+(With a governed run on the call, completed tool steps are ledgered as they finish and the closing row carries the rest: see [run-governance.md](./run-governance.md). Without a run:)
+
 One row per turn, totalled across every tool step (the AI SDK's total usage,
 not the last step's). `degraded: true` turns are marked so cost analysis can
 separate them; the field is optional on `UsageEntry`, so existing

@@ -721,11 +721,34 @@ Each governed call that carries the run is one step. What you get:
 - **Runs that span processes.** `run.snapshot()` is JSON;
   `gw.resumeRun(snapshot)` continues it.
 
-Three limits, stated plainly. The budget check is before each call, so a run
-can overshoot by at most one step. One `streamText` call is one step however
-many tool-loop steps the AI SDK takes inside it; its row totals their usage,
-but nothing stops the loop mid-turn yet. And batch and `runPromptTest` take no
-run. Design, and what comes next (a stop inside the tool loop, per-tool caps):
+**Inside a tool loop.** One `streamText` call is one step of the run, however
+many tool-loop steps the AI SDK takes inside it. The run still governs the
+loop:
+
+```ts
+const res = await gw.streamText({ slug, messages, tools, stopWhen: stepCountIs(20), run });
+const out = await res.result;
+out.runStopped; // { limit: "budget", runId } when the run ran out mid-loop
+```
+
+- When you pass `stopWhen`, a budget condition joins it. After each inner step
+  it prices the turn so far and stops the loop once the run, or an ancestor,
+  is at its budget. The text and tool results produced so far come back as
+  usual, `result.runStopped` says the loop was cut, a spend-cap event records
+  it, and the run's next call is refused. Observe mode records and lets the
+  loop run on.
+- Each completed tool step is ledgered as soon as it finishes, tagged
+  `metadata.innerStep`. The closing row carries only what is left, plus
+  `metadata.innerSteps`. Tokens, cost and tool-call counts are each ledgered
+  once, so sums over the turn's rows equal `result.usage`. A turn killed
+  mid-loop therefore keeps the audit trail of what it had already spent.
+- A call with no run is unchanged: one row per turn.
+
+Three limits, stated plainly. Both budget checks run between steps, so a run
+can overshoot by at most one step (one model call inside a loop). The in-loop
+stop needs a `stopWhen` from you: with none the AI SDK runs a single step and
+there is no loop to stop. And batch and `runPromptTest` take no run. Design,
+and what comes next (per-tool caps, a non-streaming loop):
 [docs/design/run-governance.md](./docs/design/run-governance.md).
 
 Migration, all nullable; `ensureTables()` (SQLite quick-start) adds them:
