@@ -37,6 +37,7 @@ import {
 } from "./guardrails.js";
 import { AttemptBudget, sleep } from "./deadline.js";
 import { GovernedRun, type RunSnapshot, type StartRunOptions } from "./run.js";
+import { governTools, type ToolDenial, type ToolPolicy } from "./tools.js";
 import {
   ProviderRegistry,
   parseModelId,
@@ -505,6 +506,12 @@ export interface StreamTextOutcome {
    * refused with `RunLimitError`.
    */
   runStopped?: { limit: "budget"; runId: string };
+  /**
+   * Tool calls the loop asked for that were not run: a `ToolPolicy` limit,
+   * the run's budget, or a `guardrails.tool` block. The model was told and
+   * the turn went on. Absent when none were denied.
+   */
+  toolDenials?: ToolDenial[];
 }
 
 export interface StreamTextResult {
@@ -745,6 +752,8 @@ export class Gateway {
   private readonly encrypt?: (t: string) => string;
   private readonly judgeDefaults?: GatewayConfig["judge"];
   private readonly guardrails?: GuardrailConfig;
+  private readonly toolPolicy?: Record<string, ToolPolicy>;
+  private readonly warnedUnpricedTools = new Set<string>();
   private readonly anthropicCfg?: GatewayConfig["anthropic"];
   private readonly batchCfg?: GatewayConfig["batch"];
   private readonly mockResponders = new Map<string, MockResponder>();
@@ -774,6 +783,7 @@ export class Gateway {
     this.encrypt = cfg.encrypt;
     this.judgeDefaults = cfg.judge;
     this.guardrails = cfg.guardrails;
+    this.toolPolicy = cfg.toolPolicy;
     this.anthropicCfg = cfg.anthropic;
     this.batchCfg = cfg.batch;
     this.obs = cfg.observability;
@@ -1858,6 +1868,83 @@ export class Gateway {
       );
     };
 
+    // Tool governance (src/tools.ts): on when a tool policy or a tool hook is
+    // configured. Each executed tool call is capped, hooked and ledgered on a
+    // row of its own. The row carries the call's plain lineage, not the
+    // turn-counted one: its cost is charged to the run at once, and must not
+    // be mistaken by the in-loop budget check for a model step already paid.
+    const toolDenials: ToolDenial[] = [];
+    let currentInnerStep = 0;
+    const turnToolUse = new Map<string, { calls: number; cents: number }>();
+    const tools =
+      opts.tools && (this.toolPolicy !== undefined || this.guardrails?.tool !== undefined)
+        ? governTools(opts.tools, {
+            policy: this.toolPolicy ?? {},
+            ...(this.guardrails?.tool ? { hook: this.guardrails.tool } : {}),
+            failOpen,
+            enforced: this.caps.mode !== "observe",
+            ...(lineage ? { run: lineage.run } : {}),
+            use: (name) => {
+              if (lineage) return lineage.run.toolUse(name);
+              let use = turnToolUse.get(name);
+              if (!use) {
+                use = { calls: 0, cents: 0 };
+                turnToolUse.set(name, use);
+              }
+              return use;
+            },
+            hookCtx: {
+              slug: opts.slug,
+              traceId,
+              userId: opts.userId ?? null,
+              orgId: orgId ?? null,
+              route: opts.route ?? null,
+              task: opts.task,
+              ...(lineage ? { runId: lineage.run.id } : {}),
+            },
+            onUnpriced: (name) => {
+              // Only a configured policy can be incomplete; a hook alone prices nothing.
+              if (this.toolPolicy === undefined || this.warnedUnpricedTools.has(name)) return;
+              this.warnedUnpricedTools.add(name);
+              console.warn(
+                `[llm-gateway] no ToolPolicy for tool "${name}": its calls are ledgered at 0¢ and ` +
+                  `uncapped. Add it to GatewayConfig.toolPolicy, or call gateway.preflightTools() ` +
+                  `at startup to make this an error. Warned once per tool.`,
+              );
+            },
+            onDenial: (d) => toolDenials.push(d),
+            ledger: async (e) => {
+              await this.logUsage({
+                lineage,
+                metadata: {
+                  ...opts.metadata,
+                  toolCallId: e.toolCallId,
+                  innerStep: currentInnerStep,
+                  ...(e.denied ? { toolDenied: e.denied } : {}),
+                  ...(e.wouldDeny ? { toolWouldDeny: e.wouldDeny } : {}),
+                  ...(e.error !== undefined ? { toolError: e.error } : {}),
+                },
+                guardrails: e.guardrail ? [e.guardrail] : null,
+                orgId,
+                app: opts.app,
+                userId: opts.userId ?? null,
+                route: opts.route ?? null,
+                promptSlug: opts.slug,
+                provider: "tool",
+                model: e.tool,
+                inputTokens: 0,
+                outputTokens: 0,
+                estimatedCostCents: e.costCents,
+                cacheHit: false,
+                traceId,
+                durationMs: e.durationMs,
+                inputText: JSON.stringify(e.input ?? null),
+                outputText: e.output === undefined ? null : JSON.stringify(e.output),
+              });
+            },
+          })
+        : opts.tools;
+
     void (async () => {
       let lastErr: unknown;
       for (let i = 0; i < links.length; i++) {
@@ -1917,7 +2004,7 @@ export class Gateway {
               maxRetries: 0,
               onError: () => {}, // surfaced via the part stream; the SDK default logs it again
               ...(opts.system ? { system: opts.system } : {}),
-              ...(opts.tools ? { tools: opts.tools } : {}),
+              ...(tools ? { tools } : {}),
               ...(stopWhen ? { stopWhen } : {}),
               ...(temperature !== undefined ? { temperature } : {}),
             });
@@ -1952,6 +2039,7 @@ export class Gateway {
         // only what is left. Without a run nothing is ledgered early and the
         // closing row is the single row it always was.
         let innerSteps = 0;
+        currentInnerStep = 0;
         let stepToolCalls = 0;
         let lastStepHadTools = false;
         let stepStart = Date.now();
@@ -2025,6 +2113,7 @@ export class Gateway {
                   }
                   lastStepHadTools = stepToolCalls > 0;
                   innerSteps++;
+                  currentInnerStep = innerSteps;
                   stepToolCalls = 0;
                   stepStart = Date.now();
                   stepText = "";
@@ -2104,6 +2193,7 @@ export class Gateway {
             ...(over && budgetEnforced && lastStepHadTools
               ? { runStopped: { limit: "budget" as const, runId: over.id } }
               : {}),
+            ...(toolDenials.length > 0 ? { toolDenials } : {}),
           });
           return;
         } catch (err) {
@@ -2159,6 +2249,7 @@ export class Gateway {
               model: link.model,
               degraded: true,
               failovers,
+              ...(toolDenials.length > 0 ? { toolDenials } : {}),
             });
             return;
           }
@@ -2749,6 +2840,22 @@ export class Gateway {
       });
     }
     return { run, stepIndex: run.beginStep() };
+  }
+
+  /**
+   * Throw unless every named tool has a `ToolPolicy` entry. Call it at
+   * startup with the tools your agent uses (names, or the `tools` object
+   * itself): a tool the policy forgot runs uncapped at 0¢, and that should
+   * be a deploy-time error, not a warning nobody is reading.
+   */
+  preflightTools(tools: readonly string[] | Record<string, unknown>): void {
+    const names = Array.isArray(tools) ? tools : Object.keys(tools);
+    const missing = names.filter((n) => !(n in (this.toolPolicy ?? {})));
+    if (missing.length === 0) return;
+    throw new Error(
+      `[llm-gateway] no ToolPolicy for: ${missing.join(", ")}. Add them to ` +
+        `GatewayConfig.toolPolicy (an empty entry, {}, declares a free, uncapped tool).`,
+    );
   }
 
   /** Register a deterministic responder used when mock mode is on. */

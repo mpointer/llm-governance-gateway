@@ -666,4 +666,14 @@ export interface GatewayConfig {
    * on hook error unless `failOpen` is set. See docs/design/guardrail-hooks.md.
    */
   guardrails?: import("./guardrails.js").GuardrailConfig;
+  /**
+   * Price and limits per tool, keyed by the tool's name. Setting this (even
+   * to `{}`) turns on tool governance for `streamText`: every tool call the
+   * loop executes is checked against its policy, passed through
+   * `guardrails.tool`, and ledgered on a row of its own (`provider: "tool"`).
+   * A tool with no entry runs uncapped at 0¢ and warns once;
+   * `gateway.preflightTools()` turns that into a startup error. Unset (and no
+   * `guardrails.tool`), tools run exactly as before.
+   */
+  toolPolicy?: Record<string, import("./tools.js").ToolPolicy>;
 }

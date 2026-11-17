@@ -3,8 +3,9 @@
 Status: **step 1 shipped in 0.18.0** (run lineage, run budget, step ceiling: `src/run.ts`,
 `Gateway.startRun()`). **Step 2 is half built**: the budget stop inside a
 `streamText` tool loop and the per-tool-step ledger rows are in; the
-cost-velocity breaker and the non-streaming loop are not. Step 3 is designed,
-not built. This is the
+cost-velocity breaker and the non-streaming loop are not. **Step 3 is built**
+(`src/tools.ts`): tool policy, the tool guardrail hook and a ledger row per
+tool call. The human approval gate is not. This is the
 first item of the plan in
 [docs/strategy/roadmap-2026-2027.md](../strategy/roadmap-2026-2027.md).
 
@@ -226,14 +227,103 @@ cut-off estimate minus what was already ledgered.
 This replaces the separate `runAgent()` method first planned: it would have
 been a second door onto the loop `streamText` already runs.
 
-## Step 3: governed tool calls (not built)
+## Step 3: governed tool calls
 
-A `ToolPolicy` per tool name (`costCents`, `maxCallsPerRun`,
-`maxCentsPerRun`, `requiresApproval`), enforced from the tool execution hooks,
-with a `guardrails.tool` hook before execution and a ledger row per tool call
-(`provider: "tool"`). Unknown tool pricing warns once and ledgers zero, the
-posture local endpoints already have. Section 6.3 of the strategy doc has the
-detail.
+A proxy governs MCP traffic, because that is what crosses its wire. A tool an
+in-process agent calls is a function, and nothing on the network sees it. Yet
+tools are where an agent's money and risk concentrate: a search API bills per
+call, a database write is irreversible.
+
+```ts
+const gw = new Gateway({
+  usage,
+  toolPolicy: {
+    web_search: { costCents: 1, maxCalls: 10 },
+    run_sql: { maxCalls: 3 },
+    lookup: {},                       // free and uncapped, but declared
+  },
+  guardrails: {
+    tool: ({ tool, input }) =>
+      tool === "run_sql" && /\b(drop|delete|update)\b/i.test(String((input as { sql: string }).sql))
+        ? { action: "block", reason: "read-only agent" }
+        : { action: "allow" },
+  },
+});
+```
+
+Tool governance is on when `toolPolicy` is set (even to `{}`) or
+`guardrails.tool` is set. Unset, tools run exactly as before and write no
+rows of their own: an existing `streamText` adopter sees no change.
+
+When it is on, `streamText` wraps the `execute` of every tool the call
+passed. Tools with no `execute` (client-side tools) pass through. For each
+tool call the loop is about to run, in this order:
+
+1. **Policy caps**, counted per run, or per call when the call carries no
+   run: `maxCalls`, then `maxCents`. Then, for a priced tool on a run with a
+   budget, whether the run can afford it. A priced tool's cost is known
+   before it runs, so unlike a model call it is not allowed to overshoot.
+   The check and the reservation happen with no `await` between them,
+   because the AI SDK runs a step's tool calls concurrently and two calls
+   must not both pass a limit with room for one.
+2. **`guardrails.tool`**: `allow`, `transform` (the new `input` field on the
+   verdict replaces the arguments, and must still satisfy the tool's schema),
+   or `block`. A hook that throws denies the call unless `failOpen` is set,
+   the same policy as the pre and post hooks. A block releases the
+   reservation from step 1.
+3. **The tool runs**, and a ledger row is written before its result goes
+   back to the loop.
+
+### The row
+
+`provider: "tool"`, `model: <tool name>`, zero tokens, `estimatedCostCents`
+from the policy, the arguments in `inputText` and the result in `outputText`
+(through the same truncate and encrypt path as prompts), the hook's verdict
+in `guardrails`, and in `metadata`: `toolCallId`, `innerStep`, and one of
+`toolDenied`, `toolWouldDeny` or `toolError` when they apply.
+
+Because the price is on a ledger row, it needs no second accounting: it
+counts against the run's budget, against the in-loop budget stop, and against
+the daily caps, the same way a model call's cost does. The row carries the
+call's plain lineage rather than the turn-counted one, so the in-loop budget
+check does not mistake a tool's cost for a model step it has already
+subtracted.
+
+A tool that throws is still ledgered and still charged. Whether a failed call
+was billed by the provider is unknowable from here, and a cap that
+undercounts is worse than one that overcounts.
+
+### A denial does not fail the turn
+
+A denied call throws `ToolDeniedError` from the tool's `execute`. The AI SDK
+hands that back to the model as the tool's error and the loop goes on: the
+model learns the tool was not run and can answer without it. The error's
+message is written for the model to read. The denial is ledgered (zero cost,
+`metadata.toolDenied`) and listed in `result.toolDenials`.
+
+Under `caps.mode: "observe"` a cap that would deny is recorded
+(`metadata.toolWouldDeny`) and the tool runs. A `guardrails.tool` block is
+policy, not a threshold on trial, and is enforced in observe mode too.
+
+### Unpriced tools
+
+A tool with no policy entry, when a policy is configured, runs uncapped at
+0¢ and warns once, the posture unknown model pricing already has.
+`gateway.preflightTools(tools)` throws at startup instead. An empty entry,
+`{}`, declares a free uncapped tool on purpose.
+
+### Not built
+
+- **Human approval gate** (`requiresApproval`): a tool call that waits on a
+  person. It needs somewhere to persist the pending request, which is the
+  control plane's review queue. The AI SDK's `toolApproval` is the surface it
+  will use.
+- **Per-tool ZDR.**
+- **Counting a child run's tool calls against its parent's caps.** Caps are
+  counted on the call's own run. Spend already nests; call counts do not.
+- **A plain function that returns an async iterable** has its final value
+  kept and its preliminary results not streamed. A tool written as
+  `async function*` is detected and stays a generator.
 
 ## Calls made in building step 1
 

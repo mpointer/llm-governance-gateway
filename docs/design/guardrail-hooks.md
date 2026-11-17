@@ -133,6 +133,10 @@ record shape), parameterised on how a path validates a transformed value.
   (TrustGate's grounder) has nothing to ground against at reconcile and
   should allow; that is a job-store schema change for a later version, not
   a reason to skip output policy now.
+- **A third seam, `guardrails.tool`**, runs before each tool call a
+  `streamText` loop executes. Its block does not throw `GuardrailError`: the
+  model is told the tool was not run and the turn goes on. See
+  [run-governance.md](./run-governance.md), step 3.
 - **`embed()` is not a hook path.** There is no prompt and no object; the
   governance it gets is caps, ZDR and the ledger.
 - **Allow verdicts may carry `reason` and `detail`** so a hook that computed

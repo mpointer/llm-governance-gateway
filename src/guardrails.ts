@@ -21,8 +21,11 @@ import { GuardrailError } from "./errors.js";
 export type GuardrailVerdict =
   /** Proceed. `reason` and `detail` are optional audit breadcrumbs. */
   | { action: "allow"; reason?: string; detail?: Record<string, unknown> }
-  /** Scrub and continue: a pre hook may replace `prompt`, a post hook `output`. */
-  | { action: "transform"; prompt?: string; output?: unknown; reason?: string }
+  /**
+   * Scrub and continue: a pre hook may replace `prompt`, a post hook `output`,
+   * a tool hook the tool call's `input`.
+   */
+  | { action: "transform"; prompt?: string; output?: unknown; input?: unknown; reason?: string }
   /** Stop the call. `detail` is ledgered as-is; keep it small and JSON-safe. */
   | { action: "block"; reason: string; detail?: Record<string, unknown> };
 
@@ -56,11 +59,37 @@ export interface PostGuardrailContext {
   task?: string;
 }
 
+/** What a tool hook sees: one tool call the model asked for, before it runs. */
+export interface ToolGuardrailContext {
+  /** The governed call's slug. */
+  slug: string;
+  /** The tool's name, as keyed in the call's `tools`. */
+  tool: string;
+  toolCallId: string;
+  /** The arguments the model produced, already validated by the tool's schema. */
+  input: unknown;
+  traceId: string;
+  userId?: string | null;
+  orgId?: string | null;
+  route?: string | null;
+  task?: string;
+  /** The governed run the call belongs to, when it carries one. */
+  runId?: string;
+}
+
 export type GuardrailHook<Ctx> = (ctx: Ctx) => GuardrailVerdict | Promise<GuardrailVerdict>;
 
 export interface GuardrailConfig {
   pre?: GuardrailHook<PreGuardrailContext>;
   post?: GuardrailHook<PostGuardrailContext>;
+  /**
+   * Runs before each tool call a `streamText` loop is about to execute.
+   * `allow` runs the tool, `transform` runs it with `input` replaced, `block`
+   * does not run it: the model is told the tool was denied and the loop goes
+   * on. The verdict is ledgered on the tool call's row. See
+   * docs/design/run-governance.md.
+   */
+  tool?: GuardrailHook<ToolGuardrailContext>;
   /**
    * What a THROWING hook means. Default false: the call is blocked (fail
    * closed). true: the call proceeds as if the hook had allowed it, and the
@@ -71,7 +100,7 @@ export interface GuardrailConfig {
 
 /** One ledgered verdict. The usage row carries one per hook that ran. */
 export interface GuardrailRecord {
-  hook: "pre" | "post";
+  hook: "pre" | "post" | "tool";
   action: GuardrailVerdict["action"];
   reason?: string;
   detail?: Record<string, unknown>;
@@ -93,7 +122,7 @@ export interface GuardrailOutcome {
  */
 export async function runGuardrail<Ctx>(
   hook: GuardrailHook<Ctx>,
-  which: "pre" | "post",
+  which: "pre" | "post" | "tool",
   ctx: Ctx,
   failOpen: boolean,
 ): Promise<GuardrailOutcome> {
@@ -127,7 +156,7 @@ export async function runGuardrail<Ctx>(
   }
 }
 
-function normalize(v: GuardrailVerdict, which: "pre" | "post"): GuardrailVerdict {
+function normalize(v: GuardrailVerdict, which: "pre" | "post" | "tool"): GuardrailVerdict {
   if (!v || typeof v !== "object" || typeof (v as { action?: unknown }).action !== "string") {
     throw new Error(`${which} guardrail returned an invalid verdict`);
   }
@@ -138,5 +167,12 @@ function normalize(v: GuardrailVerdict, which: "pre" | "post"): GuardrailVerdict
 }
 
 export function guardrailError(record: GuardrailRecord, output?: unknown): GuardrailError {
-  return new GuardrailError(record.hook, record.reason ?? "blocked", record.detail, output);
+  // Only pre and post records reach here: a tool hook's block is a
+  // ToolDeniedError handed back to the model, never a GuardrailError.
+  return new GuardrailError(
+    record.hook as "pre" | "post",
+    record.reason ?? "blocked",
+    record.detail,
+    output,
+  );
 }

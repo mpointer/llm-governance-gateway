@@ -41,6 +41,8 @@ export interface RunSnapshot {
   maxSteps?: number;
   spentCents: number;
   steps: number;
+  /** Per-tool call counts and spend, for `ToolPolicy` caps. Absent when no tool ran. */
+  tools?: Record<string, { calls: number; cents: number }>;
 }
 
 export class GovernedRun {
@@ -52,6 +54,7 @@ export class GovernedRun {
   readonly parentRunId: string | undefined;
   private spent = 0;
   private stepCount = 0;
+  private readonly tools = new Map<string, { calls: number; cents: number }>();
 
   constructor(opts: StartRunOptions = {}, restored?: RunSnapshot) {
     if (opts.budgetCents !== undefined && !(opts.budgetCents > 0)) {
@@ -72,6 +75,9 @@ export class GovernedRun {
     if (restored) {
       this.spent = restored.spentCents;
       this.stepCount = restored.steps;
+      for (const [name, use] of Object.entries(restored.tools ?? {})) {
+        this.tools.set(name, { ...use });
+      }
     }
   }
 
@@ -137,6 +143,21 @@ export class GovernedRun {
     return this.stepCount++;
   }
 
+  /**
+   * How often a tool has run in this run and what it cost, by `ToolPolicy`
+   * prices. The counters `ToolPolicy.maxCalls` and `maxCents` are checked
+   * against. This run's own calls only: a child run counts its own.
+   * @internal The returned record is the live counter; the gateway mutates it.
+   */
+  toolUse(tool: string): { calls: number; cents: number } {
+    let use = this.tools.get(tool);
+    if (!use) {
+      use = { calls: 0, cents: 0 };
+      this.tools.set(tool, use);
+    }
+    return use;
+  }
+
   /** @internal The gateway wrote a ledger row for this run. */
   record(cents: number): void {
     for (let r: GovernedRun | undefined = this; r; r = r.parent) r.spent += cents;
@@ -151,6 +172,9 @@ export class GovernedRun {
       ...(this.maxSteps !== undefined ? { maxSteps: this.maxSteps } : {}),
       spentCents: this.spent,
       steps: this.stepCount,
+      ...(this.tools.size > 0
+        ? { tools: Object.fromEntries([...this.tools].map(([k, v]) => [k, { ...v }])) }
+        : {}),
     };
   }
 }
