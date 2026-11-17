@@ -23,6 +23,26 @@ is gated on a downstream integration proving the SPI holds, not on a date.
   records without stopping.
 - **`GovernedRun.exhausted(pendingCents)`** takes spend that has happened but
   is not in the ledger yet.
+- **Governed tool calls: `GatewayConfig.toolPolicy` and `guardrails.tool`.**
+  Per tool name, a policy sets `costCents` (fixed, or a function of the
+  arguments), `maxCalls` and `maxCents`, counted per run or per call. With a
+  policy or a tool hook configured, every tool call a `streamText` loop
+  executes is checked against its caps and against what the run can afford,
+  passed through `guardrails.tool` (allow, rewrite the arguments via the new
+  `input` field on a transform verdict, or block), and ledgered on a row of
+  its own: `provider: "tool"`, the tool's name as `model`, the policy price,
+  arguments and result. The price is ordinary ledger spend, so it counts
+  against the run's budget, the in-loop budget stop and the daily caps. A
+  denied call does not fail the turn: the model is told and the loop goes on,
+  and the new optional `StreamTextOutcome.toolDenials` lists what was denied.
+  `gateway.preflightTools()` throws at startup for a tool the policy forgot.
+  `ToolDeniedError`, `ToolPolicy`, `ToolDenial`, `ToolDenialReason` and
+  `ToolGuardrailContext` are exported. **Off unless configured**: with neither
+  `toolPolicy` nor `guardrails.tool` set, tools run as before and write no
+  rows. Design: docs/design/run-governance.md, step 3.
+- `GuardrailRecord.hook` gains `"tool"`; an exhaustive `switch` over
+  `"pre" | "post"` needs a new arm. `RunSnapshot` gains optional `tools`
+  (per-tool counters), so tool caps survive a resumed run.
 
 ### Changed
 

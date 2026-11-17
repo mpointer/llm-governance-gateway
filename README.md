@@ -744,6 +744,38 @@ out.runStopped; // { limit: "budget", runId } when the run ran out mid-loop
   mid-loop therefore keeps the audit trail of what it had already spent.
 - A call with no run is unchanged: one row per turn.
 
+**Tools.** Tools are where an agent's money and risk concentrate, and a proxy
+cannot see an in-process tool call at all. Give each tool a policy and a call
+to it is capped, priced and ledgered:
+
+```ts
+const gw = new Gateway({
+  usage,
+  toolPolicy: {
+    web_search: { costCents: 1, maxCalls: 10 }, // per run
+    run_sql: { maxCalls: 3 },
+  },
+  guardrails: {
+    tool: ({ tool, input }) =>
+      tool === "run_sql" && isWrite(input) ? { action: "block", reason: "read-only agent" } : { action: "allow" },
+  },
+});
+gw.preflightTools(tools); // throw at startup if a tool has no policy
+```
+
+- **Caps** are counted per run (per call when there is no run): `maxCalls`,
+  `maxCents`, and for a priced tool whether the run's budget can afford it.
+- **`guardrails.tool`** runs before each tool call and may allow it, rewrite
+  its arguments, or block it.
+- **A row per tool call**: `provider: "tool"`, the tool's name as `model`, the
+  policy price, the arguments and the result. The price is ordinary ledger
+  spend, so it counts against the run's budget and the daily caps.
+- **A denied call does not fail the turn.** The model is told the tool was
+  not run and the loop goes on. `result.toolDenials` lists what was denied.
+
+Tool governance is on only when `toolPolicy` or `guardrails.tool` is set;
+otherwise tools run as before and write no rows.
+
 Three limits, stated plainly. Both budget checks run between steps, so a run
 can overshoot by at most one step (one model call inside a loop). The in-loop
 stop needs a `stopWhen` from you: with none the AI SDK runs a single step and

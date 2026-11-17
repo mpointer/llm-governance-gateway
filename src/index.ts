@@ -36,7 +36,14 @@ export {
   type GuardrailVerdict,
   type PreGuardrailContext,
   type PostGuardrailContext,
+  type ToolGuardrailContext,
 } from "./guardrails.js";
+export {
+  ToolDeniedError,
+  type ToolDenial,
+  type ToolDenialReason,
+  type ToolPolicy,
+} from "./tools.js";
 export {
   groundValue,
   groundFields,

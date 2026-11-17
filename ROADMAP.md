@@ -172,8 +172,10 @@ backlog ids in section 4 of the strategy doc.
 - [ ] Rest of item 1: a cost-velocity breaker (held until a real loop's
       ledger says what the rule should be) and a non-streaming loop on
       `generateText` (1)
-- [ ] Governed tool calls: `ToolPolicy`, per-tool caps, `guardrails.tool`
-      hook, tool ledger rows, `preflightTools()` (2)
+- [x] Governed tool calls: `toolPolicy` (price, `maxCalls`, `maxCents`),
+      the `guardrails.tool` hook, a ledger row per tool call,
+      `preflightTools()`. A denial is handed back to the model, it does not
+      fail the turn (2)
 - [ ] `llm-gateway policy` report: effective policy per task from config (10)
 - [ ] Postgres adapter test, then a coverage threshold (34)
 - [ ] **1.0.0**: SPI freeze statement, README Status rewritten (17)
