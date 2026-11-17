@@ -115,10 +115,14 @@ export class GovernedRun {
   /**
    * The nearest run in the chain (this one first) whose budget is spent, or
    * undefined. Same rule as the daily caps: refused at `spent >= budget`.
+   *
+   * `pendingCents` is spend that has happened but is not in the ledger yet
+   * (a tool loop's steps that have finished but whose row is still to be
+   * written). It counts against every run in the chain, as the row will.
    */
-  exhausted(): GovernedRun | undefined {
+  exhausted(pendingCents = 0): GovernedRun | undefined {
     for (let r: GovernedRun | undefined = this; r; r = r.parent) {
-      if (r.budgetCents !== undefined && r.spent >= r.budgetCents) return r;
+      if (r.budgetCents !== undefined && r.spent + pendingCents >= r.budgetCents) return r;
     }
     return undefined;
   }

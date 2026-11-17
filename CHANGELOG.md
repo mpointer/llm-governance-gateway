@@ -8,6 +8,34 @@ adopters implement, and in practice they have only ever gained capability throug
 *optional* parameters — but they are not yet under a formal semver freeze. 1.0.0
 is gated on a downstream integration proving the SPI holds, not on a date.
 
+## Unreleased
+
+### Added
+
+- **A run's budget now stops a `streamText` tool loop.** When the call carries
+  a run with a budget and you pass `stopWhen`, a budget condition joins your
+  stop conditions. After each inner step it prices the turn so far and stops
+  the loop once the run, or an ancestor, is at its budget, instead of at the
+  run's next governed call. `result` still resolves with the text and tool
+  results produced; the new optional `StreamTextOutcome.runStopped`
+  (`{ limit: "budget", runId }`) says the loop was cut, a spend-cap event
+  records it, and the run's next call is refused. `caps.mode: "observe"`
+  records without stopping.
+- **`GovernedRun.exhausted(pendingCents)`** takes spend that has happened but
+  is not in the ledger yet.
+
+### Changed
+
+- **With a run, a `streamText` turn writes one row per completed tool step.**
+  Each is ledgered as soon as the step finishes, tagged `metadata.innerStep`;
+  the closing row carries only what is left, tagged `metadata.innerSteps`.
+  Tokens, cost and tool-call counts are each ledgered once, so sums over the
+  turn's rows equal `result.usage`. A turn killed mid-loop keeps the audit
+  trail of what it had spent. A call with no run still writes exactly one
+  row, and a run call with no tool step writes one row with no new keys.
+  This only affects callers who adopted `run` in 0.18.0 and count rows per
+  turn. No schema change.
+
 ## 0.18.0
 
 Governed runs: a dollar budget and a step ceiling across the calls of one

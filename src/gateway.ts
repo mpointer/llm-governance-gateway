@@ -231,7 +231,19 @@ interface FrontDoorOptions<I> {
 }
 
 /** Where a call sits in a governed run. undefined = the call carries no run. */
-type Lineage = { run: GovernedRun; stepIndex: number } | undefined;
+type Lineage =
+  | {
+      run: GovernedRun;
+      stepIndex: number;
+      /**
+       * Set by a path that writes several rows over the life of one call (a
+       * streamText tool loop). logUsage adds each row's cost here in the same
+       * tick it adds it to the run, so the loop's budget check can tell which
+       * of its steps the run has already been charged for.
+       */
+      turn?: { ledgeredCents: number };
+    }
+  | undefined;
 
 /**
  * What a path hands to `logUsage`. `lineage` is REQUIRED (though it may be
@@ -421,9 +433,15 @@ export interface StreamTextOptions {
   /**
    * The governed run this call belongs to (`gateway.startRun()`). The call
    * becomes one step of the run: every usage row it writes carries the run's
-   * lineage, its spend counts against the run's budget, and the whole turn is one step, however many tool-loop steps the AI SDK takes
-   * inside it; it is refused
+   * lineage, its spend counts against the run's budget, and it is refused
    * with `RunLimitError` when the run is out of budget or steps.
+   *
+   * The whole turn is one step of the run, however many tool-loop steps the
+   * AI SDK takes inside it. Inside that loop the run still governs: when you
+   * pass `stopWhen`, a budget condition joins it and stops the loop after
+   * the step that spends the run's budget (`result.runStopped`), and each
+   * completed tool step is ledgered as soon as it finishes
+   * (`metadata.innerStep`), with the closing row carrying only what is left.
    */
   run?: GovernedRun;
   /** Names the call: routing, ledger, guardrails, ZDR. Required. */
@@ -478,6 +496,15 @@ export interface StreamTextOutcome {
   model: string;
   degraded: boolean;
   failovers: StreamFailover[];
+  /**
+   * Set when the call carried a governed run and the run's budget (or an
+   * ancestor's) ran out inside the tool loop: the loop was stopped after a
+   * tool step instead of calling the model again. `text` and `toolResults`
+   * hold what was produced; the model did not get to answer from the last
+   * tool results. `runId` is the run that ran out. The run's next call is
+   * refused with `RunLimitError`.
+   */
+  runStopped?: { limit: "budget"; runId: string };
 }
 
 export interface StreamTextResult {
@@ -1702,6 +1729,9 @@ export class Gateway {
     };
     const fd = await this.frontDoor<undefined, string>("streamText", fdOpts, validate);
     const { traceId, orgId, prompt, temperature, guardrailRecords, failOpen, lineage } = fd;
+    // What this turn has had ledgered so far, for the in-loop budget check.
+    const turn = { ledgeredCents: 0 };
+    const rowLineage: Lineage = lineage ? { ...lineage, turn } : undefined;
     const messages: ModelMessage[] = [
       ...opts.messages.slice(0, -1),
       prompt === lastUserText ? last! : withText(last!, prompt),
@@ -1718,10 +1748,19 @@ export class Gateway {
       degraded?: boolean;
       aborted?: boolean;
       extras?: NativeExtras;
+      /** Index of a completed tool step ledgered on its own (run calls only). */
+      innerStep?: number;
+      /** On the turn's closing row: how many inner steps the turn ran. */
+      innerSteps?: number;
     }) => ({
-      lineage,
+      lineage: rowLineage,
       ...(f.extras ?? {}),
-      metadata: { ...opts.metadata, toolCalls: f.toolCalls },
+      metadata: {
+        ...opts.metadata,
+        toolCalls: f.toolCalls,
+        ...(f.innerStep !== undefined ? { innerStep: f.innerStep } : {}),
+        ...(f.innerSteps !== undefined ? { innerSteps: f.innerSteps } : {}),
+      },
       ...(f.degraded ? { degraded: true } : {}),
       ...(f.aborted ? { aborted: true } : {}),
       guardrails: guardrailRecords.length > 0 ? guardrailRecords : null,
@@ -1825,6 +1864,38 @@ export class Gateway {
         const link = links[i]!;
         const linkStart = Date.now();
         const controller = new AbortController();
+        // In-loop run budget. The front door checks the budget before the
+        // call; a tool loop can spend many times that inside one call. When
+        // the caller passed a stop condition (so the loop runs more than one
+        // step) and the run chain has a budget, this condition joins theirs:
+        // after each step it prices the turn's steps so far, subtracts what
+        // the run has already been charged for them, and stops the loop when
+        // the rest would put the run (or an ancestor) at its budget.
+        let budgetOver: GovernedRun | undefined;
+        const budgetEnforced = this.caps.mode !== "observe";
+        const runStop: StopCondition<ToolSet> | undefined =
+          lineage && opts.stopWhen && lineage.run.remainingCents() !== undefined
+            ? ({ steps }) => {
+                const turnCents = steps.reduce(
+                  (sum, st) =>
+                    sum +
+                    this.registry.estimateCostCents(
+                      link.model,
+                      st.usage.inputTokens ?? 0,
+                      st.usage.outputTokens ?? 0,
+                    ),
+                  0,
+                );
+                const over = lineage.run.exhausted(turnCents - turn.ledgeredCents);
+                if (!over) return false;
+                budgetOver ??= over;
+                // Observe mode measures: the breach is recorded, the loop goes on.
+                return budgetEnforced;
+              }
+            : undefined;
+        const stopWhen = runStop
+          ? [...(Array.isArray(opts.stopWhen) ? opts.stopWhen : [opts.stopWhen!]), runStop]
+          : opts.stopWhen;
         const source = native(link)
           ? streamNativeAnthropicText(this.anthropicCfg!, {
               model: link.model,
@@ -1847,7 +1918,7 @@ export class Gateway {
               onError: () => {}, // surfaced via the part stream; the SDK default logs it again
               ...(opts.system ? { system: opts.system } : {}),
               ...(opts.tools ? { tools: opts.tools } : {}),
-              ...(opts.stopWhen ? { stopWhen: opts.stopWhen } : {}),
+              ...(stopWhen ? { stopWhen } : {}),
               ...(temperature !== undefined ? { temperature } : {}),
             });
         const guard = guardStream<StreamPart>(source ?? modelParts(stream!.fullStream), {
@@ -1875,6 +1946,22 @@ export class Gateway {
         let carried = 0; // chars earlier steps add to the next step's input
         let stepChars = 0;
         let streamDone = false;
+        // Inner steps. With a run, a completed TOOL step is ledgered as soon
+        // as it finishes (ledger-first: a turn killed mid-loop keeps the audit
+        // trail of what it had spent), and the turn's closing row then carries
+        // only what is left. Without a run nothing is ledgered early and the
+        // closing row is the single row it always was.
+        let innerSteps = 0;
+        let stepToolCalls = 0;
+        let lastStepHadTools = false;
+        let stepStart = Date.now();
+        const ledgered = { inputTokens: 0, outputTokens: 0, toolCalls: 0 };
+        const rest = (u: { inputTokens: number; outputTokens: number }) => ({
+          inTok: Math.max(0, u.inputTokens - ledgered.inputTokens),
+          outTok: Math.max(0, u.outputTokens - ledgered.outputTokens),
+          toolCalls: toolCalls.length - ledgered.toolCalls,
+          ...(ledgered.toolCalls > 0 || ledgered.inputTokens > 0 ? { innerSteps } : {}),
+        });
         let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
         try {
           const deadline =
@@ -1904,6 +1991,7 @@ export class Gateway {
                 } else if (part.type === "tool-call") {
                   pastNoReturn = true;
                   toolCalls.push(part);
+                  stepToolCalls++;
                   stepChars += JSON.stringify(part.input ?? null).length;
                   // A running tool is not a silent provider.
                   if (pendingTools++ === 0) guard.pauseClock();
@@ -1914,8 +2002,31 @@ export class Gateway {
                   }
                   if (--pendingTools === 0) guard.resumeClock();
                 } else if (part.type === "finish-step") {
-                  done.inputTokens += part.usage.inputTokens ?? 0;
-                  done.outputTokens += part.usage.outputTokens ?? 0;
+                  const stepIn = part.usage.inputTokens ?? 0;
+                  const stepOut = part.usage.outputTokens ?? 0;
+                  done.inputTokens += stepIn;
+                  done.outputTokens += stepOut;
+                  if (rowLineage && stepToolCalls > 0) {
+                    await this.logUsage(
+                      row({
+                        provider: link.provider,
+                        model: link.model,
+                        inTok: stepIn,
+                        outTok: stepOut,
+                        durationMs: Date.now() - stepStart,
+                        text: stepText,
+                        toolCalls: stepToolCalls,
+                        innerStep: innerSteps,
+                      }),
+                    );
+                    ledgered.inputTokens += stepIn;
+                    ledgered.outputTokens += stepOut;
+                    ledgered.toolCalls += stepToolCalls;
+                  }
+                  lastStepHadTools = stepToolCalls > 0;
+                  innerSteps++;
+                  stepToolCalls = 0;
+                  stepStart = Date.now();
                   stepText = "";
                   carried += stepChars;
                   stepChars = 0;
@@ -1952,14 +2063,28 @@ export class Gateway {
             row({
               provider: link.provider,
               model: link.model,
-              inTok: total.inputTokens,
-              outTok: total.outputTokens,
+              ...rest(total),
               durationMs: Date.now() - start,
               text: finalText,
-              toolCalls: toolCalls.length,
               ...(extras ? { extras } : {}),
             }),
           );
+          // The run ran out inside the loop. Recorded like the front door's
+          // breach, after the closing row so `spentCents` is the ledger's.
+          const over = budgetOver as GovernedRun | undefined;
+          if (over) {
+            await this.recordCapEvent({
+              userId: opts.userId ?? null,
+              orgId: orgId ?? null,
+              capCents: over.budgetCents!,
+              spentCents: over.spentCents,
+              route: opts.route ? `run:${opts.route}` : "run",
+              runId: over.id,
+              wouldBlock: true,
+              enforced: budgetEnforced,
+              createdAt: new Date(),
+            });
+          }
           out.close();
           if (blocked) {
             rejectResult(blocked);
@@ -1974,6 +2099,11 @@ export class Gateway {
             model: link.model,
             degraded: false,
             failovers,
+            // Only when the loop was actually cut: the last step asked for
+            // tools and the model was not called again.
+            ...(over && budgetEnforced && lastStepHadTools
+              ? { runStopped: { limit: "budget" as const, runId: over.id } }
+              : {}),
           });
           return;
         } catch (err) {
@@ -1996,11 +2126,9 @@ export class Gateway {
               row({
                 provider: link.provider,
                 model: link.model,
-                inTok: used.inputTokens,
-                outTok: used.outputTokens,
+                ...rest(used),
                 durationMs: Date.now() - start,
                 text,
-                toolCalls: toolCalls.length,
                 aborted: true,
               }),
             );
@@ -2015,11 +2143,9 @@ export class Gateway {
               row({
                 provider: link.provider,
                 model: link.model,
-                inTok: used.inputTokens,
-                outTok: used.outputTokens,
+                ...rest(used),
                 durationMs: Date.now() - start,
                 text,
-                toolCalls: toolCalls.length,
                 degraded: true,
               }),
             );
@@ -3195,7 +3321,10 @@ export class Gateway {
     // The run's spend is counted from the row that was just written, so the
     // run and the ledger cannot disagree. Cache hits cost nothing by
     // construction and are excluded the same way sumSpendCents excludes them.
-    if (lineage && !entry.cacheHit) lineage.run.record(entry.estimatedCostCents);
+    if (lineage && !entry.cacheHit) {
+      lineage.run.record(entry.estimatedCostCents);
+      if (lineage.turn) lineage.turn.ledgeredCents += entry.estimatedCostCents;
+    }
     this.emitObs("onUsage", this.obs?.onUsage, { ...entry, id });
     return id;
   }

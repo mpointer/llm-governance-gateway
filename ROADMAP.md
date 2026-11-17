@@ -165,10 +165,13 @@ backlog ids in section 4 of the strategy doc.
       `GovernedRun`, `gw.startRun()`, snapshot and resume; budget and step
       ceiling checked inside `frontDoor()`; nested runs. Design:
       [run-governance.md](./docs/design/run-governance.md) (8)
-- [ ] Run budgets on the agent loop: per-run budget, step ceiling,
-      cost-velocity breaker, one ledger row per step, added to the shipped
-      `streamText` and a non-streaming sibling when the call carries a run.
-      This replaces the separate `runAgent()` first planned (1)
+- [x] Run budget inside the `streamText` tool loop: a budget condition
+      joins the caller's `stopWhen`, each completed tool step is ledgered as
+      it finishes, `result.runStopped` reports the cut. This replaces the
+      separate `runAgent()` first planned (1)
+- [ ] Rest of item 1: a cost-velocity breaker (held until a real loop's
+      ledger says what the rule should be) and a non-streaming loop on
+      `generateText` (1)
 - [ ] Governed tool calls: `ToolPolicy`, per-tool caps, `guardrails.tool`
       hook, tool ledger rows, `preflightTools()` (2)
 - [ ] `llm-gateway policy` report: effective policy per task from config (10)
