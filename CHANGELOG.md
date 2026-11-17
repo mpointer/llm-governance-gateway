@@ -8,7 +8,17 @@ adopters implement, and in practice they have only ever gained capability throug
 *optional* parameters — but they are not yet under a formal semver freeze. 1.0.0
 is gated on a downstream integration proving the SPI holds, not on a date.
 
-## Unreleased
+## 0.19.0
+
+Governance inside the agent loop: a run's budget now stops a `streamText` tool
+loop between steps, and tool calls can be priced, capped, guarded and ledgered.
+
+**No breaking API changes from 0.18.0 and no schema change.** Tool governance
+is off unless `toolPolicy` or `guardrails.tool` is configured. Two things to
+check if you adopted `run` in 0.18.0: a `streamText` turn with tool steps now
+writes one ledger row per completed tool step instead of one row per turn
+(see Changed), and an exhaustive `switch` over `GuardrailRecord.hook` needs a
+`"tool"` arm.
 
 ### Added
 
