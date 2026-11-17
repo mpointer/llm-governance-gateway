@@ -1,11 +1,11 @@
 # Design: governed runs
 
 Status: **step 1 shipped in 0.18.0** (run lineage, run budget, step ceiling: `src/run.ts`,
-`Gateway.startRun()`). **Step 2 is half built**: the budget stop inside a
-`streamText` tool loop and the per-tool-step ledger rows are in; the
-cost-velocity breaker and the non-streaming loop are not. **Step 3 is built**
-(`src/tools.ts`): tool policy, the tool guardrail hook and a ledger row per
-tool call. The human approval gate is not. This is the
+`Gateway.startRun()`). **Step 2 is half shipped (0.19.0)**: the budget stop
+inside a `streamText` tool loop and the per-tool-step ledger rows are in; the
+cost-velocity breaker and the non-streaming loop are not. **Step 3 shipped in
+0.19.0** (`src/tools.ts`): tool policy, the tool guardrail hook and a ledger
+row per tool call. The human approval gate is not. This is the
 first item of the plan in
 [docs/strategy/roadmap-2026-2027.md](../strategy/roadmap-2026-2027.md).
 
