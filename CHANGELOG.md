@@ -8,6 +8,14 @@ adopters implement, and in practice they have only ever gained capability throug
 *optional* parameters — but they are not yet under a formal semver freeze. 1.0.0
 is gated on a downstream integration proving the SPI holds, not on a date.
 
+## Unreleased
+
+### Tests
+
+- **CI now fails when coverage drops below a floor**: 86% statements, 79%
+  branches, 87% functions, 87% lines, about one point under where the suite
+  stands. Set in `vitest.config.ts`; `npm run test:coverage` enforces it.
+
 ## 0.20.0
 
 The usage table's indexes, declared where drizzle-kit can see them. **No API

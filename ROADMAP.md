@@ -181,7 +181,8 @@ backlog ids in section 4 of the strategy doc.
       every test run and against a Postgres server through node-postgres in
       CI. It found and fixed one bug: a NUL byte in a prompt lost the ledger
       row (34)
-- [ ] Coverage threshold in CI (34)
+- [x] Coverage threshold in CI: a floor of 86 / 79 / 87 / 87 (statements,
+      branches, functions, lines) that `npm run test:coverage` enforces (34)
 - [ ] **1.0.0**: SPI freeze statement, README Status rewritten (17)
 - [ ] Open the control-plane repository with the spec and L1 schema as its
       first commit; no code yet
