@@ -169,19 +169,26 @@ backlog ids in section 4 of the strategy doc.
       joins the caller's `stopWhen`, each completed tool step is ledgered as
       it finishes, `result.runStopped` reports the cut. This replaces the
       separate `runAgent()` first planned (1)
-- [ ] Rest of item 1: a cost-velocity breaker (held until a real loop's
-      ledger says what the rule should be) and a non-streaming loop on
-      `generateText` (1)
+- [x] The loop without a stream: `gw.generateText()`, the `streamText` turn
+      buffered and awaited, so one loop carries the budget stop, the per-step
+      rows and tool governance. Not built on the AI SDK's `generateText`; the
+      design doc says why (1)
+- [ ] Rest of item 1: a cost-velocity breaker, held until a real loop's
+      ledger says what the rule should be (1)
 - [x] Governed tool calls: `toolPolicy` (price, `maxCalls`, `maxCents`),
       the `guardrails.tool` hook, a ledger row per tool call,
       `preflightTools()`. A denial is handed back to the model, it does not
       fail the turn (2)
-- [ ] `llm-gateway policy` report: effective policy per task from config (10)
+- [x] `llm-gateway policy` report: `gw.describePolicy()` returns the effective
+      policy as data (limits, hooks, the chain behind each task with ZDR and
+      pricing status, tool policy, data handling) with a list of findings;
+      the command prints it as markdown or JSON. No keys, no URLs (10)
 - [x] Postgres adapter test: the reference store runs against PGlite on
       every test run and against a Postgres server through node-postgres in
       CI. It found and fixed one bug: a NUL byte in a prompt lost the ledger
       row (34)
-- [ ] Coverage threshold in CI (34)
+- [x] Coverage threshold in CI: a floor of 86 / 79 / 87 / 87 (statements,
+      branches, functions, lines) that `npm run test:coverage` enforces (34)
 - [ ] **1.0.0**: SPI freeze statement, README Status rewritten (17)
 - [ ] Open the control-plane repository with the spec and L1 schema as its
       first commit; no code yet

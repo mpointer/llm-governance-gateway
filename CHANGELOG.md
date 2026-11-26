@@ -8,6 +8,46 @@ adopters implement, and in practice they have only ever gained capability throug
 *optional* parameters — but they are not yet under a formal semver freeze. 1.0.0
 is gated on a downstream integration proving the SPI holds, not on a date.
 
+## Unreleased
+
+### Added
+
+- **`gateway.generateText()`: the governed tool loop without a stream.** For
+  an agent nobody is watching. It takes what `streamText` takes and resolves
+  with the text, tool calls, tool results, usage, trace id, `runStopped` and
+  `toolDenials`. It is the same loop as `streamText`, buffered, so a run's
+  budget, a tool policy and the guardrail hooks behave identically and write
+  the same ledger rows. Two differences, because no partial text was shown to
+  anyone: a link that fails after producing text but before a tool has run is
+  failed over (`failovers[].hadPartialOutput` is `true`, and its row carries
+  the estimated spend), and a turn that fails after a tool has run rejects
+  with the error instead of resolving with a notice, with its spend ledgered
+  on a row marked `degraded`. It reads the provider's streaming endpoint.
+  `GenerateTextOptions` and `GenerateTextResult` are exported. Design:
+  docs/design/run-governance.md.
+
+- **`llm-gateway policy <module>` and `gateway.describePolicy()`: what a
+  deployment is configured to enforce.** The command loads the module that
+  exports your `Gateway` and prints a markdown report: the daily spend limits
+  and their mode, which guardrail hooks exist and whether they fail open, the
+  model chain behind each task with every model's ZDR and pricing status, the
+  tool policy, where the ledger and cache live and whether snapshots are
+  encrypted, and the timeouts. It opens with findings, the settings a reviewer
+  should look at: observe mode, a limit that is off, hooks that fail open,
+  plaintext snapshots, a ZDR task with models that are not ZDR-asserted, a
+  model with no pricing or stale pricing, in-memory stores. `--json` prints
+  the data, `--org` resolves for one tenant. It calls no provider and prints
+  no API key and no endpoint URL. `describePolicy()` returns the same data
+  from code and `renderPolicyMarkdown()` renders it; the `PolicyReport` types
+  are exported. `ProviderRegistry.describe()` and `TaskRouter.describe()` are
+  the read-only accessors behind it.
+
+### Tests
+
+- **CI now fails when coverage drops below a floor**: 86% statements, 79%
+  branches, 87% functions, 87% lines, about one point under where the suite
+  stands. Set in `vitest.config.ts`; `npm run test:coverage` enforces it.
+
 ## 0.20.0
 
 The usage table's indexes, declared where drizzle-kit can see them. **No API

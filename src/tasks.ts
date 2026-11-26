@@ -51,6 +51,14 @@ export class TaskRouter {
     return this.cfg.constraints?.[task]?.requireZdr === true;
   }
 
+  /** Whether overrides can come from a store, and whether they beat an admin pin. */
+  describe(): { overrideStore: boolean; overridesBeatPin: boolean } {
+    return {
+      overrideStore: this.cfg.store !== undefined,
+      overridesBeatPin: this.cfg.overridesBeatPin === true,
+    };
+  }
+
   /**
    * Test seam / admin write path: force override refresh on next resolve.
    * Omit `orgId` to invalidate every tenant's cache.

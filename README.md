@@ -54,6 +54,7 @@ Spend controls in this space are usually observed (dashboards that tell you *aft
   - [Model-id conventions, and the one place they differ](#model-id-conventions-and-the-one-place-they-differ)
   - [Attribution beyond userId](#attribution-beyond-userid)
   - [Governed runs (agent loops)](#governed-runs-agent-loops)
+  - [Policy report](#policy-report)
   - [Observability export (OTel, Langfuse, metrics)](#observability-export-otel-langfuse-metrics)
   - [HTTP service (multi-app deployments)](#http-service-multi-app-deployments)
 - [Guardrail hooks (pre/post)](#guardrail-hooks-prepost)
@@ -594,6 +595,34 @@ const out = await res.result; // after the ledger row: text, toolCalls, toolResu
 
 **Native Anthropic streaming.** Pass `anthropic: { webSearch, thinking, cacheSystem }` and Anthropic links stream through `GatewayConfig.anthropic`'s client (`messages.create({ stream: true })`), with the same failure contract and with web searches and cache tokens on the ledger row. Text messages only, and not combinable with `tools`. For a long non-interactive completion, `runText({ anthropic: { stream: true } })` uses the streaming transport and returns the joined text, which avoids the Anthropic SDK's 10-minute ceiling on non-streaming requests.
 
+#### The same turn without a stream: `generateText`
+
+For an agent nobody is watching: a worker, a queue consumer, a sub-agent. It
+takes what `streamText` takes and resolves with the result.
+
+```ts
+const out = await gw.generateText({ slug: "triage-agent", system, messages, tools, stopWhen: stepCountIs(12), run });
+out.text; out.toolCalls; out.toolResults; out.usage; out.traceId;
+out.runStopped;  // the run's budget cut the loop
+out.toolDenials; // tool calls the policy or a hook refused
+```
+
+It is the same governed loop as `streamText`, not a second one, so a run's
+budget, a tool policy and the guardrail hooks behave identically and write the
+same ledger rows. Two things differ, because no one has read any partial text:
+
+- A link that fails after producing text, but before a tool has run, is failed
+  over like any other. `failovers[].hadPartialOutput` is `true` for it, and its
+  row carries what it spent.
+- A turn that fails after a tool has run **rejects** with the error. It is not
+  failed over, since that would run the tool a second time, and there is no
+  notice to append. What it spent is ledgered first, on a row marked
+  `degraded`.
+
+It reads the provider's streaming endpoint to do this, so `streamFirstChunkMs`
+and `streamStallMs` still bound a silent provider. A provider that cannot
+stream tool calls will not work with it.
+
 ### Editable prompts and the cache
 
 If prompts are edited at runtime — a prompt library, an admin UI, anything that
@@ -792,6 +821,53 @@ ALTER TABLE ai_usage_log     ADD COLUMN parent_run_id TEXT;
 ALTER TABLE spend_cap_events ADD COLUMN run_id TEXT;
 CREATE INDEX idx_ai_usage_run ON ai_usage_log (run_id, step_index);
 ```
+
+### Policy report
+
+What is this deployment configured to enforce? One command answers it, in a
+form you can hand to a security reviewer or attach to a customer's
+questionnaire:
+
+```sh
+npx llm-gateway policy ./dist/gateway.js > POLICY.md
+```
+
+The module exports your `Gateway` as `gateway`, as the default export, or under
+`--export <name>`; a function that returns one works too. `--json` prints the
+data instead of markdown, and `--org <id>` resolves chains for one tenant. A
+TypeScript module needs a loader, for example
+`node --import tsx node_modules/llm-governance-gateway/dist/cli.js policy ./src/gateway.ts`.
+
+The report covers the daily spend limits and their mode, which guardrail hooks
+exist and whether they fail open, the model chain behind each task with every
+model's ZDR and pricing status, the tool policy, where the ledger and cache
+live and whether snapshots are encrypted, and the timeouts. It opens with
+**findings**: the settings a reviewer should look at, stated as facts.
+
+```md
+## Findings
+
+- Spend limits are in observe mode: a breach is recorded and the call is not refused.
+- Task "contract_review" requires ZDR: 1 of the 2 models in its chain is not ZDR-asserted and is skipped (openai:gpt-4.1).
+- openrouter:acme/new-model has no pricing: its cost is estimated from the fallback rate, so spend limits can undercount it.
+```
+
+It reads configuration and the two stores that decide routing. It calls no
+provider, and it prints no API key and no endpoint URL, only names. The same
+configuration renders the same text, so committing `POLICY.md` and diffing it
+in CI shows a policy change in review. From code:
+
+```ts
+import { renderPolicyMarkdown } from "llm-governance-gateway";
+
+const policy = await gw.describePolicy();   // plain data; policy.findings is a string[]
+if (policy.findings.length > 0) console.warn(renderPolicyMarkdown(policy));
+```
+
+What it cannot see: per-call options (`requireZdr`, a judge, a run's budget)
+are set where the call is made, and a store can change a chain after the report
+ran. It reports what is configured, not what happened; the ledger is the record
+of that.
 
 ### Observability export (OTel, Langfuse, metrics)
 

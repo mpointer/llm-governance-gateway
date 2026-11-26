@@ -61,9 +61,13 @@ export interface UsageEntry {
    * audit sees blocks rather than silence.
    */
   guardrails?: import("./guardrails.js").GuardrailRecord[] | null;
-  /** true when a streamed turn ended with the degraded notice (streamText). */
+  /**
+   * true when a turn failed past its point of no return: a `streamText` turn
+   * that ended with the degraded notice, or a `generateText` turn that failed
+   * after a tool had run.
+   */
   degraded?: boolean | null;
-  /** true when the caller aborted a streamed turn; the token counts are estimates (streamText). */
+  /** true when the caller aborted a `streamText` or `generateText` turn; the token counts are estimates. */
   aborted?: boolean | null;
   /**
    * Run lineage. Set on every row a call writes when the call carried a

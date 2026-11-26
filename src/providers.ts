@@ -242,6 +242,46 @@ export class ProviderRegistry {
   }
 
   /**
+   * What the registry is configured with, for the policy report. Names only:
+   * no API key and no endpoint URL. Unlike `resolveDefault()` it neither warns
+   * nor throws when no default is configured; it says so in `source`.
+   */
+  describe(): {
+    defaultModel: {
+      provider: string;
+      model: string;
+      source: "config" | "environment" | "library fallback";
+    };
+    endpoints: string[];
+    factories: string[];
+    retention: { key: string; zdr: boolean; note?: string }[];
+  } {
+    const envProvider = process.env.AI_DEFAULT_PROVIDER;
+    const envModel = process.env.AI_DEFAULT_MODEL;
+    const provider = this.cfg.defaultProvider ?? envProvider;
+    const model = this.cfg.defaultModel ?? envModel;
+    return {
+      defaultModel: {
+        provider: provider ?? FALLBACK_PROVIDER,
+        model: model ?? FALLBACK_MODEL,
+        source:
+          provider === undefined || model === undefined
+            ? "library fallback"
+            : this.cfg.defaultProvider !== undefined && this.cfg.defaultModel !== undefined
+              ? "config"
+              : "environment",
+      },
+      endpoints: Object.keys(this.cfg.endpoints ?? {}),
+      factories: Object.keys(this.cfg.factories ?? {}),
+      retention: Object.entries(this.cfg.retention ?? {}).map(([key, e]) => ({
+        key,
+        zdr: e.zdr === true,
+        ...(e.note ? { note: e.note } : {}),
+      })),
+    };
+  }
+
+  /**
    * Key for a provider that is not one of the built-in chat providers —
    * today, the embedding-only ones. Config wins over env, same as apiKey().
    */

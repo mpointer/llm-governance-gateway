@@ -71,6 +71,8 @@ import {
   type EmbedOptions,
   type EmbedResult,
 } from "./embeddings.js";
+import type { PolicyModel, PolicyReport } from "./policy.js";
+import { PRICING_STALE_AFTER_DAYS } from "./providers.js";
 import { TaskRouter } from "./tasks.js";
 import { missingPlaceholders, renderTemplate } from "./template.js";
 import type {
@@ -84,7 +86,12 @@ import type {
   UsageEntry,
   StoredPrompt,
 } from "./types.js";
-import { MemoryCacheStore, MemoryPromptStore, MemoryRateLimiter } from "./adapters/memory.js";
+import {
+  MemoryCacheStore,
+  MemoryPromptStore,
+  MemoryRateLimiter,
+  MemoryUsageStore,
+} from "./adapters/memory.js";
 
 const SNAPSHOT_LIMIT = 2000;
 // Streaming clocks. Silence for a minute is never legitimate; a stream that
@@ -513,6 +520,19 @@ export interface StreamTextOutcome {
    */
   toolDenials?: ToolDenial[];
 }
+
+/**
+ * `generateText` takes what `streamText` takes, minus the notice shown to a
+ * user watching a stream that fails: there is no stream to end.
+ */
+export type GenerateTextOptions = Omit<StreamTextOptions, "degradedNotice">;
+
+/**
+ * What a `generateText` turn produced. The same record `streamText` resolves
+ * `result` with, plus the trace id. There is no `degraded`: a turn that fails
+ * after a tool has run rejects instead of resolving with a notice.
+ */
+export type GenerateTextResult = Omit<StreamTextOutcome, "degraded"> & { traceId: string };
 
 export interface StreamTextResult {
   traceId: string;
@@ -1709,23 +1729,52 @@ export class Gateway {
   // ===========================================================================
 
   async streamText(opts: StreamTextOptions): Promise<StreamTextResult> {
+    return this.textTurn(opts, false);
+  }
+
+  /**
+   * `streamText` for a caller that does not stream: the same governed turn
+   * and tool loop, awaited. Everything a run, a tool policy and the guardrail
+   * hooks do inside `streamText` they do here, because it is the same loop:
+   * the run's budget stops it between steps, each completed tool step and
+   * each tool call is ledgered as it finishes.
+   *
+   * Two things differ, both because nobody is watching partial text:
+   *  - A link that fails after producing text, but before any tool has run,
+   *    is failed over like any other. Its text was shown to no one.
+   *  - A turn that fails after a tool has run rejects with the error. It is
+   *    not failed over, since that would run the tool again, and there is no
+   *    notice to append. What it spent is ledgered first.
+   *
+   * It reads the provider's streaming endpoint to do this; the stall clocks
+   * (`streamFirstChunkMs`, `streamStallMs`) therefore apply.
+   */
+  async generateText(opts: GenerateTextOptions): Promise<GenerateTextResult> {
+    const turn = await this.textTurn(opts, true);
+    const { degraded: _degraded, ...outcome } = await turn.result;
+    return { traceId: turn.traceId, ...outcome };
+  }
+
+  /** The turn behind `streamText` and, buffered, behind `generateText`. */
+  private async textTurn(opts: StreamTextOptions, buffered: boolean): Promise<StreamTextResult> {
+    const name = buffered ? "generateText" : "streamText";
     const last = opts.messages.at(-1);
     const lastUserText = last?.role === "user" ? messageText(last) : "";
-    if (!lastUserText) throw new Error("streamText: messages must end with a user message");
+    if (!lastUserText) throw new Error(`${name}: messages must end with a user message`);
     if (opts.anthropic && opts.tools) {
       throw new Error(
-        "streamText: `anthropic` native options cannot be combined with AI SDK `tools`",
+        `${name}: \`anthropic\` native options cannot be combined with AI SDK \`tools\``,
       );
     }
     if (opts.anthropic && !this.anthropicCfg && !this.mock) {
       throw new Error(
-        "streamText received `anthropic` native options but GatewayConfig.anthropic is not configured.",
+        `${name} received \`anthropic\` native options but GatewayConfig.anthropic is not configured.`,
       );
     }
 
     const validate = (raw: unknown): string => {
       if (typeof raw !== "string")
-        throw new Error("a streamText post hook must transform to a string");
+        throw new Error(`a ${name} post hook must transform to a string`);
       return raw;
     };
     // The front door renders `promptBody` as the prompt: here, the last user
@@ -1737,7 +1786,7 @@ export class Gateway {
       promptBody: lastUserText,
       cache: false,
     };
-    const fd = await this.frontDoor<undefined, string>("streamText", fdOpts, validate);
+    const fd = await this.frontDoor<undefined, string>(name, fdOpts, validate);
     const { traceId, orgId, prompt, temperature, guardrailRecords, failOpen, lineage } = fd;
     // What this turn has had ledgered so far, for the in-loop budget check.
     const turn = { ledgeredCents: 0 };
@@ -2028,7 +2077,10 @@ export class Gateway {
         const done = { inputTokens: 0, outputTokens: 0 }; // completed steps
         // After the first text delta or tool call, a new link would repeat
         // text the user saw or run a tool twice: degrade instead (spec).
+        // Buffered, nobody has seen the text, so only a tool call is past
+        // the point of no return; `sawOutput` still marks that the link spent.
         let pastNoReturn = false;
+        let sawOutput = false;
         let pendingTools = 0;
         let carried = 0; // chars earlier steps add to the next step's input
         let stepChars = 0;
@@ -2071,12 +2123,16 @@ export class Gateway {
             (async () => {
               for await (const part of guard.stream) {
                 if (part.type === "text-delta") {
-                  pastNoReturn = true;
+                  sawOutput = true;
                   text += part.text;
                   stepText += part.text;
                   stepChars += part.text.length;
-                  out.publish(part.text);
+                  if (!buffered) {
+                    pastNoReturn = true;
+                    out.publish(part.text);
+                  }
                 } else if (part.type === "tool-call") {
+                  sawOutput = true;
                   pastNoReturn = true;
                   toolCalls.push(part);
                   stepToolCalls++;
@@ -2224,6 +2280,21 @@ export class Gateway {
             );
             break;
           }
+          if (pastNoReturn && buffered) {
+            // A tool has run, so no failover; and no one is reading a stream,
+            // so no notice. Ledger what the turn spent, then fail the call.
+            await this.logUsage(
+              row({
+                provider: link.provider,
+                model: link.model,
+                ...rest(used),
+                durationMs: Date.now() - start,
+                text,
+                degraded: true,
+              }),
+            );
+            break;
+          }
           if (pastNoReturn) {
             const notice = opts.degradedNotice ?? DEFAULT_DEGRADED_NOTICE;
             const delta = text ? `\n\n${notice}` : notice;
@@ -2253,7 +2324,22 @@ export class Gateway {
             });
             return;
           }
-          await ledgerFailedLink(link.provider, link.model, Date.now() - linkStart);
+          if (sawOutput) {
+            // Buffered only: the link produced text and then failed. Nothing
+            // was shown, so it can be failed over, but it spent.
+            await this.logUsage(
+              row({
+                provider: link.provider,
+                model: link.model,
+                ...rest(used),
+                durationMs: Date.now() - linkStart,
+                text,
+                ...(callerAborted ? { aborted: true } : {}),
+              }),
+            );
+          } else {
+            await ledgerFailedLink(link.provider, link.model, Date.now() - linkStart);
+          }
           const advanceable =
             !callerAborted && (err instanceof StreamStallError || this.retryable(err));
           if (advanceable && i < links.length - 1) {
@@ -2261,7 +2347,7 @@ export class Gateway {
               provider: link.provider,
               model: link.model,
               reason: err instanceof StreamStallError ? "stall" : "retryable",
-              hadPartialOutput: false,
+              hadPartialOutput: sawOutput,
             };
             failovers.push(failover);
             this.emitObs("onStreamFailover", this.obs?.onStreamFailover, { traceId, ...failover });
@@ -2274,7 +2360,7 @@ export class Gateway {
         }
       }
       const e =
-        lastErr instanceof Error ? lastErr : new Error("streamText: no link produced a result");
+        lastErr instanceof Error ? lastErr : new Error(`${name}: no link produced a result`);
       out.fail(e);
       // The caller's own reason, as given (it need not be an Error).
       rejectResult(opts.signal?.aborted ? opts.signal.reason : e);
@@ -2843,6 +2929,224 @@ export class Gateway {
   }
 
   /**
+   * What this gateway is configured to enforce, as plain data: spend limits,
+   * guardrail hooks, the model chain behind each task with its ZDR and
+   * pricing status, tool policy, data handling and timeouts, plus `findings`,
+   * the settings a reviewer should look at. `renderPolicyMarkdown()` turns it
+   * into a document; `llm-gateway policy` prints it.
+   *
+   * It reads configuration and the two stores that decide routing (the task
+   * override store and the chain). It calls no provider and reports no API
+   * key and no endpoint URL. Chains are as resolved for `orgId` now; a store
+   * can change them afterwards. `now` dates the pricing-staleness check.
+   */
+  async describePolicy(opts: { orgId?: string; now?: Date } = {}): Promise<PolicyReport> {
+    const orgId = this.org(opts);
+    const reg = this.registry.describe();
+    const staleBefore = (opts.now ?? new Date()).getTime() - PRICING_STALE_AFTER_DAYS * 86_400_000;
+    const describeModel = (provider: string, model: string): PolicyModel => {
+      const kind = this.registry.isEndpoint(provider)
+        ? "endpoint"
+        : this.registry.isFactory(provider)
+          ? "factory"
+          : "provider";
+      const asOf = kind === "endpoint" ? undefined : this.registry.pricingAsOf(model);
+      return {
+        provider,
+        model,
+        kind,
+        zdr: this.registry.isZdr(provider, model),
+        // A custom endpoint is self-hosted and ledgered at no charge.
+        priced: kind === "endpoint" || this.registry.hasPricing(model),
+        ...(asOf ? { pricingAsOf: asOf, pricingStale: Date.parse(asOf) < staleBefore } : {}),
+      };
+    };
+
+    // The chain behind a call with no task: the store's, else the default.
+    const stored = ((await this.modelConfig?.getChain(orgId)) ?? [])
+      .map((l) => ({ provider: l.factory ?? l.endpoint ?? l.provider, model: l.model }))
+      .filter((l): l is { provider: string; model: string } => !!l.provider);
+    const defaultChain =
+      stored.length > 0
+        ? stored.map((l) => describeModel(l.provider, l.model))
+        : [describeModel(reg.defaultModel.provider, reg.defaultModel.model)];
+    const defaultChainSource =
+      stored.length > 0 ? ("model config store" as const) : reg.defaultModel.source;
+
+    const tasks: PolicyReport["tasks"] = [];
+    for (const task of this.tasks?.tasks() ?? []) {
+      const chain = await this.tasks!.chainForTask(task, orgId);
+      tasks.push({
+        task,
+        label: this.tasks!.label(task),
+        requireZdr: this.tasks!.requiresZdr(task),
+        source: chain[0]!.source,
+        chain: chain.map((c) => describeModel(c.provider, c.model)),
+      });
+    }
+
+    const toolsGoverned = this.toolPolicy !== undefined || this.guardrails?.tool !== undefined;
+    const caps = {
+      mode: this.caps.mode === "observe" ? ("observe" as const) : ("enforce" as const),
+      userDailyCents: this.caps.userDailyCents ?? DEFAULT_USER_CAP_CENTS,
+      anonDailyCents: this.caps.anonDailyCents ?? DEFAULT_ANON_CAP_CENTS,
+      globalDailyCents: this.caps.globalDailyCents ?? DEFAULT_GLOBAL_CAP_CENTS,
+    };
+    const routerInfo = this.tasks?.describe();
+    const hooks = this.obs ?? {};
+
+    // Findings: settings that weaken a control or make a number unreliable.
+    // Facts about this configuration, worst first.
+    const findings: string[] = [];
+    if (this.mock) findings.push("Mock mode is on: no provider is called and no spend is real.");
+    if (this.usage instanceof MemoryUsageStore) {
+      findings.push(
+        "The usage ledger is in memory: it is lost on restart, and the spend limits reset with it.",
+      );
+    }
+    if (caps.mode === "observe") {
+      findings.push(
+        "Spend limits are in observe mode: a breach is recorded and the call is not refused.",
+      );
+    }
+    const off = [
+      caps.userDailyCents === 0 ? "per-user" : null,
+      caps.anonDailyCents === 0 ? "anonymous" : null,
+      caps.globalDailyCents === 0 ? "global" : null,
+    ].filter(Boolean);
+    if (off.length > 0) findings.push(`These daily spend limits are off: ${off.join(", ")}.`);
+    if (this.guardrails?.failOpen) {
+      findings.push("Guardrail hooks fail open: a hook that throws lets the call through.");
+    }
+    if (!this.encrypt) {
+      findings.push(
+        `No encrypt hook: prompt and output snapshots (first ${SNAPSHOT_LIMIT.toLocaleString("en-US")} ` +
+          "characters of each) are stored as plaintext.",
+      );
+    }
+    for (const t of tasks) {
+      if (!t.requireZdr) continue;
+      const not = t.chain.filter((m) => !m.zdr);
+      if (not.length === t.chain.length) {
+        findings.push(
+          `Task "${t.task}" requires ZDR and no model in its chain is ZDR-asserted: every call to it is refused.`,
+        );
+      } else if (not.length > 0) {
+        findings.push(
+          `Task "${t.task}" requires ZDR: ${not.length} of the ${t.chain.length} models in its chain ` +
+            `${not.length === 1 ? "is not ZDR-asserted and is" : "are not ZDR-asserted and are"} skipped ` +
+            `(${not.map((m) => `${m.provider}:${m.model}`).join(", ")}).`,
+        );
+      }
+    }
+    const everyModel = new Map<string, PolicyModel>();
+    for (const m of [...defaultChain, ...tasks.flatMap((t) => t.chain)]) {
+      everyModel.set(`${m.provider}:${m.model}`, m);
+    }
+    for (const [id, m] of everyModel) {
+      if (!m.priced) {
+        findings.push(
+          `${id} has no pricing: its cost is estimated from the fallback rate, so spend limits can undercount it.`,
+        );
+      } else if (m.pricingStale) {
+        findings.push(
+          `Pricing for ${id} is dated ${m.pricingAsOf}, more than ${PRICING_STALE_AFTER_DAYS} days old.`,
+        );
+      }
+    }
+    if (stored.length === 0 && reg.defaultModel.source === "library fallback") {
+      findings.push(
+        `No default model is configured: a call with no task uses the library's fallback, ` +
+          `${reg.defaultModel.provider}:${reg.defaultModel.model}.`,
+      );
+    }
+    if (this.rateLimiter instanceof MemoryRateLimiter) {
+      findings.push(
+        "The rate limiter is in memory: its limits are per process, not shared across instances.",
+      );
+    }
+
+    return {
+      app: this.appId,
+      org: orgId ?? null,
+      mock: this.mock,
+      spendCaps: {
+        ...caps,
+        ...(this.caps.orgDailyCents !== undefined
+          ? { orgDailyCents: this.caps.orgDailyCents }
+          : {}),
+        storeOverrides: {
+          user: typeof this.usage.getUserDailyCapCents === "function",
+          org: typeof this.usage.getOrgDailyCapCents === "function",
+        },
+      },
+      guardrails: {
+        pre: this.guardrails?.pre !== undefined,
+        post: this.guardrails?.post !== undefined,
+        tool: this.guardrails?.tool !== undefined,
+        failOpen: this.guardrails?.failOpen === true,
+      },
+      judge: {
+        ...(this.judgeDefaults?.model ? { model: this.judgeDefaults.model } : {}),
+        ...(this.judgeDefaults?.sampleRate !== undefined
+          ? { sampleRate: this.judgeDefaults.sampleRate }
+          : {}),
+      },
+      ledger: {
+        store: this.usage.constructor.name,
+        snapshotsEncrypted: this.encrypt !== undefined,
+        snapshotLimitChars: SNAPSHOT_LIMIT,
+      },
+      cache: {
+        store: this.cache.constructor.name,
+        ttlSeconds: this.cacheTtlSeconds,
+        invalidatedOnPromptChange: this.scopeCacheToPrompt,
+      },
+      rateLimiter: this.rateLimiter.constructor.name,
+      timeouts: {
+        attemptMs: this.timeouts?.attemptMs ?? DEFAULT_ATTEMPT_MS,
+        ...(this.timeouts?.deadlineMs !== undefined
+          ? { deadlineMs: this.timeouts.deadlineMs }
+          : {}),
+        streamFirstChunkMs: this.timeouts?.streamFirstChunkMs ?? DEFAULT_STREAM_FIRST_CHUNK_MS,
+        streamStallMs: this.timeouts?.streamStallMs ?? DEFAULT_STREAM_STALL_MS,
+      },
+      routing: {
+        defaultChain,
+        defaultChainSource,
+        adminPin: this.modelConfig !== undefined,
+        taskOverrideStore: routerInfo?.overrideStore ?? false,
+        overridesBeatPin: routerInfo?.overridesBeatPin ?? false,
+      },
+      tasks,
+      ...(toolsGoverned
+        ? {
+            tools: Object.entries(this.toolPolicy ?? {}).map(([tool, p]) => ({
+              tool,
+              costCents:
+                typeof p.costCents === "function" ? ("by arguments" as const) : (p.costCents ?? 0),
+              ...(p.maxCalls !== undefined ? { maxCalls: p.maxCalls } : {}),
+              ...(p.maxCents !== undefined ? { maxCents: p.maxCents } : {}),
+            })),
+          }
+        : {}),
+      retention: reg.retention,
+      providers: {
+        withKeys: this.registry.configuredProviders(),
+        endpoints: reg.endpoints,
+        factories: reg.factories,
+        nativeAnthropic: this.anthropicCfg !== undefined,
+        batch: this.batchCfg !== undefined,
+      },
+      pricingStaleAfterDays: PRICING_STALE_AFTER_DAYS,
+      observability: (Object.keys(hooks) as (keyof ObservabilityHooks)[]).filter(
+        (k) => typeof hooks[k] === "function",
+      ),
+      findings,
+    };
+  }
+
+  /**
    * Throw unless every named tool has a `ToolPolicy` entry. Call it at
    * startup with the tools your agent uses (names, or the `tools` object
    * itself): a tool the policy forgot runs uncapped at 0¢, and that should
@@ -3118,7 +3422,7 @@ export class Gateway {
   // ===========================================================================
 
   private async frontDoor<I, V>(
-    kind: "runStructured" | "runText" | "streamStructured" | "streamText",
+    kind: "runStructured" | "runText" | "streamStructured" | "streamText" | "generateText",
     opts: FrontDoorOptions<I>,
     validate: (raw: unknown) => V,
   ): Promise<FrontDoor<V>> {
