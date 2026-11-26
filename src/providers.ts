@@ -391,6 +391,43 @@ export class ProviderRegistry {
    * precedence, so a hint is validated against the provider that will
    * actually receive it.
    */
+  /**
+   * Resolve one model id from a prompt row to a provider and model, for the
+   * slug pin. `rowProvider` (the row's `providerOverride`) qualifies a bare
+   * id; an id with its own prefix overrides it. A custom endpoint or factory
+   * prefix is taken as given. Anything else goes through `resolveModelHint`,
+   * so a tier label or another provider's model is rejected with the same
+   * warning as a bad `modelHint`. Undefined means "not a usable pin".
+   */
+  resolveSlugModel(
+    id: string | null | undefined,
+    rowProvider?: string | null,
+  ): { provider: string; model: string } | undefined {
+    const raw = id?.trim();
+    if (!raw) return undefined;
+    const idx = raw.indexOf(":");
+    const prefix = idx > 0 ? raw.slice(0, idx) : undefined;
+    if (prefix && (this.isEndpoint(prefix) || this.isFactory(prefix))) {
+      const model = raw.slice(idx + 1);
+      return model ? { provider: prefix, model } : undefined;
+    }
+    // A bare id on a row whose provider is an endpoint or a factory.
+    if (!prefix && rowProvider && (this.isEndpoint(rowProvider) || this.isFactory(rowProvider))) {
+      return { provider: rowProvider, model: raw };
+    }
+    const builtin = (PROVIDER_IDS as string[]).includes(rowProvider ?? "")
+      ? (rowProvider as ProviderId)
+      : undefined;
+    // An explicit built-in prefix wins over the row's provider.
+    const explicit = prefix && (PROVIDER_IDS as string[]).includes(prefix);
+    const resolved = this.resolveModelHint(raw, explicit ? undefined : builtin);
+    if (!resolved) return undefined;
+    return {
+      provider: resolved.provider ?? builtin ?? this.effectiveDefaultProvider(),
+      model: resolved.model,
+    };
+  }
+
   private effectiveDefaultProvider(): ProviderId {
     return (
       this.cfg.defaultProvider ??

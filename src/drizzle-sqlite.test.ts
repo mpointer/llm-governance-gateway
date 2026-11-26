@@ -104,6 +104,13 @@ describe("DrizzleSqliteUsageStore integration", () => {
     ]);
   });
 
+  it("persists which resolution layer chose the model, and NULL when none is recorded", async () => {
+    await store.logUsage({ ...mkEntry("u1", 1, false, new Date()), routedBy: "slug-fallback" });
+    await store.logUsage(mkEntry("u1", 1, false, new Date()));
+    const rows = await db.select().from(aiUsageLog);
+    expect(rows.map((r) => r.routedBy)).toEqual(["slug-fallback", null]);
+  });
+
   it("ensureTables builds exactly the indexes the table definition declares", async () => {
     // sql.js returns positional arrays, other drivers objects.
     const cell = (row: unknown, i: number, key: string) =>
@@ -154,6 +161,8 @@ describe("DrizzleSqliteUsageStore integration", () => {
     await gw.runStructured({ ...opts("u1", ["m"]), run: gw.startRun({ id: "migrated" }) });
     const rows = await old.select().from(aiUsageLog);
     expect(rows[0]!.runId).toBe("migrated");
+    // The 0.22.0 column was added to the old table too.
+    expect(rows[0]!.routedBy).toBeNull();
   });
 });
 

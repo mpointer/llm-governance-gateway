@@ -180,6 +180,8 @@ export type {
   PromptStore,
   PromptDefault,
   StoredPrompt,
+  RoutedBy,
+  SlugTierModels,
   CacheStore,
   RateLimiter,
   RateLimitResult,

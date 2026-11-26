@@ -52,6 +52,7 @@ Spend controls in this space are usually observed (dashboards that tell you *aft
   - [Streaming](#streaming)
   - [Editable prompts and the cache](#editable-prompts-and-the-cache)
   - [Model-id conventions, and the one place they differ](#model-id-conventions-and-the-one-place-they-differ)
+  - [The slug names the model](#the-slug-names-the-model)
   - [Attribution beyond userId](#attribution-beyond-userid)
   - [Governed runs (agent loops)](#governed-runs-agent-loops)
   - [Policy report](#policy-report)
@@ -697,6 +698,62 @@ There is deliberately **no** strict mode inside the cost calculation itself.
 Estimation runs inline in the usage-row payload, so throwing there would cost the
 ledger row for a call that already spent money — trading a wrong cost for no
 record at all.
+
+### The slug names the model
+
+If your prompt library already stores a model next to each prompt, let that
+row decide. Turn it on once:
+
+```ts
+const gw = new Gateway({ ...cfg, slugPinWins: true, zdr: { slugs: ["intake-summary"] } });
+```
+
+With `slugPinWins`, a slug whose row pins a model is routed by that pin, ahead
+of the admin pin, the task and the chain. Code never names a model on a call;
+an admin changes a call's model by editing the slug's row.
+
+```ts
+// A PromptStore row (or a PromptDefault in code)
+{
+  slug: "scout-chat",
+  body: "...",
+  modelHint: "claude-sonnet-4-6",                          // the slug's model
+  tierModels: { fast: "claude-haiku-4-5-20251001",         // rare: a user-facing
+                power: "claude-sonnet-4-6" },              // fast/power switch
+  fallbackModels: ["openai:gpt-4.1"],                      // tried next, in order
+}
+```
+
+- **Which model:** `tierModels[tier]` when the row has `tierModels` and the
+  call passed a `tier`; otherwise `modelHint`; otherwise the power model.
+- **On failure:** the row's `fallbackModels` in order, then the configured
+  chain. The admin pin and the task are skipped once a slug is pinned.
+- **A slug that pins nothing** resolves exactly as before.
+- **Every method:** `runStructured`, `runText`, `streamStructured`,
+  `streamText`, `generateText`, and `submitBatch` when it is given no `model`.
+  `streamText` and `generateText` take your assembled prompt and still read
+  the slug's row for its model.
+- **The ledger says who decided.** Model rows carry `routedBy`: `"slug"`,
+  `"slug-fallback"`, `"admin-pin"`, `"task-override"`, `"task-default"`,
+  `"chain"` or `"default"`. `"chain"` on a pinned slug means its own models
+  all failed.
+
+`zdr.slugs` is separate and works with or without `slugPinWins`. A slug listed
+there is ZDR-required on every call, whatever the call or its task says. The
+lock is in code on purpose: it is a security decision, and a prompt row is
+something an admin can edit. On a locked slug the pin is filtered like
+everything else, and if none of the slug's own models is ZDR-eligible the call
+throws `ZdrViolationError` instead of quietly running on the chain.
+
+Off by default, and off means resolution is unchanged. The reference Drizzle
+adapters gain one nullable column for `routedBy`:
+
+```sql
+ALTER TABLE ai_usage_log ADD COLUMN routed_by TEXT;
+```
+
+Design and the calls made in building it:
+[docs/design/model-naming.md](./docs/design/model-naming.md).
 
 ### Attribution beyond userId
 

@@ -144,8 +144,14 @@ export interface SubmitBatchOptions<I> {
   slug: string;
   /** Items share the batch's prompt/schema; each brings its variables. */
   items: { id: string; variables: Record<string, string>; input?: I }[];
-  /** Explicit model id (must resolve to Anthropic) — or omit to use the
-   *  task/default resolution. */
+  /**
+   * Explicit model id (must resolve to Anthropic) — or omit to use the slug
+   * pin (with `slugPinWins`), then the task, then the default.
+   *
+   * @deprecated The slug names the model: pin it on the slug's prompt row
+   * and turn on `GatewayConfig.slugPinWins`. This option still works and
+   * still wins when set.
+   */
   model?: string;
   task?: string;
   system?: string;

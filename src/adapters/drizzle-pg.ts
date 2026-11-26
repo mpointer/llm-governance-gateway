@@ -17,6 +17,7 @@
 //   ALTER TABLE ai_usage_log     ADD COLUMN step_index integer;    -- 0.18.0
 //   ALTER TABLE ai_usage_log     ADD COLUMN parent_run_id text;    -- 0.18.0
 //   ALTER TABLE spend_cap_events ADD COLUMN run_id text;           -- 0.18.0
+//   ALTER TABLE ai_usage_log     ADD COLUMN routed_by text;        -- 0.22.0
 // And the indexes the usage table declares. On a large live table, add
 // CONCURRENTLY so the build does not block writes:
 //   CREATE INDEX idx_ai_usage_spend     ON ai_usage_log (created_at, cache_hit, user_id);
@@ -73,6 +74,8 @@ export const aiUsageLog = pgTable(
     runId: text("run_id"),
     stepIndex: integer("step_index"),
     parentRunId: text("parent_run_id"),
+    /** Which resolution layer chose the model. NULL unless `slugPinWins` is on. */
+    routedBy: text("routed_by"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
   },
   // The same three indexes ensureTables() creates on SQLite, under the same
@@ -184,6 +187,7 @@ export class DrizzlePgUsageStore implements UsageStore {
         runId: entry.runId ?? null,
         stepIndex: entry.stepIndex ?? null,
         parentRunId: entry.parentRunId ?? null,
+        routedBy: entry.routedBy ?? null,
         createdAt: entry.createdAt,
       })
       .returning({ id: aiUsageLog.id });

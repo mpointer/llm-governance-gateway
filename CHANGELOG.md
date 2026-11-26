@@ -8,6 +8,53 @@ adopters implement, and in practice they have only ever gained capability throug
 *optional* parameters — but they are not yet under a formal semver freeze. 1.0.0
 is gated on a downstream integration proving the SPI holds, not on a date.
 
+## Unreleased
+
+### Added
+
+- **The slug names the model: `GatewayConfig.slugPinWins`.** Off by default,
+  and off means model resolution is exactly what it was. On, a slug whose
+  prompt row (or code default) pins a model is routed by that pin, ahead of
+  the admin pin, the task and the chain: `tierModels[tier]` when the row has
+  `tierModels` and the call passed a tier, otherwise `modelHint`, otherwise
+  the power model; then the row's `fallbackModels` in order; then the
+  configured chain. It applies to `runStructured`, `runText`,
+  `streamStructured`, `streamText`, `generateText`, and to `submitBatch` when
+  no `model` is passed. `streamText` and `generateText`, which take a
+  caller-assembled prompt, read the slug's row for its model. A slug that
+  pins nothing resolves as before. Answers #49. Design:
+  docs/design/model-naming.md.
+- **`StoredPrompt.tierModels` and `StoredPrompt.fallbackModels`**, also on
+  `PromptDefault`. Read only with `slugPinWins`. A stored row that leaves
+  either unset inherits the code default's.
+- **`GatewayConfig.zdr.slugs`: a ZDR lock set in code.** A slug listed there
+  is ZDR-required on every call, whatever the call or its task says, on every
+  method that takes a slug including batch. Independent of `slugPinWins`. On
+  a pinned, locked slug the call throws `ZdrViolationError` when none of the
+  slug's own models is eligible, instead of running on the chain.
+- **`UsageEntry.routedBy`**: which layer of resolution chose a row's model
+  (`"slug"`, `"slug-fallback"`, `"admin-pin"`, `"task-override"`,
+  `"task-default"`, `"chain"`, `"default"`). Written only with `slugPinWins`,
+  on the rows of a model call. The `RoutedBy` and `SlugTierModels` types are
+  exported.
+- The policy report shows `routing.slugPinWins` and `zdrLockedSlugs`.
+- `ProviderRegistry.resolveSlugModel()`.
+
+### Changed
+
+- `SubmitBatchOptions.model` is marked deprecated in its doc comment. It still
+  works and still wins when set.
+
+### Migration
+
+One nullable column on the usage table, for the reference Drizzle adapters.
+No backfill. A custom `UsageStore` that ignores unknown fields needs no change.
+`ensureTables()` (SQLite quick-start) adds it.
+
+```sql
+ALTER TABLE ai_usage_log ADD COLUMN routed_by TEXT;
+```
+
 ## 0.21.0
 
 Two additions: the governed tool loop for callers that do not stream, and a

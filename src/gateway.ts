@@ -85,6 +85,8 @@ import type {
   JudgeScore,
   UsageEntry,
   StoredPrompt,
+  RoutedBy,
+  SlugTierModels,
 } from "./types.js";
 import {
   MemoryCacheStore,
@@ -107,6 +109,29 @@ const DEFAULT_USER_CAP_CENTS = 200; // unset = conservative default, NOT uncappe
 const DEFAULT_ANON_CAP_CENTS = 100;
 const DEFAULT_GLOBAL_CAP_CENTS = 5000; // app-wide circuit breaker
 const DEFAULT_CACHE_TTL_SECONDS = 60 * 60 * 24;
+
+/**
+ * The slug's tier and fallback pins, merged per field: a stored row's own
+ * value wins, and where the row leaves a field null or absent the code
+ * default's applies. Without that, an adopter's existing rows (which have no
+ * such column) would silently cancel a code default's pins. `tierModels`
+ * counts only when it names both models.
+ */
+function slugPins(
+  row: StoredPrompt | undefined,
+  def: PromptDefault | undefined,
+): { tierModels?: SlugTierModels; fallbackModels?: string[] } {
+  const both = (t: SlugTierModels | null | undefined) => (t?.fast && t?.power ? t : undefined);
+  const tierModels = both(row?.tierModels) ?? both(def?.tierModels);
+  const fallbackModels = row?.fallbackModels ?? def?.fallbackModels;
+  return {
+    ...(tierModels ? { tierModels } : {}),
+    ...(fallbackModels?.length ? { fallbackModels } : {}),
+  };
+}
+
+const taskRoute = (source: "override" | "default"): RoutedBy =>
+  source === "override" ? "task-override" : "task-default";
 
 function truncate(text: string | null | undefined): string | null {
   if (!text) return null;
@@ -215,7 +240,12 @@ interface PromptConfig {
   modelHint?: string;
   providerOverride?: string;
   temperature?: number;
+  tierModels?: SlugTierModels;
+  fallbackModels?: string[];
 }
+
+/** A chain link that remembers which resolution layer put it there. */
+type RoutedLink = ChainLink & { routedBy: RoutedBy };
 
 /** The options every governed unary/stream call shares; what `frontDoor` reads. */
 interface FrontDoorOptions<I> {
@@ -270,6 +300,8 @@ interface FrontDoor<V> {
   traceId: string;
   orgId: string | undefined;
   requireZdr: boolean;
+  /** The slug's model pins; undefined unless `slugPinWins` is on. */
+  pins: PromptConfig | undefined;
   /** null when caching is off for this call. */
   key: string | null;
   /** The rendered prompt, after any pre-guardrail transform. */
@@ -739,17 +771,27 @@ export function promptFingerprint(cfg: {
   modelHint?: string;
   providerOverride?: string;
   temperature?: number;
+  tierModels?: SlugTierModels;
+  fallbackModels?: string[];
 }): string {
-  return createHash("sha256")
+  const hash = createHash("sha256")
     .update(cfg.body)
     .update("\u0000")
     .update(cfg.modelHint ?? "")
     .update("\u0000")
     .update(cfg.providerOverride ?? "")
     .update("\u0000")
-    .update(cfg.temperature === undefined ? "" : String(cfg.temperature))
-    .digest("hex")
-    .slice(0, 12);
+    .update(cfg.temperature === undefined ? "" : String(cfg.temperature));
+  // The slug's other pins change the model too. Hashed only when present, so
+  // a prompt that sets neither keeps the fingerprint (and the cache) it had.
+  if (cfg.tierModels || cfg.fallbackModels?.length) {
+    hash
+      .update("\u0000")
+      .update(cfg.tierModels ? `${cfg.tierModels.fast}\u0001${cfg.tierModels.power}` : "")
+      .update("\u0000")
+      .update((cfg.fallbackModels ?? []).join("\u0001"));
+  }
+  return hash.digest("hex").slice(0, 12);
 }
 
 export class Gateway {
@@ -779,6 +821,8 @@ export class Gateway {
   private readonly mockResponders = new Map<string, MockResponder>();
   private readonly obs?: ObservabilityHooks;
   private readonly obsWarned = new Set<string>();
+  private readonly slugPinWins: boolean;
+  private readonly zdrSlugs: ReadonlySet<string>;
   private readonly badModelHintWarned = new Set<string>();
 
   constructor(cfg: GatewayConfig) {
@@ -807,6 +851,8 @@ export class Gateway {
     this.anthropicCfg = cfg.anthropic;
     this.batchCfg = cfg.batch;
     this.obs = cfg.observability;
+    this.slugPinWins = cfg.slugPinWins === true;
+    this.zdrSlugs = new Set(cfg.zdr?.slugs ?? []);
   }
 
   /** Fire an observability hook without letting it break the request path:
@@ -869,26 +915,43 @@ export class Gateway {
    */
   private async resolveStreamLinks(
     orgId: string | undefined,
-    opts: { tier?: "fast" | "power"; task?: string },
+    opts: { slug: string; tier?: "fast" | "power"; task?: string },
     requireZdr: boolean,
+    /** The slug's model pins (`FrontDoor.pins`). */
+    pins: PromptConfig | undefined,
     /** Keep these providers' links even with no AI SDK key (native path). */
     keepKeyless?: ProviderId[],
-  ): Promise<ChainLink[]> {
+  ): Promise<RoutedLink[]> {
+    // The slug's own chain outranks everything below (slugPinWins).
+    const pinned = await this.slugChain({
+      slug: opts.slug,
+      pins,
+      tier: opts.tier,
+      orgId,
+      requireZdr,
+      ...(keepKeyless ? { keepKeyless } : {}),
+    });
+    if (pinned) return pinned;
+
     const adminOverride = await this.adminPin(orgId, opts.tier, opts.task);
-    let links: ChainLink[];
+    let links: RoutedLink[];
     if (adminOverride) {
-      links = [this.registry.resolveDefault(adminOverride)];
+      links = [{ ...this.registry.resolveDefault(adminOverride), routedBy: "admin-pin" }];
     } else if (opts.task && this.tasks) {
       const taskChain = await this.tasks.chainForTask(opts.task, orgId);
       links = taskChain.map((t) => ({
         provider: t.provider,
         model: t.model,
         languageModel: this.registry.buildAny(t.provider, t.model) ?? undefined,
+        routedBy: taskRoute(t.source),
       }));
     } else {
       const chainCfg = (await this.modelConfig?.getChain(orgId)) ?? [];
       const built = this.registry.buildChain(chainCfg, opts.tier, keepKeyless);
-      links = built.length > 0 ? built : [this.registry.resolveDefault()];
+      links =
+        built.length > 0
+          ? built.map((l) => ({ ...l, routedBy: "chain" as const }))
+          : [{ ...this.registry.resolveDefault(), routedBy: "default" }];
     }
     if (requireZdr) {
       const eligible = links.filter((l) => this.registry.isZdr(l.provider, l.model));
@@ -1146,6 +1209,7 @@ export class Gateway {
     let outputTokens: number;
     let provider: string;
     let model: string;
+    let routedBy: RoutedBy | undefined;
     let durationMs: number;
     let extras:
       | { cacheCreateTokens: number; cacheReadTokens: number; webSearches: number }
@@ -1234,11 +1298,28 @@ export class Gateway {
       model = "mock";
       durationMs = 0;
     } else {
-      // Single-link resolution + ZDR-filtered chain (parallel to runStructured).
-      const adminOverride = await this.adminPin(orgId, opts.tier, opts.task);
-      let links: { provider: string; model: string; languageModel?: LanguageModel }[];
-      if (adminOverride) {
-        links = [this.registry.resolveDefault(adminOverride)];
+      // The slug's own chain first, when the slug pins a model (slugPinWins);
+      // otherwise single-link resolution + ZDR-filtered chain, parallel to
+      // runStructured.
+      const pinned = await this.slugChain({
+        slug: opts.slug,
+        pins: fd.pins,
+        tier: opts.tier,
+        orgId,
+        requireZdr,
+        ...(opts.anthropic && this.anthropicCfg ? { keepKeyless: ["anthropic" as const] } : {}),
+      });
+      const adminOverride = pinned ? null : await this.adminPin(orgId, opts.tier, opts.task);
+      let links: {
+        provider: string;
+        model: string;
+        languageModel?: LanguageModel;
+        routedBy?: RoutedBy;
+      }[];
+      if (pinned) {
+        links = pinned;
+      } else if (adminOverride) {
+        links = [{ ...this.registry.resolveDefault(adminOverride), routedBy: "admin-pin" }];
       } else if (opts.task && this.tasks) {
         // Per-task failover chain. A single-model task yields one link, which
         // is the pre-chain behavior; a task configured with an ordered chain
@@ -1248,6 +1329,7 @@ export class Gateway {
           provider: t.provider,
           model: t.model,
           languageModel: this.registry.buildAny(t.provider, t.model) ?? undefined,
+          routedBy: taskRoute(t.source),
         }));
         // ZDR filtering now applies to task chains too. Previously task
         // routing collapsed to one link BEFORE this filter ran, so an
@@ -1266,7 +1348,10 @@ export class Gateway {
       } else {
         const chainCfg = (await this.modelConfig?.getChain(orgId)) ?? [];
         const full = this.registry.buildChain(chainCfg, opts.tier);
-        links = full.length > 0 ? full : [this.registry.resolveDefault()];
+        links =
+          full.length > 0
+            ? full.map((l) => ({ ...l, routedBy: "chain" as const }))
+            : [{ ...this.registry.resolveDefault(), routedBy: "default" }];
         if (requireZdr) {
           const eligible = links.filter((l) => this.registry.isZdr(l.provider, l.model));
           if (links.length > 0 && eligible.length === 0) {
@@ -1333,6 +1418,7 @@ export class Gateway {
           }
           provider = link.provider;
           model = link.model;
+          routedBy = link.routedBy;
           durationMs = Date.now() - start;
           done = true;
           break;
@@ -1371,6 +1457,7 @@ export class Gateway {
       promptSlug: opts.slug,
       provider,
       model,
+      routedBy,
       inputTokens,
       outputTokens,
       estimatedCostCents: this.registry.estimateForLink(
@@ -1471,6 +1558,8 @@ export class Gateway {
       };
     }
     const { traceId, orgId, key, prompt, temperature, guardrailRecords, failOpen, lineage } = fd;
+    // Which layer a row's model came from; set once the links are resolved.
+    let routeOf = (_provider: string, _model: string): RoutedBy | undefined => undefined;
 
     // Post guardrail, cache write, usage row — once, for the link that
     // completed. A post block on a stream can only stop the FINAL object: the
@@ -1495,6 +1584,7 @@ export class Gateway {
         promptSlug: opts.slug,
         provider,
         model,
+        routedBy: routeOf(provider, model),
         inputTokens: inTok,
         outputTokens: outTok,
         estimatedCostCents: this.registry.estimateCostCents(model, inTok, outTok),
@@ -1554,11 +1644,12 @@ export class Gateway {
       };
     }
 
-    let links = await this.resolveStreamLinks(orgId, opts, fd.requireZdr);
+    let links = await this.resolveStreamLinks(orgId, opts, fd.requireZdr, fd.pins);
     links = links.filter((l) => l.languageModel);
     if (links.length === 0) {
       throw new Error("No API key for any streaming link.");
     }
+    routeOf = (p, m) => links.find((l) => l.provider === p && l.model === m)?.routedBy;
 
     const start = Date.now();
     const firstChunkMs =
@@ -1591,6 +1682,7 @@ export class Gateway {
         promptSlug: opts.slug,
         provider,
         model,
+        routedBy: routeOf(provider, model),
         inputTokens: 0,
         outputTokens: 0,
         estimatedCostCents: 0,
@@ -1788,6 +1880,8 @@ export class Gateway {
     };
     const fd = await this.frontDoor<undefined, string>(name, fdOpts, validate);
     const { traceId, orgId, prompt, temperature, guardrailRecords, failOpen, lineage } = fd;
+    // Which layer a row's model came from; set once the links are resolved.
+    let routeOf = (_provider: string, _model: string): RoutedBy | undefined => undefined;
     // What this turn has had ledgered so far, for the in-loop budget check.
     const turn = { ledgeredCents: 0 };
     const rowLineage: Lineage = lineage ? { ...lineage, turn } : undefined;
@@ -1830,6 +1924,7 @@ export class Gateway {
       promptSlug: opts.slug,
       provider: f.provider,
       model: f.model,
+      routedBy: routeOf(f.provider, f.model),
       inputTokens: f.inTok,
       outputTokens: f.outTok,
       estimatedCostCents: this.registry.estimateCostCents(f.model, f.inTok, f.outTok, f.extras),
@@ -1885,10 +1980,12 @@ export class Gateway {
         orgId,
         opts,
         fd.requireZdr,
+        fd.pins,
         opts.anthropic ? ["anthropic"] : undefined,
       )
     ).filter((l) => l.languageModel || native(l));
     if (links.length === 0) throw new Error("No API key for any streaming link.");
+    routeOf = (p, m) => links.find((l) => l.provider === p && l.model === m)?.routedBy;
 
     const start = Date.now();
     const firstChunkMs =
@@ -2403,11 +2500,29 @@ export class Gateway {
     const rl = await this.rateLimiter.limit(identifier);
     if (!rl.success) throw new RateLimitError(rl.limit, rl.remaining);
 
-    // Model resolution: explicit > task > default. Must be Anthropic.
+    // A slug locked in code is ZDR-required on the batch path too.
+    const requireZdr = opts.requireZdr === true || this.zdrSlugs.has(opts.slug);
+
+    // Model resolution: explicit > slug pin > task > default. Must be
+    // Anthropic. A batch runs on one model, so of the slug's chain only its
+    // own models count here (the first ZDR-eligible one), not the chain.
+    const pinned =
+      opts.model || !this.slugPinWins
+        ? null
+        : await this.slugChain({
+            slug: opts.slug,
+            pins: await this.loadSlugPins(opts.slug, orgId),
+            tier: undefined,
+            orgId,
+            requireZdr,
+          });
+    const slugModel = pinned?.find((l) => l.routedBy !== "chain");
     let provider: string;
     let model: string;
     if (opts.model) {
       ({ provider, model } = parseModelId(opts.model));
+    } else if (slugModel) {
+      ({ provider, model } = slugModel);
     } else if (opts.task && this.tasks) {
       const t = await this.tasks.modelForTask(opts.task, orgId);
       provider = t.provider;
@@ -2420,7 +2535,7 @@ export class Gateway {
     if (provider !== "anthropic") {
       throw new Error(`Batch supports Anthropic models only (resolved "${provider}/${model}").`);
     }
-    if (opts.requireZdr && !this.registry.isZdr(provider, model)) {
+    if (requireZdr && !this.registry.isZdr(provider, model)) {
       throw new ZdrViolationError(provider, model, "batch submit");
     }
 
@@ -3117,7 +3232,9 @@ export class Gateway {
         adminPin: this.modelConfig !== undefined,
         taskOverrideStore: routerInfo?.overrideStore ?? false,
         overridesBeatPin: routerInfo?.overridesBeatPin ?? false,
+        slugPinWins: this.slugPinWins,
       },
+      zdrLockedSlugs: [...this.zdrSlugs].sort(),
       tasks,
       ...(toolsGoverned
         ? {
@@ -3310,7 +3427,7 @@ export class Gateway {
         `[llm-gateway] prompt store unreachable for "${slug}", using code default:`,
         err instanceof Error ? err.message : err,
       );
-      return { body: def.body, modelHint: def.modelHint };
+      return { body: def.body, modelHint: def.modelHint, ...slugPins(undefined, def) };
     }
 
     if (!row) {
@@ -3322,7 +3439,7 @@ export class Gateway {
         ?.catch((err: unknown) =>
           console.warn(`[llm-gateway] auto-seed of "${slug}" failed:`, err),
         );
-      return { body: def.body, modelHint: def.modelHint };
+      return { body: def.body, modelHint: def.modelHint, ...slugPins(undefined, def) };
     }
 
     let body = row.body;
@@ -3341,7 +3458,111 @@ export class Gateway {
       modelHint: row.modelHint ?? undefined,
       providerOverride: row.providerOverride ?? undefined,
       temperature: row.temperature ?? undefined,
+      ...slugPins(row, def),
     };
+  }
+
+  /**
+   * The slug's model fields for a call that did not load its prompt from the
+   * store (an inline `promptBody`, or `streamText`, whose caller assembles
+   * the prompt). The slug names the model on those calls too. A slug with no
+   * row and no code default simply pins nothing.
+   */
+  private async loadSlugPins(
+    slug: string,
+    orgId?: string | null,
+  ): Promise<PromptConfig | undefined> {
+    const def = this.promptDefaults.find((d) => d.slug === slug);
+    let row: StoredPrompt | undefined;
+    try {
+      row = await this.prompts.getPrompt(slug, orgId);
+    } catch (err) {
+      // Same rule as loadPrompt: an unreachable store degrades to the code
+      // default, it does not fail the call.
+      console.warn(
+        `[llm-gateway] prompt store unreachable for "${slug}", using the code default's model:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+    if (!row && !def) return undefined;
+    return {
+      body: "",
+      modelHint: row ? (row.modelHint ?? undefined) : def?.modelHint,
+      providerOverride: row?.providerOverride ?? undefined,
+      ...slugPins(row, def),
+    };
+  }
+
+  /**
+   * The slug's own chain under `slugPinWins`: its model, its fallbacks, then
+   * the configured chain, each link tagged with the layer it came from.
+   * Null when the flag is off or the slug pins nothing, and the caller then
+   * resolves as it always has.
+   *
+   * ZDR filters every layer. A ZDR-required call whose slug models are all
+   * ineligible throws: a wrong pin on a locked slug must fail loudly rather
+   * than quietly run somewhere else.
+   */
+  private async slugChain(args: {
+    slug: string;
+    pins: PromptConfig | undefined;
+    tier: "fast" | "power" | undefined;
+    orgId: string | undefined;
+    requireZdr: boolean;
+    keepKeyless?: ProviderId[];
+  }): Promise<RoutedLink[] | null> {
+    if (!this.slugPinWins || !args.pins) return null;
+    const { pins, tier } = args;
+    const head =
+      pins.tierModels && tier ? pins.tierModels[tier] : (pins.modelHint ?? pins.tierModels?.power);
+    if (!head) return null;
+
+    const resolve = (id: string) => {
+      const r = this.registry.resolveSlugModel(id, pins.providerOverride);
+      const warnKey = `slug\u0000${args.slug}\u0000${id}`;
+      if (!r && !this.badModelHintWarned.has(warnKey)) {
+        this.badModelHintWarned.add(warnKey);
+        console.warn(
+          `[llm-gateway] slug "${args.slug}" pins "${id}", which is not usable as a model id` +
+            (pins.providerOverride ? ` for provider "${pins.providerOverride}"` : "") +
+            ` — skipping it. Fix the prompt row: a pin that is skipped means the call runs ` +
+            `on a model the slug did not name.`,
+        );
+      }
+      return r;
+    };
+    const first = resolve(head);
+    // An unusable head is not a pin: fall through to ordinary resolution,
+    // which is what a bad `modelHint` has always done.
+    if (!first) return null;
+
+    const link = (m: { provider: string; model: string }, routedBy: RoutedBy): RoutedLink => ({
+      provider: m.provider,
+      model: m.model,
+      languageModel: this.registry.buildAny(m.provider, m.model) ?? undefined,
+      routedBy,
+    });
+    const slugLinks: RoutedLink[] = [link(first, "slug")];
+    for (const id of pins.fallbackModels ?? []) {
+      const m = resolve(id);
+      if (m) slugLinks.push(link(m, "slug-fallback"));
+    }
+
+    const isZdr = (l: ChainLink) => this.registry.isZdr(l.provider, l.model);
+    const eligible = args.requireZdr ? slugLinks.filter(isZdr) : slugLinks;
+    if (eligible.length === 0) {
+      throw new ZdrViolationError(first.provider, first.model, `slug "${args.slug}" pin`);
+    }
+
+    // Past the slug's own models the call goes straight to the chain. The
+    // admin pin and the task are skipped: the slug outranks both.
+    const chainCfg = (await this.modelConfig?.getChain(args.orgId)) ?? [];
+    const chain = this.registry
+      .buildChain(chainCfg, tier, args.keepKeyless)
+      .filter((l) => !args.requireZdr || isZdr(l))
+      .map((l): RoutedLink => ({ ...l, routedBy: "chain" }));
+    const seen = new Set(eligible.map((l) => `${l.provider}\u0000${l.model}`));
+    return [...eligible, ...chain.filter((l) => !seen.has(`${l.provider}\u0000${l.model}`))];
   }
 
   // Walk the provider chain (primary → fallback → ...). Throws the last error
@@ -3431,7 +3652,9 @@ export class Gateway {
     const identifier = opts.userId ?? (opts.anonKey ? `anon:${opts.anonKey}` : "anon");
     const requireZdr =
       opts.requireZdr === true ||
-      (opts.task !== undefined && (this.tasks?.requiresZdr(opts.task) ?? false));
+      (opts.task !== undefined && (this.tasks?.requiresZdr(opts.task) ?? false)) ||
+      // A lock set in code: the slug is ZDR-required whatever the call says.
+      this.zdrSlugs.has(opts.slug);
 
     // 1. Rate limit
     const rl = await this.rateLimiter.limit(identifier);
@@ -3586,6 +3809,7 @@ export class Gateway {
           traceId,
           orgId,
           requireZdr,
+          pins: undefined, // a cache hit resolves no model
           key,
           prompt: prompt ?? "",
           promptConfig: promptConfig ?? { body: "" },
@@ -3599,11 +3823,19 @@ export class Gateway {
 
     // 4d. Prompt for the generation paths (inline promptBody skips the store).
     if (prompt === undefined) await loadAndRender();
+    // The slug's model pins. An inline body skipped the store, so they are
+    // read on their own; either way the slug still names the model.
+    const pins = !this.slugPinWins
+      ? undefined
+      : opts.promptBody
+        ? await this.loadSlugPins(opts.slug, orgId)
+        : promptConfig!;
     return {
       lineage,
       traceId,
       orgId,
       requireZdr,
+      pins,
       key,
       prompt: prompt!,
       promptConfig: promptConfig!,
@@ -3728,6 +3960,9 @@ export class Gateway {
       outputText: enc(truncate(f.outputText)),
       createdAt: new Date(),
     };
+    // Routing is recorded only once the adopter has opted in; with the flag
+    // off a row is shaped exactly as it was.
+    if (!this.slugPinWins || entry.routedBy == null) delete entry.routedBy;
     const id = await this.usage.logUsage(entry);
     // The run's spend is counted from the row that was just written, so the
     // run and the ledger cannot disagree. Cache hits cost nothing by
@@ -3815,6 +4050,7 @@ export class Gateway {
     let outputTokens: number;
     let provider: string;
     let model: string;
+    let routedBy: RoutedBy | undefined;
     let durationMs: number;
     let extras:
       | { cacheCreateTokens: number; cacheReadTokens: number; webSearches: number }
@@ -3840,9 +4076,50 @@ export class Gateway {
       //   b. task routing              — per-task override/default
       //   c. modelConfig.getChain()    — primary → fallback → ...
       //   d. Static/env default        — no dynamic config present
-      const adminOverride = await this.adminPin(orgId, opts.tier, opts.task);
+      // With `slugPinWins`, a slug that pins a model outranks all four: its
+      // own model, its fallbacks, then the chain (see slugChain).
+      const pinned = await this.slugChain({
+        slug: opts.slug,
+        pins: fd.pins,
+        tier: opts.tier,
+        orgId,
+        requireZdr,
+        ...(opts.anthropic && this.anthropicCfg ? { keepKeyless: ["anthropic" as const] } : {}),
+      });
+      const adminOverride = pinned ? null : await this.adminPin(orgId, opts.tier, opts.task);
 
-      if (!adminOverride && opts.task) {
+      if (pinned) {
+        const usable = pinned.filter(
+          (l) =>
+            l.languageModel || (opts.anthropic && l.provider === "anthropic" && this.anthropicCfg),
+        );
+        if (usable.length === 0) {
+          throw new Error(
+            `Slug "${opts.slug}" pins "${pinned[0]!.provider}/${pinned[0]!.model}" but that provider has no API key, and no chain link is usable either.`,
+          );
+        }
+        // Walked by the same loop as any chain: repair retries, transient
+        // retries, schema-invalid fall-through and timeout ledgering.
+        const gen = await this.callWithChain(
+          usable,
+          opts.schema,
+          prompt,
+          temperature,
+          opts.system,
+          opts.anthropic,
+          budget,
+          attemptMs,
+          ledgerAbortedAttempt,
+        );
+        object = gen.object;
+        inputTokens = gen.inputTokens;
+        outputTokens = gen.outputTokens;
+        provider = gen.provider;
+        model = gen.model;
+        durationMs = gen.durationMs;
+        extras = gen.extras;
+        routedBy = usable.find((l) => l.provider === provider && l.model === model)?.routedBy;
+      } else if (!adminOverride && opts.task) {
         if (!this.tasks) {
           throw new Error(
             `runStructured received task "${opts.task}" but GatewayConfig.tasks is not configured.`,
@@ -3852,6 +4129,7 @@ export class Gateway {
         // main chain uses — so a task gets repair retries, transient retries,
         // schema-invalid fall-through and timeout ledgering identically.
         const taskChain = await this.tasks.chainForTask(opts.task, orgId);
+        routedBy = taskRoute(taskChain[0]!.source);
         let taskLinks: ChainLink[] = taskChain.map((t) => ({
           provider: t.provider,
           model: t.model,
@@ -3902,6 +4180,7 @@ export class Gateway {
         durationMs = gen.durationMs;
         extras = gen.extras;
       } else if (adminOverride) {
+        routedBy = "admin-pin";
         // The hint is validated against the admin's pinned provider, so it
         // can only name a model for that provider — the pin stays in force.
         const adminHint = this.validatedModelHint(promptConfig.modelHint, adminOverride.provider);
@@ -3955,6 +4234,7 @@ export class Gateway {
           );
         }
 
+        routedBy = chain.length === 0 ? "default" : "chain";
         if (chain.length === 0) {
           const rowProvider = promptConfig.providerOverride as ProviderId | undefined;
           const validHint = this.validatedModelHint(promptConfig.modelHint, rowProvider);
@@ -4051,6 +4331,7 @@ export class Gateway {
           promptSlug: opts.slug,
           provider,
           model,
+          routedBy,
           inputTokens,
           outputTokens,
           estimatedCostCents: this.registry.estimateForLink(
@@ -4089,6 +4370,7 @@ export class Gateway {
       promptSlug: opts.slug,
       provider,
       model,
+      routedBy,
       inputTokens,
       outputTokens,
       estimatedCostCents: this.registry.estimateForLink(

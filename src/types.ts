@@ -70,6 +70,12 @@ export interface UsageEntry {
   /** true when the caller aborted a `streamText` or `generateText` turn; the token counts are estimates. */
   aborted?: boolean | null;
   /**
+   * Which layer of model resolution chose this row's model. Written only
+   * when `GatewayConfig.slugPinWins` is on, and only on rows for a model
+   * call (not cache hits, tool rows or the judge). Absent otherwise.
+   */
+  routedBy?: RoutedBy | null;
+  /**
    * Run lineage. Set on every row a call writes when the call carried a
    * governed run (`gateway.startRun()`), absent otherwise and on rows written
    * before 0.18.0. `runId` groups the rows of one agent run; `stepIndex` is
@@ -152,15 +158,58 @@ export interface PromptDefault {
   /** Required {{placeholder}} names; used to validate edited bodies. */
   variables: string[];
   modelHint?: string;
+  /** See `StoredPrompt.tierModels`. A stored row's own value wins. */
+  tierModels?: SlugTierModels;
+  /** See `StoredPrompt.fallbackModels`. A stored row's own value wins. */
+  fallbackModels?: string[];
+}
+
+/** A slug's fast and power models. Both, or neither. */
+export interface SlugTierModels {
+  fast: string;
+  power: string;
 }
 
 export interface StoredPrompt {
   slug: string;
   body: string;
+  /**
+   * The slug's model. With `GatewayConfig.slugPinWins` it pins the call:
+   * the slug names the model, and code never does.
+   */
   modelHint?: string | null;
   providerOverride?: string | null;
   temperature?: number | null;
+  /**
+   * A fast and a power model for this slug; the call's `tier` picks one.
+   * Rare: for a slug behind a user-facing fast/power switch, such as a chat.
+   * Read only with `slugPinWins`. Null or absent falls back to the code
+   * default's (`PromptDefault.tierModels`).
+   */
+  tierModels?: SlugTierModels | null;
+  /**
+   * Models to try, in order, after the slug's own model fails, before the
+   * configured chain. Read only with `slugPinWins`. Null or absent falls back
+   * to the code default's.
+   */
+  fallbackModels?: string[] | null;
 }
+
+/**
+ * Which layer of model resolution decided the model a row was written for.
+ * `"slug"` is the slug's own model, `"slug-fallback"` one of its
+ * `fallbackModels`, and `"chain"` after either means the slug's models all
+ * failed. `"router"` is reserved for a content router that does not exist yet.
+ */
+export type RoutedBy =
+  | "router"
+  | "slug"
+  | "slug-fallback"
+  | "admin-pin"
+  | "task-override"
+  | "task-default"
+  | "chain"
+  | "default";
 
 /**
  * Prompt override layer (DB-as-override, code-as-fallback). Optional — when
@@ -680,4 +729,28 @@ export interface GatewayConfig {
    * `guardrails.tool`), tools run exactly as before.
    */
   toolPolicy?: Record<string, import("./tools.js").ToolPolicy>;
+  /**
+   * The slug names the model. Off by default, and off means model resolution
+   * is exactly what it was. On, a slug whose prompt row (or code default)
+   * pins a model is routed by that pin ahead of the admin pin, the task and
+   * the chain:
+   *
+   *   1. `tierModels[tier]` when the row has `tierModels` and the call passed
+   *      a tier; otherwise `modelHint`; otherwise `tierModels.power`.
+   *   2. then the row's `fallbackModels`, in order;
+   *   3. then the configured chain. The admin pin and the task are skipped.
+   *
+   * A slug that pins nothing resolves as before. ZDR filters every layer,
+   * and a ZDR-required call whose slug models are all ineligible throws
+   * `ZdrViolationError` instead of walking the chain. Every model row then
+   * carries `routedBy`. See docs/design/model-naming.md.
+   */
+  slugPinWins?: boolean;
+  /**
+   * ZDR locks set in code. A call to a slug in `slugs` is ZDR-required
+   * whatever the call or its task says, on every method that takes a slug.
+   * A lock is a security decision, so it lives here and not on the prompt
+   * row an admin can edit. Independent of `slugPinWins`.
+   */
+  zdr?: { slugs?: string[] };
 }

@@ -151,8 +151,11 @@ backlog ids in section 4 of the strategy doc.
 
 - [x] Decide #49, how a caller or store names a model: the slug names the
       model, decided 2026-10-28 in
-      [model-naming.md](./docs/design/model-naming.md). Implementation is gated
-      on Scout's adoption (28)
+      [model-naming.md](./docs/design/model-naming.md) (28)
+- [x] Build #49: `slugPinWins`, a slug's `tierModels` and `fallbackModels`,
+      the code-level ZDR lock `zdr.slugs`, and `routedBy` on the ledger, on
+      every method that takes a slug. Built ahead of Scout's adoption, from
+      the design doc and the `pointer-ai` seam (28)
 - [x] Configurable retry predicate, #15: `GatewayConfig.isRetryable`, 0.17.0 (29)
 - [x] `streamText`, #14: governed text streaming with tool calling and native
       Anthropic streaming, 0.17.0 (19)
