@@ -8,7 +8,13 @@ adopters implement, and in practice they have only ever gained capability throug
 *optional* parameters — but they are not yet under a formal semver freeze. 1.0.0
 is gated on a downstream integration proving the SPI holds, not on a date.
 
-## Unreleased
+## 0.22.0
+
+The slug names the model: a prompt row can pin the model its slug runs on.
+**No breaking change, and nothing changes until you opt in** with
+`slugPinWins` or `zdr.slugs`. The reference Drizzle adapters write one new
+nullable column, so adopters who manage their own migrations should apply the
+SQL under Migration; `ensureTables()` does it on SQLite.
 
 ### Added
 
