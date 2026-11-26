@@ -17,6 +17,11 @@
 //   ALTER TABLE ai_usage_log     ADD COLUMN step_index integer;    -- 0.18.0
 //   ALTER TABLE ai_usage_log     ADD COLUMN parent_run_id text;    -- 0.18.0
 //   ALTER TABLE spend_cap_events ADD COLUMN run_id text;           -- 0.18.0
+// And the indexes the usage table declares. On a large live table, add
+// CONCURRENTLY so the build does not block writes:
+//   CREATE INDEX idx_ai_usage_spend     ON ai_usage_log (created_at, cache_hit, user_id);
+//   CREATE INDEX idx_ai_usage_spend_org ON ai_usage_log (created_at, cache_hit, org_id);
+//   CREATE INDEX idx_ai_usage_run       ON ai_usage_log (run_id, step_index);
 // src/drizzle-pg.test.ts applies exactly this list to the original tables and
 // checks the result against the definitions below.
 
@@ -24,6 +29,7 @@ import { and, eq, gte, isNull, sql } from "drizzle-orm";
 import {
   boolean,
   doublePrecision,
+  index,
   integer,
   jsonb,
   pgTable,
@@ -35,38 +41,51 @@ import type { PgDatabase } from "drizzle-orm/pg-core";
 import type { GuardrailRecord } from "../guardrails.js";
 import type { JudgeScore, SpendCapEvent, UsageEntry, UsageStore } from "../types.js";
 
-export const aiUsageLog = pgTable("ai_usage_log", {
-  id: serial("id").primaryKey(),
-  userId: text("user_id"),
-  /** Tenant. NULL for unscoped (single-tenant) rows. */
-  orgId: text("org_id"),
-  app: text("app"),
-  route: text("route"),
-  promptSlug: text("prompt_slug"),
-  provider: text("provider").notNull(),
-  model: text("model").notNull(),
-  inputTokens: integer("input_tokens").notNull(),
-  outputTokens: integer("output_tokens").notNull(),
-  estimatedCostCents: doublePrecision("estimated_cost_cents").notNull(),
-  cacheHit: boolean("cache_hit").notNull(),
-  traceId: text("trace_id").notNull(),
-  durationMs: integer("duration_ms"),
-  cacheCreateTokens: integer("cache_create_tokens"),
-  cacheReadTokens: integer("cache_read_tokens"),
-  webSearches: integer("web_searches"),
-  zdrEnforced: boolean("zdr_enforced"),
-  inputText: text("input_text"),
-  outputText: text("output_text"),
-  /** Caller-defined attribution. NULL before 0.11.0. */
-  metadata: jsonb("metadata").$type<Record<string, unknown>>(),
-  /** Guardrail verdicts for the call. JSON. NULL before 0.16.0. */
-  guardrails: jsonb("guardrails").$type<GuardrailRecord[]>(),
-  /** Run lineage. NULL on rows outside a governed run and before 0.18.0. */
-  runId: text("run_id"),
-  stepIndex: integer("step_index"),
-  parentRunId: text("parent_run_id"),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
-});
+export const aiUsageLog = pgTable(
+  "ai_usage_log",
+  {
+    id: serial("id").primaryKey(),
+    userId: text("user_id"),
+    /** Tenant. NULL for unscoped (single-tenant) rows. */
+    orgId: text("org_id"),
+    app: text("app"),
+    route: text("route"),
+    promptSlug: text("prompt_slug"),
+    provider: text("provider").notNull(),
+    model: text("model").notNull(),
+    inputTokens: integer("input_tokens").notNull(),
+    outputTokens: integer("output_tokens").notNull(),
+    estimatedCostCents: doublePrecision("estimated_cost_cents").notNull(),
+    cacheHit: boolean("cache_hit").notNull(),
+    traceId: text("trace_id").notNull(),
+    durationMs: integer("duration_ms"),
+    cacheCreateTokens: integer("cache_create_tokens"),
+    cacheReadTokens: integer("cache_read_tokens"),
+    webSearches: integer("web_searches"),
+    zdrEnforced: boolean("zdr_enforced"),
+    inputText: text("input_text"),
+    outputText: text("output_text"),
+    /** Caller-defined attribution. NULL before 0.11.0. */
+    metadata: jsonb("metadata").$type<Record<string, unknown>>(),
+    /** Guardrail verdicts for the call. JSON. NULL before 0.16.0. */
+    guardrails: jsonb("guardrails").$type<GuardrailRecord[]>(),
+    /** Run lineage. NULL on rows outside a governed run and before 0.18.0. */
+    runId: text("run_id"),
+    stepIndex: integer("step_index"),
+    parentRunId: text("parent_run_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  },
+  // The same three indexes ensureTables() creates on SQLite, under the same
+  // names. The spend sums run before every governed call, filtered on
+  // created_at since the start of the UTC day; without an index each one is a
+  // scan of the whole ledger.
+  (t) => [
+    index("idx_ai_usage_spend").on(t.createdAt, t.cacheHit, t.userId),
+    index("idx_ai_usage_spend_org").on(t.createdAt, t.cacheHit, t.orgId),
+    // "Every row of this run, in order" is the query run lineage exists for.
+    index("idx_ai_usage_run").on(t.runId, t.stepIndex),
+  ],
+);
 
 export const spendCapEvents = pgTable("spend_cap_events", {
   id: serial("id").primaryKey(),

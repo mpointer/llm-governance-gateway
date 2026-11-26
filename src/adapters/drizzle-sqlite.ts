@@ -7,43 +7,54 @@
 // quick-start/dev setups.
 
 import { and, eq, gte, isNull, sql } from "drizzle-orm";
-import { integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
 import type { BaseSQLiteDatabase } from "drizzle-orm/sqlite-core";
 import type { GuardrailRecord } from "../guardrails.js";
 import type { JudgeScore, SpendCapEvent, UsageEntry, UsageStore } from "../types.js";
 
-export const aiUsageLog = sqliteTable("ai_usage_log", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  userId: text("user_id"),
-  /** Tenant. NULL for unscoped (single-tenant) rows. */
-  orgId: text("org_id"),
-  app: text("app"),
-  route: text("route"),
-  promptSlug: text("prompt_slug"),
-  provider: text("provider").notNull(),
-  model: text("model").notNull(),
-  inputTokens: integer("input_tokens").notNull(),
-  outputTokens: integer("output_tokens").notNull(),
-  estimatedCostCents: real("estimated_cost_cents").notNull(),
-  cacheHit: integer("cache_hit", { mode: "boolean" }).notNull(),
-  traceId: text("trace_id").notNull(),
-  durationMs: integer("duration_ms"),
-  cacheCreateTokens: integer("cache_create_tokens"),
-  cacheReadTokens: integer("cache_read_tokens"),
-  webSearches: integer("web_searches"),
-  zdrEnforced: integer("zdr_enforced", { mode: "boolean" }),
-  inputText: text("input_text"),
-  outputText: text("output_text"),
-  /** Caller-defined attribution. JSON. NULL before 0.11.0. */
-  metadata: text("metadata", { mode: "json" }).$type<Record<string, unknown>>(),
-  /** Guardrail verdicts for the call. JSON. NULL before 0.16.0. */
-  guardrails: text("guardrails", { mode: "json" }).$type<GuardrailRecord[]>(),
-  /** Run lineage. NULL on rows outside a governed run and before 0.18.0. */
-  runId: text("run_id"),
-  stepIndex: integer("step_index"),
-  parentRunId: text("parent_run_id"),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
-});
+export const aiUsageLog = sqliteTable(
+  "ai_usage_log",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    userId: text("user_id"),
+    /** Tenant. NULL for unscoped (single-tenant) rows. */
+    orgId: text("org_id"),
+    app: text("app"),
+    route: text("route"),
+    promptSlug: text("prompt_slug"),
+    provider: text("provider").notNull(),
+    model: text("model").notNull(),
+    inputTokens: integer("input_tokens").notNull(),
+    outputTokens: integer("output_tokens").notNull(),
+    estimatedCostCents: real("estimated_cost_cents").notNull(),
+    cacheHit: integer("cache_hit", { mode: "boolean" }).notNull(),
+    traceId: text("trace_id").notNull(),
+    durationMs: integer("duration_ms"),
+    cacheCreateTokens: integer("cache_create_tokens"),
+    cacheReadTokens: integer("cache_read_tokens"),
+    webSearches: integer("web_searches"),
+    zdrEnforced: integer("zdr_enforced", { mode: "boolean" }),
+    inputText: text("input_text"),
+    outputText: text("output_text"),
+    /** Caller-defined attribution. JSON. NULL before 0.11.0. */
+    metadata: text("metadata", { mode: "json" }).$type<Record<string, unknown>>(),
+    /** Guardrail verdicts for the call. JSON. NULL before 0.16.0. */
+    guardrails: text("guardrails", { mode: "json" }).$type<GuardrailRecord[]>(),
+    /** Run lineage. NULL on rows outside a governed run and before 0.18.0. */
+    runId: text("run_id"),
+    stepIndex: integer("step_index"),
+    parentRunId: text("parent_run_id"),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  // The indexes ensureTables() creates, declared here too so a schema
+  // migrated with drizzle-kit gets them. Keep the two in step: the test
+  // compares what ensureTables() builds with what is declared.
+  (t) => [
+    index("idx_ai_usage_spend").on(t.createdAt, t.cacheHit, t.userId),
+    index("idx_ai_usage_spend_org").on(t.createdAt, t.cacheHit, t.orgId),
+    index("idx_ai_usage_run").on(t.runId, t.stepIndex),
+  ],
+);
 
 export const spendCapEvents = sqliteTable("spend_cap_events", {
   id: integer("id").primaryKey({ autoIncrement: true }),
