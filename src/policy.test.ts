@@ -320,13 +320,20 @@ describe("llm-gateway policy", () => {
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
   let report: PolicyReport;
+  // The stand-in modules read the report from a file beside them. Their own
+  // source is fixed text: no code is built from data.
+  const LOAD_REPORT = `import { readFileSync } from "node:fs";
+    const report = JSON.parse(readFileSync(new URL("./report.json", import.meta.url), "utf8"));`;
   /** Writes a module whose exports stand in for a Gateway. */
-  const moduleFile = async (name: string, body: (reportJson: string) => string) => {
-    report ??= await describeWith({
-      tasks: { defaults: { triage: "anthropic:claude-sonnet-4-6" } },
-    });
+  const moduleFile = async (name: string, source: string) => {
+    if (!report) {
+      report = await describeWith({
+        tasks: { defaults: { triage: "anthropic:claude-sonnet-4-6" } },
+      });
+      writeFileSync(join(dir, "report.json"), JSON.stringify(report));
+    }
     const file = join(dir, name);
-    writeFileSync(file, body(JSON.stringify(report)));
+    writeFileSync(file, source);
     return file;
   };
   const run = async (args: string[]) => {
@@ -339,7 +346,8 @@ describe("llm-gateway policy", () => {
   it("prints the markdown report of the module's `gateway` export", async () => {
     const file = await moduleFile(
       "named.mjs",
-      (json) => `export const gateway = { describePolicy: async () => (${json}) };`,
+      `${LOAD_REPORT}
+        export const gateway = { describePolicy: async () => report };`,
     );
     const res = await run([file]);
     expect(res.code).toBe(0);
@@ -349,7 +357,8 @@ describe("llm-gateway policy", () => {
   it("reads a default export, a function returning the gateway, and --export", async () => {
     const file = await moduleFile(
       "shapes.mjs",
-      (json) => `const gw = { describePolicy: async () => (${json}) };
+      `${LOAD_REPORT}
+        const gw = { describePolicy: async () => report };
         export default async () => gw;
         export const billing = gw;`,
     );
@@ -363,7 +372,7 @@ describe("llm-gateway policy", () => {
   it("prints JSON with --json and passes --org through", async () => {
     const file = await moduleFile(
       "org.mjs",
-      () => `export const gateway = { describePolicy: async (o) => ({ asked: o }) };`,
+      "export const gateway = { describePolicy: async (o) => ({ asked: o }) };",
     );
     const res = await run([file, "--json", "--org", "acme"]);
     expect(res.code).toBe(0);
@@ -379,15 +388,14 @@ describe("llm-gateway policy", () => {
     expect(absent.code).toBe(1);
     expect(absent.err).toContain("Could not load");
 
-    const wrong = await moduleFile("wrong.mjs", () => `export const gateway = { nothing: true };`);
+    const wrong = await moduleFile("wrong.mjs", "export const gateway = { nothing: true };");
     const notGateway = await run([wrong]);
     expect(notGateway.code).toBe(1);
     expect(notGateway.err).toContain("is not a Gateway");
 
     const broken = await moduleFile(
       "broken.mjs",
-      () =>
-        `export const gateway = { describePolicy: async () => { throw new Error("store down"); } };`,
+      'export const gateway = { describePolicy: async () => { throw new Error("store down"); } };',
     );
     const failed = await run([broken]);
     expect(failed.code).toBe(1);
