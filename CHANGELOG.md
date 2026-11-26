@@ -8,6 +8,31 @@ adopters implement, and in practice they have only ever gained capability throug
 *optional* parameters — but they are not yet under a formal semver freeze. 1.0.0
 is gated on a downstream integration proving the SPI holds, not on a date.
 
+## Unreleased
+
+### Fixed
+
+- **Postgres: a NUL byte in a prompt or an output no longer loses the ledger
+  row.** Postgres cannot store U+0000 in `text` or `jsonb`, and `jsonb` also
+  rejects an unpaired surrogate. `DrizzlePgUsageStore.logUsage` used to pass
+  them through, so the insert threw after the model call had been paid for:
+  the caller got a database error and the spend went unrecorded. Text
+  extracted from PDFs and scans does carry NUL bytes. The adapter now replaces
+  each such character with U+FFFD in `input_text`, `output_text`, `metadata`
+  and `guardrails`, and writes the row. Values without them are passed through
+  untouched. SQLite stores both characters and is unchanged.
+
+### Tests
+
+- **The Postgres adapter is tested against real Postgres**, which it was not
+  before. `src/drizzle-pg.test.ts` runs on PGlite (Postgres in WASM, in
+  process) wherever `npm test` runs, and again through node-postgres against a
+  server when `PG_TEST_URL` is set, which CI does. It covers the governed-call
+  lifecycle, spend sums and their window boundary, org scoping, `jsonb`
+  round-trips, run lineage, a governed tool loop, concurrent writes, a
+  non-UTC session time zone, and the hand-migration list now in the adapter's
+  header, checked against the exported table definitions.
+
 ## 0.19.0
 
 Governance inside the agent loop: a run's budget now stops a `streamText` tool

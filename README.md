@@ -140,7 +140,7 @@ await ensureTables(db); // dev quick-start; use drizzle-kit migrations in prod
 import { DrizzlePgUsageStore } from "llm-governance-gateway/drizzle-pg";
 ```
 
-Both export their table definitions (`aiUsageLog`, `spendCapEvents`, `aiJudgeScores`) — re-export them from your schema file so `drizzle-kit generate` produces migrations. Or implement `UsageStore` yourself over any database (four methods — see `src/types.ts`).
+Both export their table definitions (`aiUsageLog`, `spendCapEvents`, `aiJudgeScores`) — re-export them from your schema file so `drizzle-kit generate` produces migrations. Both are integration-tested against a real engine: SQLite through sql.js, Postgres through PGlite and, in CI, a Postgres server over node-postgres (set `PG_TEST_URL` to run that target locally). Or implement `UsageStore` yourself over any database (four methods — see `src/types.ts`).
 
 Pass Redis-backed cache/rate limiting for multi-instance deployments:
 

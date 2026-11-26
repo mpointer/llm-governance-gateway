@@ -95,11 +95,14 @@
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.114.0",
     "@biomejs/biome": "^2.5.15",
+    "@electric-sql/pglite": "^0.6.0",
     "@types/node": "^26.1.1",
+    "@types/pg": "^8.23.1",
     "@types/sql.js": "^1.4.9",
     "@vitest/coverage-v8": "^5.0.5",
     "drizzle-orm": "^0.45.2",
     "hono": "^4.6.0",
+    "pg": "^8.23.1",
     "sql.js": "^1.13.0",
     "typescript": "^5.7.0",
     "vitest": "^5.0.2"

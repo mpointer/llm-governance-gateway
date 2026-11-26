@@ -5,6 +5,20 @@
 // Mirrors drizzle-sqlite.ts — same table/column names, Postgres types.
 // Re-export the tables in your schema file so drizzle-kit generates
 // migrations for them.
+//
+// If you write migrations by hand instead, these are the additive steps from
+// 0.10.0 on, in Postgres types. All nullable, no backfill:
+//   ALTER TABLE ai_usage_log     ADD COLUMN org_id text;           -- 0.10.0
+//   ALTER TABLE spend_cap_events ADD COLUMN org_id text;           -- 0.10.0
+//   ALTER TABLE spend_cap_events ADD COLUMN enforced boolean;      -- 0.11.0
+//   ALTER TABLE ai_usage_log     ADD COLUMN metadata jsonb;        -- 0.11.0
+//   ALTER TABLE ai_usage_log     ADD COLUMN guardrails jsonb;      -- 0.16.0
+//   ALTER TABLE ai_usage_log     ADD COLUMN run_id text;           -- 0.18.0
+//   ALTER TABLE ai_usage_log     ADD COLUMN step_index integer;    -- 0.18.0
+//   ALTER TABLE ai_usage_log     ADD COLUMN parent_run_id text;    -- 0.18.0
+//   ALTER TABLE spend_cap_events ADD COLUMN run_id text;           -- 0.18.0
+// src/drizzle-pg.test.ts applies exactly this list to the original tables and
+// checks the result against the definitions below.
 
 import { and, eq, gte, isNull, sql } from "drizzle-orm";
 import {
@@ -78,6 +92,41 @@ export const aiJudgeScores = pgTable("ai_judge_scores", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
 });
 
+// Postgres cannot store U+0000 in `text` or `jsonb`, and `jsonb` also rejects
+// an unpaired surrogate. SQLite stores both, so nothing upstream filters them.
+// The row is written after the model call has been paid for: an insert that
+// throws on one unstorable character loses the ledger row for money already
+// spent. Prompts built from extracted documents do carry NUL bytes, so each
+// such character is replaced with U+FFFD and the row is kept.
+const REPLACEMENT = "\ufffd";
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
+
+function storableText(text: string | null | undefined): string | null {
+  if (text == null) return null;
+  return text.includes("\u0000") ? text.replaceAll("\u0000", REPLACEMENT) : text;
+}
+
+function storableJson<T>(value: T | null | undefined): T | null {
+  if (value == null) return null;
+  // JSON.stringify writes both as escapes, so one scan of the serialized form
+  // tells whether anything needs replacing. Almost always nothing does, and
+  // the value is handed to the driver untouched.
+  if (!/\\u0000|\\ud[89a-f]/i.test(JSON.stringify(value))) return value;
+  const clean = (v: unknown): unknown => {
+    if (typeof v === "string") {
+      return v.replaceAll("\u0000", REPLACEMENT).replace(LONE_SURROGATE, REPLACEMENT);
+    }
+    if (Array.isArray(v)) return v.map(clean);
+    if (v !== null && typeof v === "object") {
+      return Object.fromEntries(Object.entries(v).map(([k, x]) => [clean(k), clean(x)]));
+    }
+    return v;
+  };
+  // Round-trip first so the walk sees what the driver would have serialized
+  // (a Date is its ISO string by then, not an object with no own keys).
+  return clean(JSON.parse(JSON.stringify(value))) as T;
+}
+
 // Any drizzle pg database (node-postgres, postgres.js, neon, vercel).
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type PgDb = PgDatabase<any, any, any>;
@@ -109,10 +158,10 @@ export class DrizzlePgUsageStore implements UsageStore {
         // Stored as received, deliberately. Gateway.logUsage() has already
         // applied truncate() and the configured encrypt hook, so encrypting
         // here would double-wrap: nothing throws, and no decrypt unwraps it.
-        inputText: entry.inputText ?? null,
-        outputText: entry.outputText ?? null,
-        metadata: entry.metadata ?? null,
-        guardrails: entry.guardrails ?? null,
+        inputText: storableText(entry.inputText),
+        outputText: storableText(entry.outputText),
+        metadata: storableJson(entry.metadata),
+        guardrails: storableJson(entry.guardrails),
         runId: entry.runId ?? null,
         stepIndex: entry.stepIndex ?? null,
         parentRunId: entry.parentRunId ?? null,
