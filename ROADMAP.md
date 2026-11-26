@@ -179,7 +179,10 @@ backlog ids in section 4 of the strategy doc.
       the `guardrails.tool` hook, a ledger row per tool call,
       `preflightTools()`. A denial is handed back to the model, it does not
       fail the turn (2)
-- [ ] `llm-gateway policy` report: effective policy per task from config (10)
+- [x] `llm-gateway policy` report: `gw.describePolicy()` returns the effective
+      policy as data (limits, hooks, the chain behind each task with ZDR and
+      pricing status, tool policy, data handling) with a list of findings;
+      the command prints it as markdown or JSON. No keys, no URLs (10)
 - [x] Postgres adapter test: the reference store runs against PGlite on
       every test run and against a Postgres server through node-postgres in
       CI. It found and fixed one bug: a NUL byte in a prompt lost the ledger

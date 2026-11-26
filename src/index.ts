@@ -31,6 +31,13 @@ export {
 } from "./errors.js";
 export { GovernedRun, type RunSnapshot, type StartRunOptions } from "./run.js";
 export {
+  renderPolicyMarkdown,
+  type PolicyModel,
+  type PolicyReport,
+  type PolicyTask,
+  type PolicyTool,
+} from "./policy.js";
+export {
   runGuardrail,
   type GuardrailConfig,
   type GuardrailHook,

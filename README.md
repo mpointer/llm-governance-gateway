@@ -54,6 +54,7 @@ Spend controls in this space are usually observed (dashboards that tell you *aft
   - [Model-id conventions, and the one place they differ](#model-id-conventions-and-the-one-place-they-differ)
   - [Attribution beyond userId](#attribution-beyond-userid)
   - [Governed runs (agent loops)](#governed-runs-agent-loops)
+  - [Policy report](#policy-report)
   - [Observability export (OTel, Langfuse, metrics)](#observability-export-otel-langfuse-metrics)
   - [HTTP service (multi-app deployments)](#http-service-multi-app-deployments)
 - [Guardrail hooks (pre/post)](#guardrail-hooks-prepost)
@@ -820,6 +821,53 @@ ALTER TABLE ai_usage_log     ADD COLUMN parent_run_id TEXT;
 ALTER TABLE spend_cap_events ADD COLUMN run_id TEXT;
 CREATE INDEX idx_ai_usage_run ON ai_usage_log (run_id, step_index);
 ```
+
+### Policy report
+
+What is this deployment configured to enforce? One command answers it, in a
+form you can hand to a security reviewer or attach to a customer's
+questionnaire:
+
+```sh
+npx llm-gateway policy ./dist/gateway.js > POLICY.md
+```
+
+The module exports your `Gateway` as `gateway`, as the default export, or under
+`--export <name>`; a function that returns one works too. `--json` prints the
+data instead of markdown, and `--org <id>` resolves chains for one tenant. A
+TypeScript module needs a loader, for example
+`node --import tsx node_modules/llm-governance-gateway/dist/cli.js policy ./src/gateway.ts`.
+
+The report covers the daily spend limits and their mode, which guardrail hooks
+exist and whether they fail open, the model chain behind each task with every
+model's ZDR and pricing status, the tool policy, where the ledger and cache
+live and whether snapshots are encrypted, and the timeouts. It opens with
+**findings**: the settings a reviewer should look at, stated as facts.
+
+```md
+## Findings
+
+- Spend limits are in observe mode: a breach is recorded and the call is not refused.
+- Task "contract_review" requires ZDR: 1 of the 2 models in its chain is not ZDR-asserted and is skipped (openai:gpt-4.1).
+- openrouter:acme/new-model has no pricing: its cost is estimated from the fallback rate, so spend limits can undercount it.
+```
+
+It reads configuration and the two stores that decide routing. It calls no
+provider, and it prints no API key and no endpoint URL, only names. The same
+configuration renders the same text, so committing `POLICY.md` and diffing it
+in CI shows a policy change in review. From code:
+
+```ts
+import { renderPolicyMarkdown } from "llm-governance-gateway";
+
+const policy = await gw.describePolicy();   // plain data; policy.findings is a string[]
+if (policy.findings.length > 0) console.warn(renderPolicyMarkdown(policy));
+```
+
+What it cannot see: per-call options (`requireZdr`, a judge, a run's budget)
+are set where the call is made, and a store can change a chain after the report
+ran. It reports what is configured, not what happened; the ledger is the record
+of that.
 
 ### Observability export (OTel, Langfuse, metrics)
 

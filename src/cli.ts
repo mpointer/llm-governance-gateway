@@ -4,6 +4,9 @@
 //   npx llm-gateway init     guided key entry → .env.local (chmod 600)
 //   npx llm-gateway doctor   validate every configured key against the
 //                            provider's live models API (default command)
+//   npx llm-gateway policy <module>
+//                            print what your Gateway is configured to enforce
+//                            (see src/policy.ts)
 //
 // Known limit: doctor proves the key authenticates against the MODELS API.
 // Providers with scoped keys (e.g. Venice inference vs admin) can pass
@@ -18,6 +21,7 @@ import { createInterface } from "node:readline/promises";
 import { loadEnvFiles, parseEnvFile } from "./envfile.js";
 import { ProviderRegistry, PROVIDER_IDS } from "./providers.js";
 import { listProviderModels } from "./discovery.js";
+import { runPolicyCommand } from "./policy.js";
 import type { ProviderId } from "./types.js";
 
 const ENV_KEYS: Record<ProviderId, string> = {
@@ -120,8 +124,13 @@ const cmd = process.argv[2] ?? "doctor";
 let code: number;
 if (cmd === "init") code = await init();
 else if (cmd === "doctor") code = await doctor();
-else {
-  console.error(`Unknown command "${cmd}". Usage: llm-gateway [init|doctor]`);
+else if (cmd === "policy") {
+  code = await runPolicyCommand(process.argv.slice(3), {
+    out: (text) => console.log(text),
+    err: (text) => console.error(text),
+  });
+} else {
+  console.error(`Unknown command "${cmd}". Usage: llm-gateway [init|doctor|policy]`);
   code = 2;
 }
 process.exit(code);

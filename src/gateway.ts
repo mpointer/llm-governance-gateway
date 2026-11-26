@@ -71,6 +71,8 @@ import {
   type EmbedOptions,
   type EmbedResult,
 } from "./embeddings.js";
+import type { PolicyModel, PolicyReport } from "./policy.js";
+import { PRICING_STALE_AFTER_DAYS } from "./providers.js";
 import { TaskRouter } from "./tasks.js";
 import { missingPlaceholders, renderTemplate } from "./template.js";
 import type {
@@ -84,7 +86,12 @@ import type {
   UsageEntry,
   StoredPrompt,
 } from "./types.js";
-import { MemoryCacheStore, MemoryPromptStore, MemoryRateLimiter } from "./adapters/memory.js";
+import {
+  MemoryCacheStore,
+  MemoryPromptStore,
+  MemoryRateLimiter,
+  MemoryUsageStore,
+} from "./adapters/memory.js";
 
 const SNAPSHOT_LIMIT = 2000;
 // Streaming clocks. Silence for a minute is never legitimate; a stream that
@@ -2919,6 +2926,224 @@ export class Gateway {
       });
     }
     return { run, stepIndex: run.beginStep() };
+  }
+
+  /**
+   * What this gateway is configured to enforce, as plain data: spend limits,
+   * guardrail hooks, the model chain behind each task with its ZDR and
+   * pricing status, tool policy, data handling and timeouts, plus `findings`,
+   * the settings a reviewer should look at. `renderPolicyMarkdown()` turns it
+   * into a document; `llm-gateway policy` prints it.
+   *
+   * It reads configuration and the two stores that decide routing (the task
+   * override store and the chain). It calls no provider and reports no API
+   * key and no endpoint URL. Chains are as resolved for `orgId` now; a store
+   * can change them afterwards. `now` dates the pricing-staleness check.
+   */
+  async describePolicy(opts: { orgId?: string; now?: Date } = {}): Promise<PolicyReport> {
+    const orgId = this.org(opts);
+    const reg = this.registry.describe();
+    const staleBefore = (opts.now ?? new Date()).getTime() - PRICING_STALE_AFTER_DAYS * 86_400_000;
+    const describeModel = (provider: string, model: string): PolicyModel => {
+      const kind = this.registry.isEndpoint(provider)
+        ? "endpoint"
+        : this.registry.isFactory(provider)
+          ? "factory"
+          : "provider";
+      const asOf = kind === "endpoint" ? undefined : this.registry.pricingAsOf(model);
+      return {
+        provider,
+        model,
+        kind,
+        zdr: this.registry.isZdr(provider, model),
+        // A custom endpoint is self-hosted and ledgered at no charge.
+        priced: kind === "endpoint" || this.registry.hasPricing(model),
+        ...(asOf ? { pricingAsOf: asOf, pricingStale: Date.parse(asOf) < staleBefore } : {}),
+      };
+    };
+
+    // The chain behind a call with no task: the store's, else the default.
+    const stored = ((await this.modelConfig?.getChain(orgId)) ?? [])
+      .map((l) => ({ provider: l.factory ?? l.endpoint ?? l.provider, model: l.model }))
+      .filter((l): l is { provider: string; model: string } => !!l.provider);
+    const defaultChain =
+      stored.length > 0
+        ? stored.map((l) => describeModel(l.provider, l.model))
+        : [describeModel(reg.defaultModel.provider, reg.defaultModel.model)];
+    const defaultChainSource =
+      stored.length > 0 ? ("model config store" as const) : reg.defaultModel.source;
+
+    const tasks: PolicyReport["tasks"] = [];
+    for (const task of this.tasks?.tasks() ?? []) {
+      const chain = await this.tasks!.chainForTask(task, orgId);
+      tasks.push({
+        task,
+        label: this.tasks!.label(task),
+        requireZdr: this.tasks!.requiresZdr(task),
+        source: chain[0]!.source,
+        chain: chain.map((c) => describeModel(c.provider, c.model)),
+      });
+    }
+
+    const toolsGoverned = this.toolPolicy !== undefined || this.guardrails?.tool !== undefined;
+    const caps = {
+      mode: this.caps.mode === "observe" ? ("observe" as const) : ("enforce" as const),
+      userDailyCents: this.caps.userDailyCents ?? DEFAULT_USER_CAP_CENTS,
+      anonDailyCents: this.caps.anonDailyCents ?? DEFAULT_ANON_CAP_CENTS,
+      globalDailyCents: this.caps.globalDailyCents ?? DEFAULT_GLOBAL_CAP_CENTS,
+    };
+    const routerInfo = this.tasks?.describe();
+    const hooks = this.obs ?? {};
+
+    // Findings: settings that weaken a control or make a number unreliable.
+    // Facts about this configuration, worst first.
+    const findings: string[] = [];
+    if (this.mock) findings.push("Mock mode is on: no provider is called and no spend is real.");
+    if (this.usage instanceof MemoryUsageStore) {
+      findings.push(
+        "The usage ledger is in memory: it is lost on restart, and the spend limits reset with it.",
+      );
+    }
+    if (caps.mode === "observe") {
+      findings.push(
+        "Spend limits are in observe mode: a breach is recorded and the call is not refused.",
+      );
+    }
+    const off = [
+      caps.userDailyCents === 0 ? "per-user" : null,
+      caps.anonDailyCents === 0 ? "anonymous" : null,
+      caps.globalDailyCents === 0 ? "global" : null,
+    ].filter(Boolean);
+    if (off.length > 0) findings.push(`These daily spend limits are off: ${off.join(", ")}.`);
+    if (this.guardrails?.failOpen) {
+      findings.push("Guardrail hooks fail open: a hook that throws lets the call through.");
+    }
+    if (!this.encrypt) {
+      findings.push(
+        `No encrypt hook: prompt and output snapshots (first ${SNAPSHOT_LIMIT.toLocaleString("en-US")} ` +
+          "characters of each) are stored as plaintext.",
+      );
+    }
+    for (const t of tasks) {
+      if (!t.requireZdr) continue;
+      const not = t.chain.filter((m) => !m.zdr);
+      if (not.length === t.chain.length) {
+        findings.push(
+          `Task "${t.task}" requires ZDR and no model in its chain is ZDR-asserted: every call to it is refused.`,
+        );
+      } else if (not.length > 0) {
+        findings.push(
+          `Task "${t.task}" requires ZDR: ${not.length} of the ${t.chain.length} models in its chain ` +
+            `${not.length === 1 ? "is not ZDR-asserted and is" : "are not ZDR-asserted and are"} skipped ` +
+            `(${not.map((m) => `${m.provider}:${m.model}`).join(", ")}).`,
+        );
+      }
+    }
+    const everyModel = new Map<string, PolicyModel>();
+    for (const m of [...defaultChain, ...tasks.flatMap((t) => t.chain)]) {
+      everyModel.set(`${m.provider}:${m.model}`, m);
+    }
+    for (const [id, m] of everyModel) {
+      if (!m.priced) {
+        findings.push(
+          `${id} has no pricing: its cost is estimated from the fallback rate, so spend limits can undercount it.`,
+        );
+      } else if (m.pricingStale) {
+        findings.push(
+          `Pricing for ${id} is dated ${m.pricingAsOf}, more than ${PRICING_STALE_AFTER_DAYS} days old.`,
+        );
+      }
+    }
+    if (stored.length === 0 && reg.defaultModel.source === "library fallback") {
+      findings.push(
+        `No default model is configured: a call with no task uses the library's fallback, ` +
+          `${reg.defaultModel.provider}:${reg.defaultModel.model}.`,
+      );
+    }
+    if (this.rateLimiter instanceof MemoryRateLimiter) {
+      findings.push(
+        "The rate limiter is in memory: its limits are per process, not shared across instances.",
+      );
+    }
+
+    return {
+      app: this.appId,
+      org: orgId ?? null,
+      mock: this.mock,
+      spendCaps: {
+        ...caps,
+        ...(this.caps.orgDailyCents !== undefined
+          ? { orgDailyCents: this.caps.orgDailyCents }
+          : {}),
+        storeOverrides: {
+          user: typeof this.usage.getUserDailyCapCents === "function",
+          org: typeof this.usage.getOrgDailyCapCents === "function",
+        },
+      },
+      guardrails: {
+        pre: this.guardrails?.pre !== undefined,
+        post: this.guardrails?.post !== undefined,
+        tool: this.guardrails?.tool !== undefined,
+        failOpen: this.guardrails?.failOpen === true,
+      },
+      judge: {
+        ...(this.judgeDefaults?.model ? { model: this.judgeDefaults.model } : {}),
+        ...(this.judgeDefaults?.sampleRate !== undefined
+          ? { sampleRate: this.judgeDefaults.sampleRate }
+          : {}),
+      },
+      ledger: {
+        store: this.usage.constructor.name,
+        snapshotsEncrypted: this.encrypt !== undefined,
+        snapshotLimitChars: SNAPSHOT_LIMIT,
+      },
+      cache: {
+        store: this.cache.constructor.name,
+        ttlSeconds: this.cacheTtlSeconds,
+        invalidatedOnPromptChange: this.scopeCacheToPrompt,
+      },
+      rateLimiter: this.rateLimiter.constructor.name,
+      timeouts: {
+        attemptMs: this.timeouts?.attemptMs ?? DEFAULT_ATTEMPT_MS,
+        ...(this.timeouts?.deadlineMs !== undefined
+          ? { deadlineMs: this.timeouts.deadlineMs }
+          : {}),
+        streamFirstChunkMs: this.timeouts?.streamFirstChunkMs ?? DEFAULT_STREAM_FIRST_CHUNK_MS,
+        streamStallMs: this.timeouts?.streamStallMs ?? DEFAULT_STREAM_STALL_MS,
+      },
+      routing: {
+        defaultChain,
+        defaultChainSource,
+        adminPin: this.modelConfig !== undefined,
+        taskOverrideStore: routerInfo?.overrideStore ?? false,
+        overridesBeatPin: routerInfo?.overridesBeatPin ?? false,
+      },
+      tasks,
+      ...(toolsGoverned
+        ? {
+            tools: Object.entries(this.toolPolicy ?? {}).map(([tool, p]) => ({
+              tool,
+              costCents:
+                typeof p.costCents === "function" ? ("by arguments" as const) : (p.costCents ?? 0),
+              ...(p.maxCalls !== undefined ? { maxCalls: p.maxCalls } : {}),
+              ...(p.maxCents !== undefined ? { maxCents: p.maxCents } : {}),
+            })),
+          }
+        : {}),
+      retention: reg.retention,
+      providers: {
+        withKeys: this.registry.configuredProviders(),
+        endpoints: reg.endpoints,
+        factories: reg.factories,
+        nativeAnthropic: this.anthropicCfg !== undefined,
+        batch: this.batchCfg !== undefined,
+      },
+      pricingStaleAfterDays: PRICING_STALE_AFTER_DAYS,
+      observability: (Object.keys(hooks) as (keyof ObservabilityHooks)[]).filter(
+        (k) => typeof hooks[k] === "function",
+      ),
+      findings,
+    };
   }
 
   /**

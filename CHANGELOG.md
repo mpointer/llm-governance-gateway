@@ -26,6 +26,22 @@ is gated on a downstream integration proving the SPI holds, not on a date.
   `GenerateTextOptions` and `GenerateTextResult` are exported. Design:
   docs/design/run-governance.md.
 
+- **`llm-gateway policy <module>` and `gateway.describePolicy()`: what a
+  deployment is configured to enforce.** The command loads the module that
+  exports your `Gateway` and prints a markdown report: the daily spend limits
+  and their mode, which guardrail hooks exist and whether they fail open, the
+  model chain behind each task with every model's ZDR and pricing status, the
+  tool policy, where the ledger and cache live and whether snapshots are
+  encrypted, and the timeouts. It opens with findings, the settings a reviewer
+  should look at: observe mode, a limit that is off, hooks that fail open,
+  plaintext snapshots, a ZDR task with models that are not ZDR-asserted, a
+  model with no pricing or stale pricing, in-memory stores. `--json` prints
+  the data, `--org` resolves for one tenant. It calls no provider and prints
+  no API key and no endpoint URL. `describePolicy()` returns the same data
+  from code and `renderPolicyMarkdown()` renders it; the `PolicyReport` types
+  are exported. `ProviderRegistry.describe()` and `TaskRouter.describe()` are
+  the read-only accessors behind it.
+
 ### Tests
 
 - **CI now fails when coverage drops below a floor**: 86% statements, 79%
