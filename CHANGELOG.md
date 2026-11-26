@@ -8,7 +8,12 @@ adopters implement, and in practice they have only ever gained capability throug
 *optional* parameters — but they are not yet under a formal semver freeze. 1.0.0
 is gated on a downstream integration proving the SPI holds, not on a date.
 
-## Unreleased
+## 0.19.1
+
+A fix for the Postgres adapter. **No API change and no schema change.** If you
+use `DrizzlePgUsageStore`, upgrade: before this release one NUL byte in a
+prompt lost the ledger row for a call that had already been paid for. SQLite
+and custom stores are unaffected.
 
 ### Fixed
 
