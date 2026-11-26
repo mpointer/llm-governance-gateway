@@ -177,7 +177,11 @@ backlog ids in section 4 of the strategy doc.
       `preflightTools()`. A denial is handed back to the model, it does not
       fail the turn (2)
 - [ ] `llm-gateway policy` report: effective policy per task from config (10)
-- [ ] Postgres adapter test, then a coverage threshold (34)
+- [x] Postgres adapter test: the reference store runs against PGlite on
+      every test run and against a Postgres server through node-postgres in
+      CI. It found and fixed one bug: a NUL byte in a prompt lost the ledger
+      row (34)
+- [ ] Coverage threshold in CI (34)
 - [ ] **1.0.0**: SPI freeze statement, README Status rewritten (17)
 - [ ] Open the control-plane repository with the spec and L1 schema as its
       first commit; no code yet

@@ -14,6 +14,21 @@ jobs:
     strategy:
       matrix:
         node: [20, 22]
+    # A real server for the Postgres adapter suite. src/drizzle-pg.test.ts
+    # always runs on PGlite; with PG_TEST_URL it runs again through
+    # node-postgres, the driver adopters deploy.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -28,6 +43,8 @@ jobs:
         run: npm run typecheck:examples
       - name: Tests with coverage summary
         run: npm run test:coverage
+        env:
+          PG_TEST_URL: postgres://postgres:postgres@localhost:5432/postgres
       - run: npm run build
       - name: Verify publishable contents
         run: npm pack --dry-run
