@@ -8,7 +8,12 @@ adopters implement, and in practice they have only ever gained capability throug
 *optional* parameters — but they are not yet under a formal semver freeze. 1.0.0
 is gated on a downstream integration proving the SPI holds, not on a date.
 
-## Unreleased
+## 0.21.0
+
+Two additions: the governed tool loop for callers that do not stream, and a
+report of what a gateway is configured to enforce. **No breaking change and no
+schema change.** Nothing changes for existing calls; `streamText` behaves as it
+did.
 
 ### Added
 
