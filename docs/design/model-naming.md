@@ -1,12 +1,13 @@
 # Design: the slug names the model
 
-Status: decided 2026-10-28, not implemented. Answers #49, and through it #10,
-#11, #13, #33 and the composition question in #57. Implementation is gated on
-the first adopter that needs it: Scout (the `@pointer/scout` chat engine) moving
-onto the gateway in CareerPointers, then in Future Me Answered once FMA's
-#4402 (one ZDR path for all AI traffic) is decided. Scout also needs a
-tool-calling `streamText` (#14), so this and #14 land together or this lands
-first.
+Status: decided 2026-10-28, **built 2026-11-26** (see "As built" at the end).
+Answers #49, and through it #10, #11, #13, #33 and the composition question in
+#57. It was gated on the first adopter that needs it: Scout (the
+`@pointer/scout` chat engine) moving onto the gateway in CareerPointers, then
+in Future Me Answered once FMA's #4402 (one ZDR path for all AI traffic) is
+decided. It was built ahead of that adoption, from this document and from the
+seam in `pointer-ai`, so that the adoption has something to land on; the
+CareerPointers adapter was not read first.
 
 ## Problem
 
@@ -250,3 +251,45 @@ These would make the change a failure even if it technically worked:
 - `submitBatch`'s `opts.model` stays (deprecated), `runJudge` and
   `runPromptTest` are unchanged.
 - `providerOverride` qualifies every id on the row.
+
+## As built
+
+Everything under Decision is implemented as written, in `src/gateway.ts`
+(`slugChain`, `loadSlugPins`, the `routedBy` stamp in `logUsage`) and
+`ProviderRegistry.resolveSlugModel`. `src/slug-pin.test.ts` has a test for
+each anti-goal above. Calls made in building it:
+
+- **No tier on a slug with `tierModels`.** The precedence list says
+  "`tierModels[tier]` if a tier was passed, else `modelHint`"; the list of
+  calls says such a slug "uses the power model". Both hold: with no tier the
+  row's `modelHint` is used when it has one, and the power model when it does
+  not.
+- **An unusable head is not a pin.** A `modelHint` that is a tier label, or
+  another provider's model, is skipped with one warning and the call resolves
+  as it would with no pin. That is what a bad `modelHint` has always done, and
+  it avoids sending a non-model to a provider. An unusable `fallbackModels`
+  entry is skipped the same way.
+- **A call that never loads its prompt still gets the slug's model.**
+  `streamText` and `generateText` take a caller-assembled prompt, and any
+  method can take an inline `promptBody`. With `slugPinWins` on, those calls
+  read the slug's row for its model fields only (one prompt-store read). A
+  slug with no row and no code default pins nothing and the call runs.
+- **`modelHint` does not inherit from the code default** when a row exists.
+  The per-field merge applies to the two new fields, as written. Changing it
+  for `modelHint` would alter resolution for existing adopters.
+- **`routedBy` is on the rows of the model call**: the completed call and,
+  on the streaming paths, each abandoned link. Not on cache hits, tool rows,
+  the judge, or the zero-token rows `runStructured` and `runText` write for a
+  timed-out attempt.
+- **`routed_by` is a new nullable column** on both reference adapters, so the
+  reference stores can answer "which layer decided". It is one more additive
+  migration.
+- **Batch runs on one model**, so of the slug's chain only its own models
+  count there: the first ZDR-eligible one. `fallbackModels` on a batch is a
+  ZDR alternative, not a failover.
+- **The prompt fingerprint** hashes the two new fields only when one is set,
+  so a prompt that sets neither keeps the cache entries it had.
+- **Not built:** `providerOptions` per link (#11) and the content router
+  (#33), both out of scope above. `PromptDefault` did not gain
+  `providerOverride`; a code default names another provider with a prefixed
+  id.

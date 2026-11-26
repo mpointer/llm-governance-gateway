@@ -143,7 +143,15 @@ const describeIndexes = (db: PgDb) =>
 // two in step: this test fails when a column or an index is added to the
 // table definitions without a line here.
 const ADDED_SINCE_0_10 = {
-  ai_usage_log: ["org_id", "metadata", "guardrails", "run_id", "step_index", "parent_run_id"],
+  ai_usage_log: [
+    "org_id",
+    "metadata",
+    "guardrails",
+    "run_id",
+    "step_index",
+    "parent_run_id",
+    "routed_by",
+  ],
   spend_cap_events: ["org_id", "enforced", "run_id"],
 };
 const HAND_MIGRATIONS = [
@@ -156,6 +164,7 @@ const HAND_MIGRATIONS = [
   "ALTER TABLE ai_usage_log     ADD COLUMN step_index integer",
   "ALTER TABLE ai_usage_log     ADD COLUMN parent_run_id text",
   "ALTER TABLE spend_cap_events ADD COLUMN run_id text",
+  "ALTER TABLE ai_usage_log     ADD COLUMN routed_by text",
   "CREATE INDEX idx_ai_usage_spend     ON ai_usage_log (created_at, cache_hit, user_id)",
   "CREATE INDEX idx_ai_usage_spend_org ON ai_usage_log (created_at, cache_hit, org_id)",
   "CREATE INDEX idx_ai_usage_run       ON ai_usage_log (run_id, step_index)",
@@ -479,6 +488,13 @@ for (const target of targets) {
         const summed = await store.sumSpendCents(new Date(0), "u1");
         expect(summed).toBeCloseTo(10.35, 10);
         expect(run.spentCents).toBeCloseTo(summed, 10);
+      });
+
+      it("persists which resolution layer chose the model, and NULL when none is recorded", async () => {
+        await store.logUsage(entry({ routedBy: "slug" }));
+        await store.logUsage(entry());
+        const ledger = await db.select().from(aiUsageLog).orderBy(asc(aiUsageLog.id));
+        expect(ledger.map((r) => r.routedBy)).toEqual(["slug", null]);
       });
 
       it("records which run's budget a cap event belongs to", async () => {

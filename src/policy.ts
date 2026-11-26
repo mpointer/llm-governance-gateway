@@ -93,7 +93,11 @@ export interface PolicyReport {
     /** A task override store is configured. */
     taskOverrideStore: boolean;
     overridesBeatPin: boolean;
+    /** `slugPinWins`: a prompt row that pins a model outranks every chain here. */
+    slugPinWins: boolean;
   };
+  /** Slugs locked to ZDR in code (`zdr.slugs`), whatever a call says. */
+  zdrLockedSlugs: string[];
   tasks: PolicyTask[];
   /** Undefined when tool governance is off (no `toolPolicy`, no tool hook). */
   tools?: PolicyTool[];
@@ -228,6 +232,17 @@ export function renderPolicyMarkdown(r: PolicyReport): string {
     routingNotes.push(
       "A model config store is configured: an admin pin in it replaces a chain at call time" +
         (r.routing.overridesBeatPin ? ", except where a task override exists." : "."),
+    );
+  }
+  if (r.routing.slugPinWins) {
+    routingNotes.push(
+      "The slug names the model (`slugPinWins`): a prompt row that pins a model is used ahead of " +
+        "every chain above, then its fallbacks, then the no-task chain. Those rows are not read here.",
+    );
+  }
+  if (r.zdrLockedSlugs.length > 0) {
+    routingNotes.push(
+      `Locked to ZDR in code, whatever the call says: ${r.zdrLockedSlugs.map((x) => `\`${x}\``).join(", ")}.`,
     );
   }
   if (r.routing.taskOverrideStore) {

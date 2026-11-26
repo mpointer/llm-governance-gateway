@@ -44,6 +44,8 @@ export const aiUsageLog = sqliteTable(
     runId: text("run_id"),
     stepIndex: integer("step_index"),
     parentRunId: text("parent_run_id"),
+    /** Which resolution layer chose the model. NULL unless `slugPinWins` is on. */
+    routedBy: text("routed_by"),
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   },
   // The indexes ensureTables() creates, declared here too so a schema
@@ -118,6 +120,7 @@ export class DrizzleSqliteUsageStore implements UsageStore {
         runId: entry.runId ?? null,
         stepIndex: entry.stepIndex ?? null,
         parentRunId: entry.parentRunId ?? null,
+        routedBy: entry.routedBy ?? null,
         createdAt: entry.createdAt,
       })
       .returning({ id: aiUsageLog.id });
@@ -205,6 +208,7 @@ async function addColumnIfMissing(
  *    ALTER TABLE ai_usage_log     ADD COLUMN parent_run_id TEXT; -- 0.18.0
  *    ALTER TABLE spend_cap_events ADD COLUMN run_id TEXT;        -- 0.18.0
  *    CREATE INDEX idx_ai_usage_run ON ai_usage_log (run_id, step_index); -- 0.18.0
+ *    ALTER TABLE ai_usage_log     ADD COLUMN routed_by TEXT;     -- 0.22.0
  *  All nullable — existing rows stay unscoped, every unscoped query keeps its
  *  old plan, and a NULL `enforced` reads as "written before the mode existed",
  *  which is exactly what it means. */
@@ -220,7 +224,7 @@ export async function ensureTables(db: SqliteDb): Promise<void> {
     zdr_enforced INTEGER,
     input_text TEXT, output_text TEXT, created_at INTEGER NOT NULL,
     org_id TEXT, metadata TEXT, guardrails TEXT,
-    run_id TEXT, step_index INTEGER, parent_run_id TEXT
+    run_id TEXT, step_index INTEGER, parent_run_id TEXT, routed_by TEXT
   )`);
   // Additive migration for tables created before org scoping existed. SQLite
   // has no ADD COLUMN IF NOT EXISTS, so a duplicate-column error means the
@@ -231,6 +235,7 @@ export async function ensureTables(db: SqliteDb): Promise<void> {
   await addColumnIfMissing(db, "ai_usage_log", "run_id", "run_id TEXT");
   await addColumnIfMissing(db, "ai_usage_log", "step_index", "step_index INTEGER");
   await addColumnIfMissing(db, "ai_usage_log", "parent_run_id", "parent_run_id TEXT");
+  await addColumnIfMissing(db, "ai_usage_log", "routed_by", "routed_by TEXT");
   // "Every row of this run, in order" is the query run lineage exists for.
   await db.run(sql`CREATE INDEX IF NOT EXISTS idx_ai_usage_run
     ON ai_usage_log (run_id, step_index)`);
