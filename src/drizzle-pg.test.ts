@@ -101,9 +101,22 @@ async function rows<T = Record<string, unknown>>(db: PgDb, query: string): Promi
   return res.rows;
 }
 
-async function createTables(db: PgDb, omit: Record<string, string[]> = {}): Promise<void> {
+function createIndexSql(table: PgTable): string[] {
+  const { name, indexes } = getTableConfig(table);
+  return indexes.map((idx) => {
+    const columns = idx.config.columns.map((c) => `"${(c as { name: string }).name}"`);
+    return `CREATE INDEX "${idx.config.name}" ON "${name}" (${columns.join(", ")})`;
+  });
+}
+
+async function createTables(
+  db: PgDb,
+  opts: { omit?: Record<string, string[]>; indexes?: boolean } = {},
+): Promise<void> {
   for (const table of TABLES) {
-    await rows(db, createTableSql(table, omit[getTableConfig(table).name]));
+    await rows(db, createTableSql(table, opts.omit?.[getTableConfig(table).name]));
+    if (opts.indexes === false) continue;
+    for (const statement of createIndexSql(table)) await rows(db, statement);
   }
 }
 
@@ -116,9 +129,19 @@ const describeColumns = (db: PgDb) =>
       ORDER BY table_name, column_name`,
   );
 
+/** Every index in the schema, without the schema name its definition carries. */
+const describeIndexes = (db: PgDb) =>
+  rows<{ indexname: string; tablename: string; def: string }>(
+    db,
+    `SELECT indexname, tablename, substring(indexdef FROM 'USING .*$') AS def
+       FROM pg_indexes
+      WHERE schemaname = current_schema()
+      ORDER BY indexname`,
+  );
+
 // The hand-migration list in the header of adapters/drizzle-pg.ts. Keep the
-// two in step: this test fails when a column is added to the table
-// definitions without a line here.
+// two in step: this test fails when a column or an index is added to the
+// table definitions without a line here.
 const ADDED_SINCE_0_10 = {
   ai_usage_log: ["org_id", "metadata", "guardrails", "run_id", "step_index", "parent_run_id"],
   spend_cap_events: ["org_id", "enforced", "run_id"],
@@ -133,6 +156,9 @@ const HAND_MIGRATIONS = [
   "ALTER TABLE ai_usage_log     ADD COLUMN step_index integer",
   "ALTER TABLE ai_usage_log     ADD COLUMN parent_run_id text",
   "ALTER TABLE spend_cap_events ADD COLUMN run_id text",
+  "CREATE INDEX idx_ai_usage_spend     ON ai_usage_log (created_at, cache_hit, user_id)",
+  "CREATE INDEX idx_ai_usage_spend_org ON ai_usage_log (created_at, cache_hit, org_id)",
+  "CREATE INDEX idx_ai_usage_run       ON ai_usage_log (run_id, step_index)",
 ];
 
 // ---------------------------------------------------------------------------
@@ -538,6 +564,27 @@ for (const target of targets) {
       expect(got[1]!.outputText).toBe("half \ufffd");
     });
 
+    it("declares the indexes the spend sums and the run lookup are served by", async () => {
+      const declared = (await describeIndexes(db)).filter((i) => i.indexname.startsWith("idx_"));
+      expect(declared).toEqual([
+        {
+          indexname: "idx_ai_usage_run",
+          tablename: "ai_usage_log",
+          def: "USING btree (run_id, step_index)",
+        },
+        {
+          indexname: "idx_ai_usage_spend",
+          tablename: "ai_usage_log",
+          def: "USING btree (created_at, cache_hit, user_id)",
+        },
+        {
+          indexname: "idx_ai_usage_spend_org",
+          tablename: "ai_usage_log",
+          def: "USING btree (created_at, cache_hit, org_id)",
+        },
+      ]);
+    });
+
     it("keeps the day boundary right when the session time zone is not UTC", async () => {
       const zoned = await target.open({ timeZone: "Asia/Kolkata" });
       try {
@@ -563,9 +610,10 @@ for (const target of targets) {
     it("reaches today's schema from the original tables through the documented migrations", async () => {
       const legacy = await target.open();
       try {
-        await createTables(legacy.db, ADDED_SINCE_0_10);
+        await createTables(legacy.db, { omit: ADDED_SINCE_0_10, indexes: false });
         for (const statement of HAND_MIGRATIONS) await rows(legacy.db, statement);
         expect(await describeColumns(legacy.db)).toEqual(await describeColumns(db));
+        expect(await describeIndexes(legacy.db)).toEqual(await describeIndexes(db));
 
         const migrated = new DrizzlePgUsageStore(legacy.db);
         const gw = mockGateway(migrated);

@@ -8,6 +8,43 @@ adopters implement, and in practice they have only ever gained capability throug
 *optional* parameters — but they are not yet under a formal semver freeze. 1.0.0
 is gated on a downstream integration proving the SPI holds, not on a date.
 
+## Unreleased
+
+### Changed
+
+- **The Postgres usage table now declares its indexes.** `aiUsageLog` in
+  `llm-governance-gateway/drizzle-pg` carried none, so a schema migrated from
+  it had none, and every spend sum scanned the whole ledger. A governed call
+  makes two of those sums by default before it runs (three with an org cap).
+  The table now declares the three indexes `ensureTables()` has always created
+  on SQLite, under the same names: `idx_ai_usage_spend`,
+  `idx_ai_usage_spend_org` and `idx_ai_usage_run`. Measured on Postgres 16
+  with a 1,000,000-row ledger (about 1 GB, 30 days): the global and per-user
+  sums went from 415 ms and 291 ms to 5 ms and 1 ms, and reading one run's
+  rows from 274 ms to under 1 ms. The indexes take about 95 MB at that size.
+  No API change. SQLite is unchanged.
+
+### Migration
+
+Postgres only. Your next `drizzle-kit generate` emits these, and you can run
+them by hand instead:
+
+```sql
+CREATE INDEX idx_ai_usage_spend     ON ai_usage_log (created_at, cache_hit, user_id);
+CREATE INDEX idx_ai_usage_spend_org ON ai_usage_log (created_at, cache_hit, org_id);
+CREATE INDEX idx_ai_usage_run       ON ai_usage_log (run_id, step_index);
+```
+
+- If you already created `idx_ai_usage_run` from the 0.18.0 notes, the
+  generated migration fails on it as a duplicate (drizzle-kit writes no
+  `IF NOT EXISTS`). Delete that statement from the generated file.
+- On a large live table, a plain `CREATE INDEX` blocks writes while it builds.
+  Build the indexes by hand with `CREATE INDEX CONCURRENTLY`, which cannot run
+  inside a migration's transaction, and delete all three statements from the
+  generated file.
+- Nothing breaks if you skip this. The adapter runs without the indexes, as it
+  did before, only slower.
+
 ## 0.19.1
 
 A fix for the Postgres adapter. **No API change and no schema change.** If you
