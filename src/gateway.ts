@@ -514,6 +514,19 @@ export interface StreamTextOutcome {
   toolDenials?: ToolDenial[];
 }
 
+/**
+ * `generateText` takes what `streamText` takes, minus the notice shown to a
+ * user watching a stream that fails: there is no stream to end.
+ */
+export type GenerateTextOptions = Omit<StreamTextOptions, "degradedNotice">;
+
+/**
+ * What a `generateText` turn produced. The same record `streamText` resolves
+ * `result` with, plus the trace id. There is no `degraded`: a turn that fails
+ * after a tool has run rejects instead of resolving with a notice.
+ */
+export type GenerateTextResult = Omit<StreamTextOutcome, "degraded"> & { traceId: string };
+
 export interface StreamTextResult {
   traceId: string;
   /**
@@ -1709,23 +1722,52 @@ export class Gateway {
   // ===========================================================================
 
   async streamText(opts: StreamTextOptions): Promise<StreamTextResult> {
+    return this.textTurn(opts, false);
+  }
+
+  /**
+   * `streamText` for a caller that does not stream: the same governed turn
+   * and tool loop, awaited. Everything a run, a tool policy and the guardrail
+   * hooks do inside `streamText` they do here, because it is the same loop:
+   * the run's budget stops it between steps, each completed tool step and
+   * each tool call is ledgered as it finishes.
+   *
+   * Two things differ, both because nobody is watching partial text:
+   *  - A link that fails after producing text, but before any tool has run,
+   *    is failed over like any other. Its text was shown to no one.
+   *  - A turn that fails after a tool has run rejects with the error. It is
+   *    not failed over, since that would run the tool again, and there is no
+   *    notice to append. What it spent is ledgered first.
+   *
+   * It reads the provider's streaming endpoint to do this; the stall clocks
+   * (`streamFirstChunkMs`, `streamStallMs`) therefore apply.
+   */
+  async generateText(opts: GenerateTextOptions): Promise<GenerateTextResult> {
+    const turn = await this.textTurn(opts, true);
+    const { degraded: _degraded, ...outcome } = await turn.result;
+    return { traceId: turn.traceId, ...outcome };
+  }
+
+  /** The turn behind `streamText` and, buffered, behind `generateText`. */
+  private async textTurn(opts: StreamTextOptions, buffered: boolean): Promise<StreamTextResult> {
+    const name = buffered ? "generateText" : "streamText";
     const last = opts.messages.at(-1);
     const lastUserText = last?.role === "user" ? messageText(last) : "";
-    if (!lastUserText) throw new Error("streamText: messages must end with a user message");
+    if (!lastUserText) throw new Error(`${name}: messages must end with a user message`);
     if (opts.anthropic && opts.tools) {
       throw new Error(
-        "streamText: `anthropic` native options cannot be combined with AI SDK `tools`",
+        `${name}: \`anthropic\` native options cannot be combined with AI SDK \`tools\``,
       );
     }
     if (opts.anthropic && !this.anthropicCfg && !this.mock) {
       throw new Error(
-        "streamText received `anthropic` native options but GatewayConfig.anthropic is not configured.",
+        `${name} received \`anthropic\` native options but GatewayConfig.anthropic is not configured.`,
       );
     }
 
     const validate = (raw: unknown): string => {
       if (typeof raw !== "string")
-        throw new Error("a streamText post hook must transform to a string");
+        throw new Error(`a ${name} post hook must transform to a string`);
       return raw;
     };
     // The front door renders `promptBody` as the prompt: here, the last user
@@ -1737,7 +1779,7 @@ export class Gateway {
       promptBody: lastUserText,
       cache: false,
     };
-    const fd = await this.frontDoor<undefined, string>("streamText", fdOpts, validate);
+    const fd = await this.frontDoor<undefined, string>(name, fdOpts, validate);
     const { traceId, orgId, prompt, temperature, guardrailRecords, failOpen, lineage } = fd;
     // What this turn has had ledgered so far, for the in-loop budget check.
     const turn = { ledgeredCents: 0 };
@@ -2028,7 +2070,10 @@ export class Gateway {
         const done = { inputTokens: 0, outputTokens: 0 }; // completed steps
         // After the first text delta or tool call, a new link would repeat
         // text the user saw or run a tool twice: degrade instead (spec).
+        // Buffered, nobody has seen the text, so only a tool call is past
+        // the point of no return; `sawOutput` still marks that the link spent.
         let pastNoReturn = false;
+        let sawOutput = false;
         let pendingTools = 0;
         let carried = 0; // chars earlier steps add to the next step's input
         let stepChars = 0;
@@ -2071,12 +2116,16 @@ export class Gateway {
             (async () => {
               for await (const part of guard.stream) {
                 if (part.type === "text-delta") {
-                  pastNoReturn = true;
+                  sawOutput = true;
                   text += part.text;
                   stepText += part.text;
                   stepChars += part.text.length;
-                  out.publish(part.text);
+                  if (!buffered) {
+                    pastNoReturn = true;
+                    out.publish(part.text);
+                  }
                 } else if (part.type === "tool-call") {
+                  sawOutput = true;
                   pastNoReturn = true;
                   toolCalls.push(part);
                   stepToolCalls++;
@@ -2224,6 +2273,21 @@ export class Gateway {
             );
             break;
           }
+          if (pastNoReturn && buffered) {
+            // A tool has run, so no failover; and no one is reading a stream,
+            // so no notice. Ledger what the turn spent, then fail the call.
+            await this.logUsage(
+              row({
+                provider: link.provider,
+                model: link.model,
+                ...rest(used),
+                durationMs: Date.now() - start,
+                text,
+                degraded: true,
+              }),
+            );
+            break;
+          }
           if (pastNoReturn) {
             const notice = opts.degradedNotice ?? DEFAULT_DEGRADED_NOTICE;
             const delta = text ? `\n\n${notice}` : notice;
@@ -2253,7 +2317,22 @@ export class Gateway {
             });
             return;
           }
-          await ledgerFailedLink(link.provider, link.model, Date.now() - linkStart);
+          if (sawOutput) {
+            // Buffered only: the link produced text and then failed. Nothing
+            // was shown, so it can be failed over, but it spent.
+            await this.logUsage(
+              row({
+                provider: link.provider,
+                model: link.model,
+                ...rest(used),
+                durationMs: Date.now() - linkStart,
+                text,
+                ...(callerAborted ? { aborted: true } : {}),
+              }),
+            );
+          } else {
+            await ledgerFailedLink(link.provider, link.model, Date.now() - linkStart);
+          }
           const advanceable =
             !callerAborted && (err instanceof StreamStallError || this.retryable(err));
           if (advanceable && i < links.length - 1) {
@@ -2261,7 +2340,7 @@ export class Gateway {
               provider: link.provider,
               model: link.model,
               reason: err instanceof StreamStallError ? "stall" : "retryable",
-              hadPartialOutput: false,
+              hadPartialOutput: sawOutput,
             };
             failovers.push(failover);
             this.emitObs("onStreamFailover", this.obs?.onStreamFailover, { traceId, ...failover });
@@ -2274,7 +2353,7 @@ export class Gateway {
         }
       }
       const e =
-        lastErr instanceof Error ? lastErr : new Error("streamText: no link produced a result");
+        lastErr instanceof Error ? lastErr : new Error(`${name}: no link produced a result`);
       out.fail(e);
       // The caller's own reason, as given (it need not be an Error).
       rejectResult(opts.signal?.aborted ? opts.signal.reason : e);
@@ -3118,7 +3197,7 @@ export class Gateway {
   // ===========================================================================
 
   private async frontDoor<I, V>(
-    kind: "runStructured" | "runText" | "streamStructured" | "streamText",
+    kind: "runStructured" | "runText" | "streamStructured" | "streamText" | "generateText",
     opts: FrontDoorOptions<I>,
     validate: (raw: unknown) => V,
   ): Promise<FrontDoor<V>> {

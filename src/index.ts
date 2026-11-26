@@ -7,6 +7,8 @@ export {
   type RunTextOptions,
   type RunTextResult,
   type StreamStructuredResult,
+  type GenerateTextOptions,
+  type GenerateTextResult,
   type StreamTextOptions,
   type StreamTextOutcome,
   type StreamTextResult,

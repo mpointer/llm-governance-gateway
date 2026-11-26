@@ -59,7 +59,7 @@ const targets: Target[] = [
   },
   {
     name: "node-postgres",
-    available: PG_TEST_URL !== undefined,
+    available: Boolean(PG_TEST_URL), // an empty value means unset
     async open({ timeZone } = {}) {
       // A schema per handle: reruns and parallel files cannot collide, and
       // nothing is left behind in the database the URL points at.

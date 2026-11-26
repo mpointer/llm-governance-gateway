@@ -594,6 +594,34 @@ const out = await res.result; // after the ledger row: text, toolCalls, toolResu
 
 **Native Anthropic streaming.** Pass `anthropic: { webSearch, thinking, cacheSystem }` and Anthropic links stream through `GatewayConfig.anthropic`'s client (`messages.create({ stream: true })`), with the same failure contract and with web searches and cache tokens on the ledger row. Text messages only, and not combinable with `tools`. For a long non-interactive completion, `runText({ anthropic: { stream: true } })` uses the streaming transport and returns the joined text, which avoids the Anthropic SDK's 10-minute ceiling on non-streaming requests.
 
+#### The same turn without a stream: `generateText`
+
+For an agent nobody is watching: a worker, a queue consumer, a sub-agent. It
+takes what `streamText` takes and resolves with the result.
+
+```ts
+const out = await gw.generateText({ slug: "triage-agent", system, messages, tools, stopWhen: stepCountIs(12), run });
+out.text; out.toolCalls; out.toolResults; out.usage; out.traceId;
+out.runStopped;  // the run's budget cut the loop
+out.toolDenials; // tool calls the policy or a hook refused
+```
+
+It is the same governed loop as `streamText`, not a second one, so a run's
+budget, a tool policy and the guardrail hooks behave identically and write the
+same ledger rows. Two things differ, because no one has read any partial text:
+
+- A link that fails after producing text, but before a tool has run, is failed
+  over like any other. `failovers[].hadPartialOutput` is `true` for it, and its
+  row carries what it spent.
+- A turn that fails after a tool has run **rejects** with the error. It is not
+  failed over, since that would run the tool a second time, and there is no
+  notice to append. What it spent is ledgered first, on a row marked
+  `degraded`.
+
+It reads the provider's streaming endpoint to do this, so `streamFirstChunkMs`
+and `streamStallMs` still bound a silent provider. A provider that cannot
+stream tool calls will not work with it.
+
 ### Editable prompts and the cache
 
 If prompts are edited at runtime — a prompt library, an admin UI, anything that

@@ -169,9 +169,12 @@ backlog ids in section 4 of the strategy doc.
       joins the caller's `stopWhen`, each completed tool step is ledgered as
       it finishes, `result.runStopped` reports the cut. This replaces the
       separate `runAgent()` first planned (1)
-- [ ] Rest of item 1: a cost-velocity breaker (held until a real loop's
-      ledger says what the rule should be) and a non-streaming loop on
-      `generateText` (1)
+- [x] The loop without a stream: `gw.generateText()`, the `streamText` turn
+      buffered and awaited, so one loop carries the budget stop, the per-step
+      rows and tool governance. Not built on the AI SDK's `generateText`; the
+      design doc says why (1)
+- [ ] Rest of item 1: a cost-velocity breaker, held until a real loop's
+      ledger says what the rule should be (1)
 - [x] Governed tool calls: `toolPolicy` (price, `maxCalls`, `maxCents`),
       the `guardrails.tool` hook, a ledger row per tool call,
       `preflightTools()`. A denial is handed back to the model, it does not

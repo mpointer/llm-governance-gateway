@@ -10,6 +10,22 @@ is gated on a downstream integration proving the SPI holds, not on a date.
 
 ## Unreleased
 
+### Added
+
+- **`gateway.generateText()`: the governed tool loop without a stream.** For
+  an agent nobody is watching. It takes what `streamText` takes and resolves
+  with the text, tool calls, tool results, usage, trace id, `runStopped` and
+  `toolDenials`. It is the same loop as `streamText`, buffered, so a run's
+  budget, a tool policy and the guardrail hooks behave identically and write
+  the same ledger rows. Two differences, because no partial text was shown to
+  anyone: a link that fails after producing text but before a tool has run is
+  failed over (`failovers[].hadPartialOutput` is `true`, and its row carries
+  the estimated spend), and a turn that fails after a tool has run rejects
+  with the error instead of resolving with a notice, with its spend ledgered
+  on a row marked `degraded`. It reads the provider's streaming endpoint.
+  `GenerateTextOptions` and `GenerateTextResult` are exported. Design:
+  docs/design/run-governance.md.
+
 ### Tests
 
 - **CI now fails when coverage drops below a floor**: 86% statements, 79%

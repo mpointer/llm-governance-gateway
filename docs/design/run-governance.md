@@ -1,9 +1,10 @@
 # Design: governed runs
 
 Status: **step 1 shipped in 0.18.0** (run lineage, run budget, step ceiling: `src/run.ts`,
-`Gateway.startRun()`). **Step 2 is half shipped (0.19.0)**: the budget stop
-inside a `streamText` tool loop and the per-tool-step ledger rows are in; the
-cost-velocity breaker and the non-streaming loop are not. **Step 3 shipped in
+`Gateway.startRun()`). **Step 2 is shipped but for one part**: the budget
+stop inside a `streamText` tool loop and the per-tool-step ledger rows (0.19.0)
+and `generateText`, the same loop without a stream; the cost-velocity breaker
+is not built. **Step 3 shipped in
 0.19.0** (`src/tools.ts`): tool policy, the tool guardrail hook and a ledger
 row per tool call. The human approval gate is not. This is the
 first item of the plan in
@@ -218,14 +219,45 @@ cut-off estimate minus what was already ledgered.
   growing. Deliberately held: the rule ("how much growth over how many
   steps") should come from a real loop's ledger, which now exists to be
   read, not from a guess.
-- **A non-streaming loop** on `generateText`, for agents that do not stream.
-  The same condition and the same row scheme apply; it is a new public method
-  and wants its own change.
 - **Inner steps are not counted against `maxSteps`.** A run's steps are
   governed calls. The caller's `stopWhen` bounds the inner loop.
 
 This replaces the separate `runAgent()` method first planned: it would have
 been a second door onto the loop `streamText` already runs.
+
+### `generateText`: the loop without a stream
+
+An agent that no one is watching does not want an async iterable; it wants the
+result. `gateway.generateText(opts)` is that, and it is deliberately **not**
+built on the AI SDK's `generateText`. It runs the `streamText` turn in a
+buffered mode and awaits it.
+
+The plan had been a second loop on the SDK's non-streaming call, with the
+budget condition and the row scheme applied again. That is the mistake
+`runAgent()` would have been, one level down: two implementations of the
+budget stop, the per-step rows and the tool wrapper, which then have to be
+kept equal by tests. Buffering the one loop makes them equal by construction.
+A test asserts it anyway: the same scripted turn through both methods writes
+identical ledger rows.
+
+Buffering changes exactly two decisions, both about text nobody has read:
+
+- **The point of no return is the first tool call, not the first text
+  delta.** `streamText` cannot fail over after text, because the user would
+  read it twice. Buffered, the text was shown to no one, so a link that fails
+  mid-answer is abandoned and the next one starts clean. Its row carries the
+  estimated spend rather than zero tokens, and the failover record says
+  `hadPartialOutput: true`.
+- **Past that point, the turn rejects.** `streamText` resolves with a notice
+  appended, because a stream has to end somehow. There is no stream here, and
+  a caller that gets text back would take it for an answer. The spend is
+  ledgered first, on a row marked `degraded`, and the caller gets the error.
+
+The cost of this choice: `generateText` calls the provider's streaming
+endpoint. A provider or local server that cannot stream tool calls does not
+work with it, and the stall clocks apply. If that turns out to matter to an
+adopter, the method's contract does not change: the SDK's non-streaming call
+can be put behind the same signature then, with the shared pieces factored out.
 
 ## Step 3: governed tool calls
 
