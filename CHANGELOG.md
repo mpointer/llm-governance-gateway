@@ -8,7 +8,12 @@ adopters implement, and in practice they have only ever gained capability throug
 *optional* parameters — but they are not yet under a formal semver freeze. 1.0.0
 is gated on a downstream integration proving the SPI holds, not on a date.
 
-## Unreleased
+## 0.20.0
+
+The usage table's indexes, declared where drizzle-kit can see them. **No API
+change.** A minor version because your next `drizzle-kit generate` emits three
+new `CREATE INDEX` statements: read Migration below before you apply it. A
+SQLite database set up with `ensureTables()` needs nothing.
 
 ### Changed
 
