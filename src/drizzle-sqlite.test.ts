@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import initSqlJs from "sql.js";
 import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/sql-js";
+import { getTableConfig } from "drizzle-orm/sqlite-core";
 import { z } from "zod";
 import { Gateway } from "./gateway.js";
 import { SpendCapError } from "./errors.js";
@@ -100,6 +101,37 @@ describe("DrizzleSqliteUsageStore integration", () => {
       ["run-x", 0, null],
       ["run-x", 1, null],
       [null, null, null],
+    ]);
+  });
+
+  it("ensureTables builds exactly the indexes the table definition declares", async () => {
+    // sql.js returns positional arrays, other drivers objects.
+    const cell = (row: unknown, i: number, key: string) =>
+      Array.isArray(row) ? row[i] : (row as Record<string, unknown>)[key];
+    const names = await db.all(
+      sql.raw(
+        `SELECT name FROM sqlite_master
+          WHERE type = 'index' AND tbl_name = 'ai_usage_log' AND name LIKE 'idx_%'
+          ORDER BY name`,
+      ),
+    );
+    const built = [];
+    for (const row of names) {
+      const name = String(cell(row, 0, "name"));
+      const info = await db.all(sql.raw(`PRAGMA index_info(${name})`));
+      built.push({ name, columns: info.map((r) => cell(r, 2, "name")) });
+    }
+    const declared = getTableConfig(aiUsageLog)
+      .indexes.map((i) => ({
+        name: i.config.name,
+        columns: i.config.columns.map((c) => (c as { name: string }).name),
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    expect(built).toEqual(declared);
+    expect(declared).toEqual([
+      { name: "idx_ai_usage_run", columns: ["run_id", "step_index"] },
+      { name: "idx_ai_usage_spend", columns: ["created_at", "cache_hit", "user_id"] },
+      { name: "idx_ai_usage_spend_org", columns: ["created_at", "cache_hit", "org_id"] },
     ]);
   });
 
